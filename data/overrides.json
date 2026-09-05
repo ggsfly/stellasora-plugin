@@ -1,0 +1,12 @@
+{
+  "_comment": "人工修正层：构建/更新字典后应用。entries 覆盖指定 ID 的字段；aliases 追加名字索引别名（值必须是 dict.json 中存在的 ID）；replacements 对全部条目的 cn 做子串替换（用于游戏内术语改名归一，如 心钥→心链）。用于修正上游解包数据的笔误或补充俗称。",
+  "entries": {
+    "CharacterDes.157.1": { "cn": "花铃" }
+  },
+  "aliases": {
+    "花玲": "Character.157.1"
+  },
+  "replacements": {
+    "心钥": "心链"
+  }
+}

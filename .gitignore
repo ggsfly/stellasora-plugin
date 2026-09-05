@@ -1,0 +1,15 @@
+# 运行时配置由 Runner 根据 config_model 生成，不属插件源码（官方文档要求）
+/config.toml
+
+# 运行时缓存与临时输出
+data/.cache/
+data/webcache/
+data/cli_q*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 归档（非必要数据，见 docs/stage1_report.md）
+data/_archive/
