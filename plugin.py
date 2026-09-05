@@ -15,7 +15,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
@@ -77,7 +77,7 @@ class AccessControlConfig(PluginConfigBase):
     __ui_icon__ = "shield"
     __ui_order__ = 0
 
-    mode: str = Field(
+    mode: Literal["off", "whitelist", "blacklist"] = Field(
         default="off",
         description="鉴权模式：whitelist=仅白名单可用；blacklist=黑名单内禁用；off=不限制",
     )
@@ -140,6 +140,21 @@ class QueryConfig(PluginConfigBase):
     )
 
 
+class AliasEntry(PluginConfigBase):
+    """单条中文别名映射（WebUI 列表编辑器每行 = 一个 AliasEntry）。"""
+
+    alias: str = Field(
+        default="",
+        description="俗称/简称/别名",
+        json_schema_extra={"label": "俗称"},
+    )
+    official: str = Field(
+        default="",
+        description="官方中文名",
+        json_schema_extra={"label": "官方名"},
+    )
+
+
 class OverridesConfig(PluginConfigBase):
     """中文别名/俗称 → 官方中文名映射配置。"""
 
@@ -147,8 +162,11 @@ class OverridesConfig(PluginConfigBase):
     __ui_icon__ = "edit"
     __ui_order__ = 2
 
-    aliases: dict[str, str] = Field(
-        default_factory=lambda: {"春科": "科洛妮丝（新春）", "土": "地"},
+    aliases: list[AliasEntry] = Field(
+        default_factory=lambda: [
+            AliasEntry(alias="春科", official="科洛妮丝（新春）"),
+            AliasEntry(alias="土", official="地"),
+        ],
         description="中文别名/俗称→官方中文名映射。用户在群里用简称提问时自动解析到官方角色/术语名。",
     )
 
@@ -179,8 +197,15 @@ class StellaSoraPlugin(MaiBotPlugin):
         """将 config 中的 [overrides.aliases] 中文别名应用到运行时查词服务层。"""
         try:
             overrides = getattr(self.config, "overrides", None)
-            aliases = overrides.aliases if overrides else {}
-            configure_overrides(aliases=aliases)
+            if overrides and overrides.aliases:
+                alias_dict = {
+                    entry.alias: entry.official
+                    for entry in overrides.aliases
+                    if entry.alias and entry.official
+                }
+            else:
+                alias_dict = {}
+            configure_overrides(aliases=alias_dict)
         except Exception as exc:
             self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
 

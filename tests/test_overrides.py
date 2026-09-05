@@ -3,17 +3,20 @@
 """中文别名映射（[overrides.aliases]）单元测试。
 
 验证项：
-  1. DictLookup 中文俗称 → 官方中文名解析（"春科" → "科洛妮丝（新春）", "土" → "地"）。
-  2. DictLookup 多层链式别名与大小写回落。
-  3. service.configure_overrides 动态生效与热重载。
-  4. StellaSoraConfig 与 OverridesConfig Pydantic 模型校验（仅 aliases，无 replacements）。
-  5. TermReplacer 不再携带 custom_replacements（确认已移除）。
+  1. Pydantic 模型：AliasEntry 结构、OverridesConfig 默认值为 list[AliasEntry]。
+  2. list[AliasEntry] → dict 转换逻辑（_apply_overrides_config 内部）。
+  3. DictLookup 中文俗称 → 官方中文名解析（"春科" → "科洛妮丝（新春）", "土" → "地"）。
+  4. DictLookup 多层链式别名。
+  5. service.configure_overrides 动态生效与热重载。
+  6. access_control.mode 为 Literal 下拉选项。
+  7. TermReplacer 不再携带 custom_replacements（确认已移除）。
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import get_args, get_origin
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -21,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 import service
 from dict_lookup import DictLookup
-from plugin import OverridesConfig, StellaSoraConfig
+from plugin import AccessControlConfig, AliasEntry, OverridesConfig, StellaSoraConfig
 from term_replace import TermReplacer
 
 DATA_DIR = ROOT / "data"
@@ -33,6 +36,65 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"{name} -> {'PASS' if ok else 'FAIL'}{(': ' + detail) if detail else ''}")
     if not ok:
         failures.append(name)
+
+
+def test_config_models():
+    """测试 Pydantic 配置模型结构与默认值。"""
+    cfg = StellaSoraConfig()
+    check(
+        "Config: 默认包含 overrides 属性",
+        hasattr(cfg, "overrides") and isinstance(cfg.overrides, OverridesConfig),
+    )
+
+    # aliases 应为 list[AliasEntry]
+    check(
+        "Config: overrides.aliases 是 list",
+        isinstance(cfg.overrides.aliases, list),
+    )
+    check(
+        "Config: 默认 aliases 非空且元素为 AliasEntry",
+        len(cfg.overrides.aliases) > 0 and all(isinstance(a, AliasEntry) for a in cfg.overrides.aliases),
+    )
+    check(
+        "Config: 默认第一条 alias='春科' official='科洛妮丝（新春）'",
+        cfg.overrides.aliases[0].alias == "春科" and cfg.overrides.aliases[0].official == "科洛妮丝（新春）",
+    )
+
+    # 确认 replacements 字段已移除
+    check(
+        "Config: overrides 不再包含 replacements",
+        not hasattr(cfg.overrides, "replacements"),
+    )
+
+    # access_control.mode 应为 Literal
+    mode_field = AccessControlConfig.model_fields["mode"]
+    origin = get_origin(mode_field.annotation)
+    args = get_args(mode_field.annotation)
+    check(
+        "Config: access_control.mode 是 Literal['off','whitelist','blacklist']",
+        str(origin) == "typing.Literal" and set(args) == {"off", "whitelist", "blacklist"},
+        f"origin={origin} args={args}",
+    )
+
+
+def test_list_to_dict_conversion():
+    """测试 list[AliasEntry] → dict 转换逻辑（_apply_overrides_config 内部）。"""
+    cfg = StellaSoraConfig()
+    alias_dict = {
+        entry.alias: entry.official
+        for entry in cfg.overrides.aliases
+        if entry.alias and entry.official
+    }
+    check(
+        "list→dict: 春科→科洛妮丝（新春）",
+        alias_dict.get("春科") == "科洛妮丝（新春）",
+        str(alias_dict),
+    )
+    check(
+        "list→dict: 土→地",
+        alias_dict.get("土") == "地",
+        str(alias_dict),
+    )
 
 
 def test_dict_lookup_aliases():
@@ -88,24 +150,6 @@ def test_service_configure_overrides():
     )
 
 
-def test_config_models():
-    """测试 Pydantic 配置模型结构与默认值。"""
-    cfg = StellaSoraConfig()
-    check(
-        "Config: 默认包含 overrides 属性",
-        hasattr(cfg, "overrides") and isinstance(cfg.overrides, OverridesConfig),
-    )
-    check(
-        "Config: overrides 包含 aliases 字典",
-        isinstance(cfg.overrides.aliases, dict),
-    )
-    # 确认 replacements 字段已移除
-    check(
-        "Config: overrides 不再包含 replacements",
-        not hasattr(cfg.overrides, "replacements"),
-    )
-
-
 def test_term_replacer_no_custom_replacements():
     """确认 TermReplacer 不再接受 custom_replacements 参数。"""
     import inspect
@@ -123,11 +167,12 @@ def test_term_replacer_no_custom_replacements():
 
 def main():
     print("=" * 60)
-    print("中文别名映射测试 (test_overrides)")
+    print("中文别名映射与 WebUI 适配测试 (test_overrides)")
     print("=" * 60)
+    test_config_models()
+    test_list_to_dict_conversion()
     test_dict_lookup_aliases()
     test_service_configure_overrides()
-    test_config_models()
     test_term_replacer_no_custom_replacements()
     print("=" * 60)
     if failures:
