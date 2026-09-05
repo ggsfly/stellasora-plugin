@@ -40,28 +40,26 @@ _instances: Dict[str, tuple] = {}
 # 会双份解析 8.8MB 字典（【Metis 修订 #11】）
 _init_lock = threading.Lock()
 _pending_aliases: Dict[str, str] = {}
-_pending_replacements: Dict[str, str] = {}
 
 
 def configure_overrides(
     aliases: Optional[Dict[str, str]] = None,
-    replacements: Optional[Dict[str, str]] = None,
 ) -> None:
-    """配置运行时的别名与文本替换规则（由 plugin.py 或配置加载时调用）。"""
-    global _pending_aliases, _pending_replacements
+    """配置运行时的中文别名映射（由 plugin.py 或配置加载时调用）。
+
+    仅作用于 lookup_term 查询解析阶段：用户在群里用简称/俗称提问时，
+    自动映射到官方中文名再查攻略。
+    """
+    global _pending_aliases
     with _init_lock:
         if aliases is not None:
             _pending_aliases = dict(aliases)
-        if replacements is not None:
-            _pending_replacements = dict(replacements)
 
         key = str(_DATA_DIR)
         if key in _instances:
-            lookup, _last, _st, _gd, replacer = _instances[key]
+            lookup, _last, _st, _gd, _replacer = _instances[key]
             if aliases is not None:
                 lookup.set_custom_aliases(_pending_aliases)
-            if replacements is not None:
-                replacer.set_custom_replacements(_pending_replacements)
 
 
 def _get_services(cache_dir: Path) -> tuple:
@@ -86,7 +84,6 @@ def _get_services(cache_dir: Path) -> tuple:
             replacer = _term_replace_module.TermReplacer(
                 _DATA_DIR,
                 preloaded_dict=lookup._main_dict,
-                custom_replacements=_pending_replacements,
             )
             _term_replace_module._replacer = replacer
             _instances[key] = (

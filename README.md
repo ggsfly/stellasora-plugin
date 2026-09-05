@@ -181,28 +181,33 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
   名字译名稳定，`.2+` 仅做增量贡献
 - `DictLookup.get_full(id)` / `service.lookup_full(id)` 按 ID 查询完整文本（现即主字典）
 
-### 人工修正与自定义覆盖
+### 中文别名与人工修正
 
 插件支持两种维度的自定义覆盖：
 
-1. **运行时配置覆盖（推荐）**：在 `config.toml` 中配置 `[overrides]`（可在 WebUI 直接填写，热更新即时生效）：
-   - `aliases`：别名/俗称/输入变体映射（如 `"土" = "地"`, `"花玲" = "花铃"`），查询词自动解析到官方术语。
-   - `replacements`：攻略资料文本替换规则（如 `"Finale Echoing" = "终焉绝响"`），优先于内置字典执行，支持中英文短语直接替换。
+1. **运行时中文别名（推荐）**：在 `config.toml` 中配置 `[overrides.aliases]`（可在 WebUI 直接填写，热更新即时生效）。
+   用户在群里用简称或俗称提问时，插件自动映射到官方中文名再查攻略：
+   ```toml
+   [overrides]
+   # 中文别名/俗称 → 官方中文名映射
+   # 用户在群里用简称提问时自动解析到官方角色/术语名
+   aliases = { "春科" = "科洛妮丝（新春）", "土" = "地" }
+   ```
 
 2. **底层数据修正（构建时）**：上游解包数据偶有笔误（如 `CharacterDes.157.1` 的「花玲」应为官方「花铃」）。
-`data/overrides.json` 是人工维护的底层修正层，构建/更新字典时自动应用：
+   `data/overrides.json` 是人工维护的底层修正层，构建/更新字典时自动应用：
 
-```json
-{
-  "entries": { "CharacterDes.157.1": { "cn": "花铃" } },
-  "aliases": { "花玲": "Character.157.1" }
-}
-```
+   ```json
+   {
+     "entries": { "CharacterDes.157.1": { "cn": "花铃" } },
+     "aliases": { "花玲": "Character.157.1" }
+   }
+   ```
 
-- `entries`：按 ID 覆盖条目字段（en/cn/cat），修正笔误
-- `aliases`：向名字索引追加别名（俗称/变体写法 → 主表 ID），目标 ID 必须存在
-- 另有查询侧兜底：查词命中非 Character 条目但存在同英文名的 Character 条目时，
-  自动改路由到角色条目，避免攻略抓取被静默跳过
+   - `entries`：按 ID 覆盖条目字段（en/cn/cat），修正笔误
+   - `aliases`：向名字索引追加别名（俗称/变体写法 → 主表 ID），目标 ID 必须存在
+   - 另有查询侧兜底：查词命中非 Character 条目但存在同英文名的 Character 条目时，
+     自动改路由到角色条目，避免攻略抓取被静默跳过
 
 ## 开发
 

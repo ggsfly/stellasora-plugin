@@ -140,7 +140,6 @@ class TermReplacer:
         self,
         data_dir: Path,
         preloaded_dict: Optional[dict] = None,
-        custom_replacements: Optional[Dict[str, str]] = None,
     ):
         if preloaded_dict is not None:
             # service 层传入已解析的字典：跳过 json.load，dict.json 全进程只解析一次
@@ -170,28 +169,6 @@ class TermReplacer:
         self._single_pass = re.compile(
             "(?<![A-Za-z])(?:" + "|".join(re.escape(t) for t in self._sorted_terms) + ")(?![A-Za-z])"
         )
-        self.custom_replacements: Dict[str, str] = {}
-        self._custom_patterns: List[tuple] = []
-        if custom_replacements:
-            self.set_custom_replacements(custom_replacements)
-
-    def set_custom_replacements(self, replacements: Dict[str, str]) -> None:
-        """设置用户自定义文本替换规则（优先于内置字典替换）。"""
-        self.custom_replacements = dict(replacements or {})
-        # 按键长度降序排序，最长短语优先替换
-        sorted_keys = sorted(
-            self.custom_replacements.keys(), key=lambda s: len(s), reverse=True
-        )
-        patterns = []
-        for term in sorted_keys:
-            if not term:
-                continue
-            # 若首尾为英文字母则加词边界，避免子词误伤；非英文/混合直接匹配
-            left = r"(?<![A-Za-z])" if term[0].isalpha() else ""
-            right = r"(?![A-Za-z])" if term[-1].isalpha() else ""
-            pattern = re.compile(left + re.escape(term) + right)
-            patterns.append((pattern, self.custom_replacements[term]))
-        self._custom_patterns = patterns
 
     @staticmethod
     def _build_mapping(main: dict) -> Dict[str, str]:
@@ -230,14 +207,7 @@ class TermReplacer:
         """
         if not text:
             return text
-        # 1. 优先执行用户自定义替换（英文术语、特定笔误或特殊称谓）
-        for pattern, replacement in self._custom_patterns:
-            text = pattern.sub(replacement, text)
-        # 2. 内置大字典单遍交替正则替换
         text = self._single_pass.sub(lambda m: self.mapping[m.group(0)], text)
-        # 3. 对字典替换后的中文文本再次执行自定义替换（用于术语改名归一，如 心钥→心链）
-        for pattern, replacement in self._custom_patterns:
-            text = pattern.sub(replacement, text)
         return text
 
     def replace_legacy(self, text: str) -> str:

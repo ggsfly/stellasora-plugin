@@ -141,22 +141,15 @@ class QueryConfig(PluginConfigBase):
 
 
 class OverridesConfig(PluginConfigBase):
-    """自定义覆盖与别名配置。"""
+    """中文别名/俗称 → 官方中文名映射配置。"""
 
-    __ui_label__ = "自定义覆盖"
+    __ui_label__ = "中文别名"
     __ui_icon__ = "edit"
     __ui_order__ = 2
 
     aliases: dict[str, str] = Field(
-        default_factory=lambda: {"土": "地", "花玲": "花铃"},
-        description="别名/俗称/上游笔误映射：将俗称或输入词映射为官方中文名、英文名或词条ID。"
-        "例如：{\"土\": \"地\", \"花玲\": \"花铃\"}",
-    )
-
-    replacements: dict[str, str] = Field(
-        default_factory=lambda: {"Finale Echoing": "终焉绝响"},
-        description="攻略文本替换规则：直接将攻略资料中的英文短语或笔误替换为指定中文文本。"
-        "例如：{\"Finale Echoing\": \"终焉绝响\"}",
+        default_factory=lambda: {"春科": "科洛妮丝（新春）", "土": "地"},
+        description="中文别名/俗称→官方中文名映射。用户在群里用简称提问时自动解析到官方角色/术语名。",
     )
 
 
@@ -183,14 +176,13 @@ class StellaSoraPlugin(MaiBotPlugin):
     # ===== 生命周期 =====
 
     def _apply_overrides_config(self) -> None:
-        """将 config 中的 [overrides] 自定义别名与替换应用到运行时服务层。"""
+        """将 config 中的 [overrides.aliases] 中文别名应用到运行时查词服务层。"""
         try:
             overrides = getattr(self.config, "overrides", None)
             aliases = overrides.aliases if overrides else {}
-            replacements = overrides.replacements if overrides else {}
-            configure_overrides(aliases=aliases, replacements=replacements)
+            configure_overrides(aliases=aliases)
         except Exception as exc:
-            self.ctx.logger.warning("应用 overrides 配置失败: %s", exc)
+            self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
 
     async def on_load(self) -> None:
         """插件加载：准备运行时缓存目录并同步 overrides 配置。

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""自定义覆盖与别名（[overrides]）单元测试。
+"""中文别名映射（[overrides.aliases]）单元测试。
 
 验证项：
-  1. DictLookup 别名解析（"土" -> "地", "花玲" -> "花铃"）。
+  1. DictLookup 中文俗称 → 官方中文名解析（"春科" → "科洛妮丝（新春）", "土" → "地"）。
   2. DictLookup 多层链式别名与大小写回落。
-  3. TermReplacer 自定义替换（"Finale Echoing" -> "终焉绝响"）。
-  4. TermReplacer 优先级高于内置字典映射。
-  5. service.configure_overrides 动态生效与热重载。
-  6. StellaSoraConfig 与 OverridesConfig Pydantic 模型校验。
+  3. service.configure_overrides 动态生效与热重载。
+  4. StellaSoraConfig 与 OverridesConfig Pydantic 模型校验（仅 aliases，无 replacements）。
+  5. TermReplacer 不再携带 custom_replacements（确认已移除）。
 """
 
 from __future__ import annotations
@@ -37,9 +36,13 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def test_dict_lookup_aliases():
-    """测试 DictLookup 的自定义别名解析。"""
-    lookup = DictLookup(DATA_DIR, custom_aliases={"土": "地", "花玲": "花铃", "Cat": "Amber"})
-    
+    """测试 DictLookup 的中文俗称→官方名解析。"""
+    lookup = DictLookup(DATA_DIR, custom_aliases={
+        "春科": "科洛妮丝（新春）",
+        "土": "地",
+        "花玲": "花铃",
+    })
+
     # "土" 映射到 "地" -> UIText.T_Element_Attr_3.1
     res_tu = lookup.lookup_term("土")
     check(
@@ -56,15 +59,15 @@ def test_dict_lookup_aliases():
         str(res_hl),
     )
 
-    # 大小写不敏感
-    res_cat = lookup.lookup_term("cat")
+    # "春科" 映射到 "科洛妮丝（新春）"
+    res_ck = lookup.lookup_term("春科")
     check(
-        "DictLookup: cat (lowercase) -> Amber",
-        bool(res_cat and res_cat.get("en") == "Amber"),
-        str(res_cat),
+        "DictLookup: 春科 -> 科洛妮丝（新春）",
+        bool(res_ck and res_ck.get("cn") == "科洛妮丝（新春）"),
+        str(res_ck),
     )
 
-    # 运行时更新 set_custom_aliases
+    # 链式别名：泥土 -> 土 -> 地
     lookup.set_custom_aliases({"泥土": "土", "土": "地"})
     res_chain = lookup.lookup_term("泥土")
     check(
@@ -74,41 +77,9 @@ def test_dict_lookup_aliases():
     )
 
 
-def test_term_replacer_custom():
-    """测试 TermReplacer 自定义替换。"""
-    replacer = TermReplacer(
-        DATA_DIR,
-        custom_replacements={
-            "Finale Echoing": "终焉绝响",
-            "Custom Spell": "自定义法术",
-            "心钥": "心链",
-        },
-    )
-
-    raw_text = "Trekker uses Finale Echoing and Custom Spell with 心钥."
-    replaced = replacer.replace(raw_text)
-    check(
-        "TermReplacer: Finale Echoing & Custom Spell",
-        "终焉绝响" in replaced and "自定义法术" in replaced and "心链" in replaced,
-        replaced,
-    )
-
-    # 动态 set_custom_replacements
-    replacer.set_custom_replacements({"Another Echo": "另一回响"})
-    res2 = replacer.replace("Uses Another Echo now.")
-    check(
-        "TermReplacer: set_custom_replacements 动态更新",
-        "另一回响" in res2 and "Another Echo" not in res2,
-        res2,
-    )
-
-
 def test_service_configure_overrides():
-    """测试 service.configure_overrides 动态配置。"""
-    service.configure_overrides(
-        aliases={"土": "地", "花玲": "花铃"},
-        replacements={"Finale Echoing": "终焉绝响"},
-    )
+    """测试 service.configure_overrides 动态配置中文别名。"""
+    service.configure_overrides(aliases={"土": "地", "花玲": "花铃"})
     res = service.lookup_term("土")
     check(
         "service: lookup_term('土') 动态别名",
@@ -125,19 +96,39 @@ def test_config_models():
         hasattr(cfg, "overrides") and isinstance(cfg.overrides, OverridesConfig),
     )
     check(
-        "Config: overrides 默认包含 aliases 与 replacements",
-        isinstance(cfg.overrides.aliases, dict) and isinstance(cfg.overrides.replacements, dict),
+        "Config: overrides 包含 aliases 字典",
+        isinstance(cfg.overrides.aliases, dict),
+    )
+    # 确认 replacements 字段已移除
+    check(
+        "Config: overrides 不再包含 replacements",
+        not hasattr(cfg.overrides, "replacements"),
+    )
+
+
+def test_term_replacer_no_custom_replacements():
+    """确认 TermReplacer 不再接受 custom_replacements 参数。"""
+    import inspect
+    sig = inspect.signature(TermReplacer.__init__)
+    check(
+        "TermReplacer: __init__ 不含 custom_replacements 参数",
+        "custom_replacements" not in sig.parameters,
+        str(sig.parameters),
+    )
+    check(
+        "TermReplacer: 无 set_custom_replacements 方法",
+        not hasattr(TermReplacer, "set_custom_replacements"),
     )
 
 
 def main():
     print("=" * 60)
-    print("自定义覆盖与别名测试 (test_overrides)")
+    print("中文别名映射测试 (test_overrides)")
     print("=" * 60)
     test_dict_lookup_aliases()
-    test_term_replacer_custom()
     test_service_configure_overrides()
     test_config_models()
+    test_term_replacer_no_custom_replacements()
     print("=" * 60)
     if failures:
         print(f"FAILED: {len(failures)} 项失败: {failures}")
