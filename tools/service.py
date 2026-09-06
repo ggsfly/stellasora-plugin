@@ -256,12 +256,12 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
     支援位**；锚点行队名角色不参与成员提取（队伍命名可 ≠ 主控，如暗队
     Otoha (Laser) 的主控是 Cosette）。
 
-    问询角色可能出现在**多个队伍**（如珂赛特既是花铃队支援，又是 Otoha (Laser)
-    队主控）：她作为锚点行队名 → 该区块收集；她作为区块体成员 → 其所属区块也收集
-    （同角色多 build 连续锚点自动并入该区块）。
+    问询角色可能出现在**多个队伍**（如珂赛特既是 Otoha (Laser) 队主控，又是
+    花铃/翡冷翠等队的支援）：她作为锚点行队名 → 该区块收集（asker_role=main）；
+    她作为区块体成员 → 其所属区块也收集（asker_role=support）。
 
-    返回区块信息列表 [{name, text, members}, ...]，按页面出现顺序排列；
-    未命中时返回 []。
+    返回区块信息列表 [{name, text, members, asker_role}, ...]，按页面出现顺序
+    排列；未命中时返回 []。
     """
     if not infodoc_text:
         return []
@@ -273,21 +273,20 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
     lines = infodoc_text.split("\n")
 
     # 1. 收集全部锚点行及其队名（剥离 ⏏ 后的首个非空单元格）
-    anchors: list = []  # (行号, 队名, 队名角色名或 None)
+    anchors: list = []  # (行号, 队名)
     for li, line in enumerate(lines):
         if "⏏" in line or "Back to Top" in line:
             cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
             cells = _split_cells(cleaned)
             if not cells:
                 continue  # 页尾 "⏏ BACK TO TOP ⏏" 等纯导航行
-            owner = next((n for n, r in name_res if r.match(cells[0])), None)
-            anchors.append((li, cells[0], owner))
+            anchors.append((li, cells[0]))
     if not anchors:
         return []
 
     # 2. 逐区块确定边界与成员；收集包含问询角色的区块
     results: list = []
-    for idx, (start, team_name, _) in enumerate(anchors):
+    for idx, (start, team_name) in enumerate(anchors):
         end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(lines)
 
         # 区块体 = 锚点行之后到下一锚点行之前（排除其他锚点行）
@@ -305,9 +304,43 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
         # 收集条件：问询角色是队名角色 或 区块体成员
         if char_re.match(team_name) or character_en in seen:
             block = re.sub(r"\n{3,}", "\n\n", "\n".join(block_lines)).strip()
-            results.append({"name": team_name, "text": block, "members": list(members)})
+            # asker_role：区块体首个角色详情段 = 主控位；问询角色排首位则主控
+            asker_role = "main" if members and members[0] == character_en else "support"
+            results.append({
+                "name": team_name,
+                "text": block,
+                "members": list(members),
+                "asker_role": asker_role,
+            })
 
     return results
+
+
+def _extract_member_segment(block_lines: list, char_re) -> list:
+    """从队伍区块中截取**问询角色的详情子段**（支援位问询的资料精简）。
+
+    角色详情段 = 该角色的 'X (星级)' 行（或其 Description 段头行）起，
+    到下一个 Description 段头行 / 区块尾。未定位到角色行时返回原区块（回退）。
+    """
+    char_idx = -1
+    for i, line in enumerate(block_lines):
+        cells = _split_cells(line)
+        if any(char_re.match(c) for c in cells):
+            char_idx = i
+            break
+    if char_idx < 0:
+        return block_lines
+    seg_start = 0
+    for i in range(char_idx, -1, -1):
+        if block_lines[i].strip().lower().startswith("description"):
+            seg_start = i
+            break
+    seg_end = len(block_lines)
+    for i in range(char_idx + 1, len(block_lines)):
+        if block_lines[i].strip().lower().startswith("description"):
+            seg_end = i
+            break
+    return block_lines[seg_start:seg_end]
 
 
 def extract_rotation(index_text: str, character_en: str) -> str:
@@ -436,9 +469,11 @@ def _restructure_block(body_lines: list) -> list:
             mode = "disc"
             out.append("=== 推荐主位秘纹 ===")
             continue
-        # 纹章锚：Emblem 标签行，或 Affix Priority 数据首行（部分区块无 Emblem 标签）
+        # 纹章锚：短标签行（"Optional Potentials | Emblem" 等），或 Affix Priority
+        # 数据首行（部分区块无 Emblem 标签）。长叙述句中的 "emblem" 单词不触发。
         first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
-        if "emblem" in low or (first_is_affix and mode != "emblem"):
+        is_emblem_label = "emblem" in low and len(line) <= 60
+        if is_emblem_label or (first_is_affix and mode != "emblem"):
             _flush_emblem()
             mode = "emblem"
             if not out or not out[-1].startswith("=== 纹章 ==="):
@@ -456,6 +491,9 @@ def _restructure_block(body_lines: list) -> list:
         if mode == "emblem":
             # 只有数据形状的行才参与转置；描述/Key Notes 行原样输出并退出 emblem 模式
             if _is_emblem_data_line(cells):
+                # 行首标签格（Affix Priority/词条优先级）跳过——否则会混入转置词条
+                if cells[0].lower() in ("affix priority", "词条优先级"):
+                    cells = cells[1:]
                 emblem_rows.append(cells)
             else:
                 _flush_emblem()
@@ -550,7 +588,7 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
                     for names, member_display in slot_groups:
                         # 队名过字典替换（角色名+build 名均中文化，保留流派信息）
                         team_names = [strip_game_markup(replacer.replace(n)) for n in names]
-                        slot_line = f"[{' / '.join(team_names)}] 主控位：{member_display[0]}"
+                        slot_line = f"[{team_names[0] if len(team_names) == 1 else ' / '.join(team_names)}] 主控位：{member_display[0]}"
                         if len(member_display) > 1:
                             slot_line += "；支援位：" + "、".join(member_display[1:])
                         lines.append(slot_line)
@@ -564,9 +602,16 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
                         lines.append(strip_game_markup(replacer.replace(rotation)))
                         lines.append("")
 
-                    # 各队伍正文：队名行开头，成员段按网页顺序，纹章已转置
+                    # 各队伍正文：
+                    # - 问询角色为主控位的区块 → 全文（她的 build 与配队完整资料）
+                    # - 问询角色为支援位的区块 → 只发队名 + 她的详情段
+                    #   （避免多队全量资料撑爆直发 LLM 的 300 字输出）
+                    char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
                     for team in teams:
-                        restructured = _restructure_block(team["text"].split("\n"))
+                        body_lines = team["text"].split("\n")
+                        if team["asker_role"] == "support":
+                            body_lines = _extract_member_segment(body_lines, char_re)
+                        restructured = _restructure_block(body_lines)
                         lines.append(strip_game_markup(replacer.replace("\n".join(restructured))))
                         lines.append("")
                 else:
