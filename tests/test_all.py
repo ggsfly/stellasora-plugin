@@ -362,12 +362,12 @@ def run_query_how_section() -> None:
         "Snowish Laru (Cannon) | ⏏ Back to Top ⏏\n"
         "Snowish build details: other team only\n"
     )
-    # 索引页 mock：Rotation 按六元素列段排列，猫眼（火）在第 2 段
+    # 索引页 mock：Rotation 按六元素列段排列，猫眼（火）在第 2 段。
+    # 注：索引页槽位行（"X (Main Slot)" 等）在当前逻辑下不参与解析，mock 不含
     mock_index = (
         "Nazuna-Donna | Chaton (Dark Ray) | Wraith (Melee) | << Prev | Firefly WIP | Next >> | Otoha (Laser)\n"
         "Rotation | Rotation (WIP) | Rotation | Rotation | Rotation (WIP) | Rotation\n"
         "idk yet | Chaton Rotation content here | Wraith comps | Terra goals | Lux notes | Umbra tips\n"
-        "Donna (1st Supp. Slot) | Flora (1st Supp. Slot) | Gerie (1st Supp. Slot)\n"
     )
     try:
         # 离线保证：trekker 固定返回火属性文本，避免测试依赖外部网络

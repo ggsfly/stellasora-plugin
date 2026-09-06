@@ -446,10 +446,11 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
                     for name in members:
                         member_res = lookup.lookup_term(name)
                         member_display.append(member_res["cn"] if member_res else name)
-                    lines.append("=== 队伍槽位 ===")
-                    lines.append(f"主控位：{member_display[0]}")
+                    slot_lines = [f"主控位：{member_display[0]}"]
                     if len(member_display) > 1:
-                        lines.append("支援位：" + "、".join(member_display[1:]))
+                        slot_lines.append("支援位：" + "、".join(member_display[1:]))
+                    lines.append("=== 队伍槽位 ===")
+                    lines.extend(slot_lines)
                     lines.append("")
                 else:
                     # 区块文本存在但未识别到任何成员：槽位块省略并留痕，
