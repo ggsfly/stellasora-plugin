@@ -274,16 +274,50 @@ def extract_team_block(infodoc_text: str, character_en: str, all_character_names
     block_lines.extend(lines[anchor_idx + 1:end_idx])
     block = re.sub(r"\n{3,}", "\n\n", "\n".join(block_lines)).strip()
 
-    # 3. 成员 = 区块内**按出现顺序**的已知角色名（锚点行首格必为主控）。
+    # 3. 成员 = 区块内**按出现顺序**的已知角色名。
+    #    锚点行本身（区块标题，如 'Otoha (Laser)'）不参与成员提取——
+    #    队名角色不一定是主控（如暗队 Otoha (Laser) 的主控是 Cosette，
+    #    区块体中 'Cosette occupies this team's Main slot' 为准）。
+    #    主控 = 区块体中第一个出现详情段的角色（'X (5★)' 星级行）。
     #    必须按行序扫描而非按名字表序遍历，否则主控位判定会错乱。
     members: list = []
     seen: set = set()
-    for line in block_lines:
+    for line in block_lines[1:]:  # 跳过锚点行
         for c in _split_cells(line):
             for name, name_re in name_res:
                 if name not in seen and name_re.match(c):
                     seen.add(name)
                     members.append(name)
+
+    # 4. 同角色多 build 合并：角色名出现在多个连续区块标题时（如 Chaton 暗黑射线
+    #    + Hybrid），其支援链相同——把后续同队区块的成员并入当前成员表。
+    #    实现方式：向后再扫最多 2 个区块，若其锚点行以问询角色开头且成员重叠，
+    #    则合并（去重保序）。
+    cursor = end_idx
+    for _ in range(2):
+        if cursor >= len(lines):
+            break
+        # 下一个锚点行
+        next_anchor = -1
+        for li in range(cursor, len(lines)):
+            if "⏏" in lines[li] or "Back to Top" in lines[li]:
+                next_anchor = li
+                break
+        if next_anchor < 0:
+            break
+        next_cells = _split_cells(_TOP_ANCHOR_RE.sub("", lines[next_anchor]))
+        if not any(char_re.match(c) for c in next_cells):
+            break  # 下一个区块不是问询角色 → 停止合并
+        # 合并下一区块的成员
+        for li in range(next_anchor + 1, len(lines)):
+            if li != next_anchor and ("⏏" in lines[li] or "Back to Top" in lines[li]):
+                break
+            for c in _split_cells(lines[li]):
+                for name, name_re in name_res:
+                    if name not in seen and name_re.match(c):
+                        seen.add(name)
+                        members.append(name)
+        cursor = next_anchor + 1
 
     return block, members
 

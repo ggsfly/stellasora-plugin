@@ -429,6 +429,22 @@ def run_query_how_section() -> None:
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
         material_bad = service.query_how("Chaton", cache_dir, with_presets=False)
         check("F10 Rotation 段数错位时安全省略", "输出手法" not in material_bad)
+
+        # 场景 9：队名角色 ≠ 主控（暗队 Otoha (Laser) 实例——主控是 Cosette）
+        mock_umbra = (
+            "Otoha (Laser) | ⏏ Back to Top ⏏\n"
+            "Description | Skill Upgrade Priority\n"
+            "Cosette (4★) | 1/10/1/1 (Main Skill only)\n"
+            "Cosette occupies this team's Main slot as she provides high amounts of buffs\n"
+            "Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)\n"
+            "Otoha's laser build revolves on the Soul Rend effect\n"
+        )
+        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_umbra
+        material_otoha = service.query_how("Otoha", cache_dir, with_presets=False)
+        check("F11 队名角色≠主控（Otoha队主控=珂赛特）",
+              "主控位：珂赛特" in material_otoha
+              and "主控位：乙叶" not in material_otoha
+              and "支援位" in material_otoha)
     finally:
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]
