@@ -2,6 +2,18 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.1] - 2026-09-07
+
+### 重构
+
+- **移除 model_resolver 私有依赖**：LLM 调用改为 SDK 直接透传 `ctx.llm.generate(model=llm_model)`，不再依赖主程序内部类，符合插件 SDK 跨仓库边界规范
+
+### 修复
+
+- **移除 markdown 清洗兜底**：默认完全信任 LLM 处理结果，仅在 prompt 层保留禁止 markdown 输出的约束
+- **修复群聊攻略查询回退问题**：`stellasora_how` 的 `query` 参数描述明确要求只传角色名/元素名本身、禁止附带「攻略」「配队」「秘纹」等后缀词；避免 Planner 将整句原文透传导致字典查无此词、回退到 `stellasora_what`
+- **config_version 升至 1.1.0**：旧格式直发缓存自动失效
+
 ## [1.0.0] - 2026-09-05
 
 ### 首次发布
