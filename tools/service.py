@@ -394,65 +394,76 @@ def extract_rotation(index_text: str, character_en: str) -> str:
     return content_cells[anchor_i]
 
 
-def _is_emblem_data_line(cells: list) -> bool:
-    """判定一行是否为纹章词条数据行：'词条 | 数值' 交替。
+# 空列标记（单格，无值配对）：该纹章等级无推荐内容
+_EMPTY_EMBLEM_RE = re.compile(r"^(?:Not needed|无需升级)。?$", re.IGNORECASE)
+# 纹章数值格形态：百分比 / 纯数字 / +N levels / 无需升级
+_EMBLEM_VALUE_RE = re.compile(r"^[\d.]+\s*%$|^[\d.]+$|^\+\d+\s*levels?$|^无需升级$", re.IGNORECASE)
 
-    - 数值形态：数字/百分比/'+'N levels/'无需升级'/任意短词后跟数值等，
-      以**首个值位**（第 2 格）匹配数值模式为准
-    - 行首可带 'Affix Priority'/'词条优先级' 标签格（跳过后再判）
-    - 单格长句（描述/Key Notes）返回 False
+
+def _split_emblem_columns(cells: list) -> list:
+    """把 Affix 行（去标签后）的格子流切成列模板。
+
+    每列 = [词条, 数值] 两格，或 'Not needed/无需升级' 单格空列（None 占位）。
+    判定依据：数值形态的格子是值格；空标记格自成单格列。
     """
-    if len(cells) < 2:
-        return False
-    work = list(cells)
-    if work[0].lower() in ("affix priority", "词条优先级"):
-        work = work[1:]
-    if len(work) < 2:
-        return False
-    value_re = re.compile(
-        r"^[\d.]+\s*%$|^[\d.]+$|^\+\d+\s*levels?$|^无需升级$|^Not needed\.?$",
-        re.IGNORECASE,
-    )
-    # 首个值位必须像数值；其后所有奇数位（值位）也须像数值或至少非常短
-    if not value_re.match(work[1]):
-        return False
-    return all(
-        value_re.match(work[i]) or len(work[i]) <= 12
-        for i in range(3, len(work), 2)
-    )
+    columns: list = []
+    i = 0
+    n = len(cells)
+    while i < n:
+        c = cells[i]
+        if _EMPTY_EMBLEM_RE.match(c):
+            columns.append(None)  # 空列
+            i += 1
+        elif i + 1 < n and _EMBLEM_VALUE_RE.match(cells[i + 1]):
+            columns.append([f"{c} {cells[i + 1]}".strip()])
+            i += 2
+        else:
+            columns.append([c])  # 无值词条（罕见）
+            i += 1
+    return columns
 
 
 def _restructure_block(body_lines: list) -> list:
     """角色段结构化（token 精简 + 消除 LLM 分列歧义）：
 
-    - Potentials 标签行删除（防 LLM 自组"优先潜能/可选潜能"章节）；
-      其后纯潜能数据行（以 "+3 levels" 结尾的短行）也删除（用户明确无需抓取）
+    - Potentials 标签行及其纯潜能数据行删除（用户明确无需抓取）
     - "Recommended Main Discs" 标签行 → "=== 推荐主位秘纹 ===" 锚
-    - "Emblem" 标签行或 "Affix Priority" 数据首行 → "=== 纹章 ===" 锚；其后
-      **数据形状**行（'词条 | 数值' 交替）转置重组为 70级/80级/90级 行
-      （每行 = 该等级的全部词条+数值），消除"无列头表格被 LLM 自由分列"的歧义；
-      描述/Key Notes 等非数据行原样保留，不参与转置
+    - "Emblem"/"Affix Priority" → "=== 纹章 ===" 锚；其后数据按
+      **列模板 + 光标填充**转置：每行 = 一个优先序层，列 = 70/80/90 级；
+      'Not needed/无需升级' 空列自动跳过；单元格内换行折叠的溢出词条
+      按非空列顺序纵向拼接。消除"无列头表格被 LLM 自由分列"的歧义
     """
     out: list = []
     mode = "normal"           # normal | disc | emblem | pot
-    emblem_rows: list = []    # 每元素 = 该行剥离标签格后的单元格列表
+    emblem_cols: list = []    # 每列 = None（空列）或 list[str]（条目）
+    emblem_cursor = 0         # 下一个待填充的非空列索引
+    emblem_pending = None     # 待配对的词条格（跨行折叠）
 
     def _flush_emblem() -> None:
-        """纹章转置：行 = 优先序层，列 = 纹章等级（70/80/90）。"""
-        if not emblem_rows:
-            return
+        """输出各纹章等级行（列 = 70/80/90 级）。"""
         grade_labels = ["70级", "80级", "90级"]
-        max_pairs = max((len(r) + 1) // 2 for r in emblem_rows)
-        for gi in range(max_pairs):
-            label = grade_labels[gi] if gi < len(grade_labels) else f"第{gi + 1}档"
-            items = []
-            for r in emblem_rows:
-                wi, vi = gi * 2, gi * 2 + 1
-                if wi < len(r):
-                    items.append(f"{r[wi]} {r[vi]}" if vi < len(r) else r[wi])
-            if items:
-                out.append(f"{label}：{'、'.join(items)}")
-        emblem_rows.clear()
+        for ci, col in enumerate(emblem_cols):
+            label = grade_labels[ci] if ci < len(grade_labels) else f"第{ci + 1}档"
+            if col:
+                out.append(f"{label}：{'、'.join(col)}")
+            else:
+                out.append(f"{label}：无需升级")
+        emblem_cols.clear()
+
+    def _fill_entry(entry: str) -> None:
+        """把词条填入下一个非空列（光标循环——溢出条目接续到下一非空列）。"""
+        nonlocal emblem_cursor
+        if not emblem_cols:
+            return
+        for _ in range(len(emblem_cols)):
+            if emblem_cursor >= len(emblem_cols):
+                emblem_cursor = 0  # 回绕：溢出词条接续填充（多词条列）
+            if emblem_cols[emblem_cursor] is not None:
+                emblem_cols[emblem_cursor].append(entry)
+                emblem_cursor += 1
+                return
+            emblem_cursor += 1
+        # 全列皆空（理论不可达）：丢弃
 
     for line in body_lines:
         low = line.lower()
@@ -469,17 +480,18 @@ def _restructure_block(body_lines: list) -> list:
             mode = "disc"
             out.append("=== 推荐主位秘纹 ===")
             continue
-        # 纹章锚：短标签行（"Optional Potentials | Emblem" 等），或 Affix Priority
-        # 数据首行（部分区块无 Emblem 标签）。长叙述句中的 "emblem" 单词不触发。
+        # 纹章锚：Emblem 标签行，或 Affix Priority 数据首行（部分区块无 Emblem 标签）
         first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
-        is_emblem_label = "emblem" in low and len(line) <= 60
-        if is_emblem_label or (first_is_affix and mode != "emblem"):
+        if "emblem" in low or (first_is_affix and mode != "emblem"):
             _flush_emblem()
             mode = "emblem"
             if not out or not out[-1].startswith("=== 纹章 ==="):
                 out.append("=== 纹章 ===")
             if first_is_affix:
-                emblem_rows.append(cells[1:])  # 首行即数据：跳过标签格收录
+                # 列模板：Not needed/无需升级 = 空列；[词条, 数值] = 有内容列
+                emblem_cols = _split_emblem_columns(cells[1:])
+                emblem_cursor = 0
+                emblem_pending = None
             continue
         # 新角色子段/区块边界 → 冲刷并回到 normal
         if "skill upgrade priority" in low or "⏏" in line or "back to top" in low:
@@ -489,17 +501,33 @@ def _restructure_block(body_lines: list) -> list:
             continue
 
         if mode == "emblem":
-            # 只有数据形状的行才参与转置；描述/Key Notes 行原样输出并退出 emblem 模式
-            if _is_emblem_data_line(cells):
-                # 行首标签格（Affix Priority/词条优先级）跳过——否则会混入转置词条
-                if cells[0].lower() in ("affix priority", "词条优先级"):
-                    cells = cells[1:]
-                emblem_rows.append(cells)
-            else:
+            # 同区块第二角色的 Affix 行 → 冲刷上一角色纹章并开启新列模板
+            if first_is_affix := (cells and cells[0].lower() in ("affix priority", "词条优先级")):
                 _flush_emblem()
-                mode = "normal"
-                out.append(line)
-            continue
+                emblem_cols = _split_emblem_columns(cells[1:])
+                emblem_cursor = 0
+                emblem_pending = None
+                continue
+            # 跨行折叠的格子流：词条格等待数值格配对；长句行退出 emblem 模式
+            flushed = False
+            for c in cells:
+                if emblem_pending is not None:
+                    _fill_entry(f"{emblem_pending} {c}".strip())
+                    emblem_pending = None
+                elif _EMBLEM_VALUE_RE.match(c):
+                    # 孤立数值格（无前置词条）：保守丢弃
+                    continue
+                elif len(c) > 40:
+                    # 长句（描述/署名）→ 冲刷并退出 emblem 模式
+                    _flush_emblem()
+                    mode = "normal"
+                    out.append(line)
+                    flushed = True
+                    break
+                else:
+                    emblem_pending = c
+            if not flushed:
+                continue
         if mode == "pot":
             # 潜能数据行（'+3 levels' 结尾的短行）丢弃；叙述行恢复 normal
             if cells and all(c.endswith("levels") or re.match(r"^[\d.]+%$", c) for c in cells if c):
