@@ -492,6 +492,23 @@ async def main():
     assert c21_llm_once and c21_no_model and c21_ok
     print(f"21 llm_model空串 -> LLM仅调一次: {c21_llm_once} | kwargs不含model键: {c21_no_model} | 发送成功: {c21_ok}")
 
+    # 22. 直发 prompt 注入反 markdown 格式约束
+    mock_llm22 = MockLLM(answer="测试回答")
+    mock_send22 = MockSend()
+    ctx20.llm = mock_llm22
+    ctx20.send = mock_send22
+    p20._plugin_config_instance.query.llm_model = "utils"
+    p20._recent_direct.clear()
+
+    r22 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_anti_markdown")
+    c22_llm_once = len(mock_llm22.calls) == 1
+    assert c22_llm_once
+    captured_prompt = mock_llm22.calls[0]["prompt"]
+    c22_anti_md = "不要使用任何 markdown 格式" in captured_prompt
+    c22_ok = "已直接发送" in r22.get("content", "")
+    assert c22_anti_md and c22_ok
+    print(f"22 反markdown指令注入 -> LLM仅调一次: {c22_llm_once} | 包含反markdown约束: {c22_anti_md} | 发送成功: {c22_ok}")
+
     print()
     print("=== 直接发送模式端到端全部通过 ===")
 
