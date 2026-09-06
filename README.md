@@ -61,6 +61,10 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 插件配置位于 `config.toml`（也可在 WebUI 插件配置页修改，热更新即时生效）：
 
 ```toml
+[plugin]
+# 升级到 1.1.0 后旧格式直发缓存自动失效；若 config.toml 中钉死 1.0.0，请手动改为 1.1.0 以立即失效旧缓存（或等待 24h TTL 自然过期）
+config_version = "1.1.0"
+
 [access_control]
 # 鉴权模式：
 #   off       = 不限制（默认，所有聊天可用）
@@ -91,9 +95,8 @@ direct_send = true
 dedup_window = 60
 # 直发成品缓存时长（秒），0=禁用（24 小时内重复提问秒回）
 answer_cache_ttl = 86400
-# 直接发送使用的模型：任务名（utils/replyer/planner 等主程序模型配置里的任务）、
-# 模型名（model_config.toml models[].name）或模型标识（model_identifier）均可；
-# 推荐使用 utils（快速响应 2-4s，术语翻译已在代码中完成）；留空使用默认模型；无法识别的值回落默认模型
+# 直接发送使用的模型任务名（如 utils/replyer/planner，对应主程序模型配置里的任务）；
+# 留空使用默认模型。推荐 utils（快速响应 2-4s，术语翻译已在代码中完成）
 # 查询失败时工具统一返回"未找到相关攻略"，不会回传原文
 llm_model = "utils"
 # 直接发送时注入 bot 人格与表达风格（读取主程序人格配置，成品回答与 bot 口吻一致）；
