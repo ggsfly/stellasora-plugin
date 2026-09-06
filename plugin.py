@@ -579,7 +579,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色/装备的中文名或英文名",
+                description="角色/装备的名字本身（只传名字，不要带'攻略'/'资料'/'素材'等后缀词；中/英均可）",
                 required=True,
             ),
             ToolParameterInfo(
@@ -655,7 +655,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色名或元素名（中/英均可，元素中文名：水/火/风/地/光/暗）",
+                description="角色名或元素名，只传名字本身，不带「攻略」「配队」「秘纹」等后缀词（中/英均可，元素中文名：水/火/风/地/光/暗）",
                 required=True,
             ),
             ToolParameterInfo(
