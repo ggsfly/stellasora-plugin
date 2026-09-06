@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "星塔旅人攻略查询",
   "description": "星塔旅人（Stella Sora）游戏攻略查询：角色/技能/素材信息、配队/纹章/秘纹/技能优先度指南、游戏术语中英查词。数据来自 stelladb 攻略站与游戏解包中英字典（29,158 条官方译名映射），输出为官方中文。",
   "author": {

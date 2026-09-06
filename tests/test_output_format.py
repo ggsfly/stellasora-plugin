@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""F3 输出格式验证测试（agent 可执行 + 自愈式 strip_markdown）
+"""F3 输出格式验证测试（agent 可执行 + 默认信任 LLM 输出原样发送）
 
 测试项：
   Test 1: 验证 direct-send prompt 规则 9 禁止 markdown。Mock ctx.llm.generate 返回纯文本，
           检查 ctx.send.text 收到的纯文本不含 '**', '###', '`'。
   Test 2: Mock ctx.llm.generate 返回含 markdown 的文本（'**加粗**', '### 标题', '`代码`'），
-          检查 ctx.send.text 及缓存命中时收到的文本是否已去除 markdown。
-          若未过滤则报错促使自愈式补全 strip_markdown。
+          验证插件默认信任 LLM 输出，不论新鲜请求还是缓存命中均原样直发（verbatim trust）。
   Test 3: 以'赤霞攻略'为题，mock fetcher 返回含 Chaton 段的 infodoc + 索引文本，
           调用 handle_how，断言传给 ctx.llm.generate 的 prompt 含输出规则关键词：
           队伍阵容, 主控位, 秘纹, 纹章, 默认不给出。
@@ -93,8 +92,8 @@ async def test_1_prompt_rule_and_plain_output():
     print("PASS: Test 1 (Prompt rule 9 + plain text output)")
 
 
-async def test_2_markdown_leak_and_strip():
-    """Test 2: 当 LLM 返回 markdown 格式时，验证是否被清洗剥离"""
+async def test_2_llm_output_verbatim_trust():
+    """Test 2: 当 LLM 返回文本时，验证插件默认信任 LLM 输出，不论新鲜结果还是缓存命中均原样直发"""
     p = plug.create_plugin()
     cache = Path(tempfile.mkdtemp(prefix="stellasora_f3_t2_"))
     ctx = PluginContext(
@@ -114,7 +113,7 @@ async def test_2_markdown_leak_and_strip():
         "主控位：夏花，支援位：猫眼。\n"
         "- 秘纹推荐：`风之眼`、`狂风呼啸`\n"
         "| 纹章 | 词条 |\n"
-        "| 三角形 | 风系穿透 |\n"
+        "| 三角形 | 风系穿透 |"
     )
 
     mock_llm = MockLLM(answer=markdown_response)
@@ -128,10 +127,8 @@ async def test_2_markdown_leak_and_strip():
     assert len(mock_send.sent) == 1, "首次未发送消息"
     sent_text_1 = mock_send.sent[0][1]
 
-    # 断言 markdown 符号已被清洗
-    assert "**" not in sent_text_1, f"新鲜结果含有 '**': {sent_text_1}"
-    assert "###" not in sent_text_1, f"新鲜结果含有 '###': {sent_text_1}"
-    assert "`" not in sent_text_1, f"新鲜结果含有 '`': {sent_text_1}"
+    # 断言 LLM 输出原样发送（默认信任 LLM 输出，不进行 Markdown 剥离）
+    assert sent_text_1 == markdown_response, f"新鲜结果未原样发送: {sent_text_1}"
 
     # 2. 二次调用（缓存命中路径）
     res2 = await p.handle_how(query="夏花", question="夏花怎么玩", group_id="g1", stream_id="s2")
@@ -139,11 +136,9 @@ async def test_2_markdown_leak_and_strip():
     assert len(mock_send.sent) == 2, "缓存命中未发送消息"
     sent_text_2 = mock_send.sent[1][1]
 
-    assert "**" not in sent_text_2, f"缓存结果含有 '**': {sent_text_2}"
-    assert "###" not in sent_text_2, f"缓存结果含有 '###': {sent_text_2}"
-    assert "`" not in sent_text_2, f"缓存结果含有 '`': {sent_text_2}"
+    assert sent_text_2 == markdown_response, f"缓存结果未原样发送: {sent_text_2}"
 
-    print("PASS: Test 2 (Markdown stripping on fresh and cached send)")
+    print("PASS: Test 2 (LLM output verbatim trust on fresh and cached send)")
 
 
 async def test_3_chixia_guide_keywords():
@@ -204,7 +199,7 @@ async def test_3_chixia_guide_keywords():
 async def main():
     print("=== Running F3 Output Format Tests ===")
     await test_1_prompt_rule_and_plain_output()
-    await test_2_markdown_leak_and_strip()
+    await test_2_llm_output_verbatim_trust()
     await test_3_chixia_guide_keywords()
     print("=== All F3 Output Format Tests PASSED ===")
 
