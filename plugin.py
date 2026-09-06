@@ -28,7 +28,6 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from cache import CacheManager  # noqa: E402
-from model_resolver import generate_with_pinned_model, resolve_generation_model  # noqa: E402
 from service import (  # noqa: E402
     check_permission,
     configure_overrides,
@@ -67,7 +66,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.0.0", description="配置版本")
+    config_version: str = Field(default="1.1.0", description="配置版本")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -123,8 +122,7 @@ class QueryConfig(PluginConfigBase):
 
     llm_model: str = Field(
         default="utils",
-        description="直接发送模式使用的模型；推荐使用 utils（快速响应 2-4s，术语翻译已在代码中完成）；"
-        "填写任务名（utils/replyer/planner 等）、模型名或模型标识，留空使用默认模型",
+        description="直接发送使用的模型任务名（如 utils/replyer/planner，对应主程序模型配置里的任务）；留空使用默认模型。推荐 utils（快速响应 2-4s，术语翻译已在代码中完成）",
     )
 
     inject_persona: bool = Field(
@@ -467,27 +465,12 @@ class StellaSoraPlugin(MaiBotPlugin):
             question=question,
             material=material,  # service._fit_lines 已按 max_length 截断，此处不再硬切片
         )
-        request_type = f"plugin.{self.ctx.plugin_id}"
+        llm_model = (self.config.query.llm_model or "").strip()
         try:
-            # 任务名/模型名/模型标识 → 解析为任务路由或固定模型（移植自 smart-segmentation-plugin）
-            target_kind, target_name = resolve_generation_model(self.config.query.llm_model)
-            self.ctx.logger.info(
-                "直接发送模型解析: configured=%r kind=%r target=%r",
-                self.config.query.llm_model,
-                target_kind,
-                target_name or "<default>",
-            )
-            if target_kind == "model" and target_name:
-                llm_result = await generate_with_pinned_model(
-                    prompt,
-                    resolved_model_name=target_name,
-                    request_type=request_type,
-                )
-            else:
-                gen_kwargs: dict[str, Any] = {"prompt": prompt}
-                if target_name:
-                    gen_kwargs["model"] = target_name
-                llm_result = await self.ctx.llm.generate(**gen_kwargs)
+            gen_kwargs: dict[str, Any] = {"prompt": prompt}
+            if llm_model:
+                gen_kwargs["model"] = llm_model
+            llm_result = await self.ctx.llm.generate(**gen_kwargs)
         except Exception as exc:
             self.ctx.logger.exception("直接发送模式 LLM 调用异常")
             _ = exc

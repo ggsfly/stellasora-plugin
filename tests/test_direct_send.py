@@ -127,14 +127,6 @@ async def main():
     r6 = await p.handle_how(query="夏花", group_id="g999", stream_id="stream_006")
     print(f"6 白名单拒绝 -> {'允许范围' in r6['content']}")
 
-    # 7. 模型解析三态（新解析链，移植自 smart-segmentation-plugin）
-    from model_resolver import resolve_generation_model
-
-    kind_task, name_task = resolve_generation_model("planner")
-    kind_model, name_model = resolve_generation_model("gpt-4o")  # 未知值 → 默认模型
-    print(f"7 任务名解析 -> task/{name_task}: {kind_task == 'task' and name_task == 'planner'}")
-    print(f"7' 未知值回落默认 -> task/'': {kind_model == 'task' and name_model == ''}")
-
     # 8. 人格注入开关：关闭后 prompt 不含人格块
     p._plugin_config_instance.access_control.mode = "off"
     ctx.llm = mock_llm  # 恢复引用（用例 5 曾替换为失败实例）
@@ -450,6 +442,55 @@ async def main():
         plug._load_game_knowledge = orig_loader
 
     print(f"19 游戏知识注入 -> (a)默认注入: {c19a_has_header and c19a_has_content} | (b)关闭不注入: {c19b_no_header} | (c)缺失降级不崩: {c19c_no_header and c19c_ok}")
+
+    # ===== SDK 直接透传 LLM 调用验证（用例 20-21）=====
+    # 20. 默认 llm_model="utils" → ctx.llm.generate 收到 model="utils"（SDK 直接透传）
+    p20 = plug.create_plugin()
+    cache20 = Path(tempfile.mkdtemp(prefix="stellasora_test_passthrough_"))
+    ctx20 = PluginContext(
+        plugin_id="ggsfly.stellasora-plugin",
+        rpc_call=None,
+        paths=PluginPaths(data_dir=cache20, runtime_dir=cache20),
+    )
+    p20._set_context(ctx20)
+    p20._plugin_config_instance = plug.StellaSoraConfig()
+    p20._plugin_config_instance.query.dedup_window = 0
+    p20._plugin_config_instance.query.answer_cache_ttl = 0
+    await p20.on_load()
+    ctx20.config = MockConfig(
+        {
+            "bot": {"nickname": "麦麦", "alias_names": []},
+            "personality": {"personality": "是人类。", "reply_style": ""},
+            "experimental": {"emotion_trait": "neutral"},
+        }
+    )
+    mock_llm20 = MockLLM(answer="测试回答")
+    mock_send20 = MockSend()
+    ctx20.llm = mock_llm20
+    ctx20.send = mock_send20
+
+    r20 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_passthrough")
+    c20_llm_once = len(mock_llm20.calls) == 1
+    c20_model_utils = c20_llm_once and mock_llm20.calls[0].get("model") == "utils"
+    c20_answer = mock_send20.sent and "测试回答" in mock_send20.sent[0][1]
+    c20_ok = "已直接发送" in r20.get("content", "")
+    assert c20_llm_once and c20_model_utils and c20_answer and c20_ok
+    print(f"20 SDK直接透传 -> LLM仅调一次: {c20_llm_once} | model=utils: {c20_model_utils} | 返回测试回答: {c20_answer} | 发送成功: {c20_ok}")
+
+    # 21. llm_model="" → ctx.llm.generate 收到的 kwargs 不含 model 键（负路径）
+    mock_llm21 = MockLLM(answer="测试回答")
+    mock_send21 = MockSend()
+    ctx20.llm = mock_llm21
+    ctx20.send = mock_send21
+    p20._plugin_config_instance.query.llm_model = ""
+    p20._recent_direct.clear()
+
+    r21 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_passthrough21")
+    c21_llm_once = len(mock_llm21.calls) == 1
+    c21_no_model = c21_llm_once and "model" not in mock_llm21.calls[0]
+    c21_ok = "已直接发送" in r21.get("content", "")
+    assert c21_llm_once and c21_no_model and c21_ok
+    print(f"21 llm_model空串 -> LLM仅调一次: {c21_llm_once} | kwargs不含model键: {c21_no_model} | 发送成功: {c21_ok}")
 
     print()
     print("=== 直接发送模式端到端全部通过 ===")
