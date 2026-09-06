@@ -194,21 +194,59 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     return _fit_lines(lines, max_length)
 
 
+def slice_character_sections(infodoc_text: str, character_en: str, all_character_names: list) -> str:
+    """从 infodoc 详细页中切分出指定角色的攻略段落（多 build 全取）。
+
+    - 每行以 ' | ' 分割单元格
+    - 角色段起始行：任一单元格以 character_en 开头，后跟空格、'(' 或单元格结束
+    - 遇到下一个已知角色起始行结束当前段
+    - 未命中时回退整页全文
+    """
+    if not infodoc_text:
+        return infodoc_text
+
+    char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
+    en_names = [n for n in all_character_names if isinstance(n, str) and n.isascii() and len(n) >= 2]
+    other_res = [
+        re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")
+        for n in en_names
+        if n != character_en
+    ]
+
+    lines = infodoc_text.split("\n")
+    collected: list[str] = []
+    in_section = False
+    matched_any = False
+
+    for line in lines:
+        cells = [c.strip() for c in line.split(" | ")]
+
+        # 匹配当前角色段起始行
+        if any(char_re.match(c) for c in cells):
+            in_section = True
+            matched_any = True
+            collected.append(line)
+            continue
+
+        # 匹配其他已知角色起始行，结束当前角色段
+        if any(any(r.match(c) for r in other_res) for c in cells):
+            in_section = False
+            continue
+
+        if in_section:
+            collected.append(line)
+
+    if not matched_any:
+        return infodoc_text
+    return "\n".join(collected)
+
+
 def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length: Optional[int] = None) -> str:
     """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。"""
     lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
     res = lookup.lookup_term(term)
     if not res:
         return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
-
-    lines = [
-        "=== 字典匹配 ===",
-        f"  中文: {res['cn']}",
-        f"  英文: {res['en']}",
-        f"  ID:   {res['id']}",
-        f"  类别: {res['cat']}",
-        "",
-    ]
 
     element: Optional[str] = None
     character_en = res["en"]
@@ -219,8 +257,6 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         num_id = res["id"].split(".")[1]
         trekker_text = st_fetcher.fetch_trekker(num_id)
         element = detect_element(trekker_text)
-    if element:
-        lines += ["=== 元素属性 ===", f"  {character_cn}（{character_en}）是{ELEMENT_CN[element]}属性角色", ""]
 
     if not element:
         if res["en"] in ELEMENT_SECTIONS:
@@ -228,11 +264,12 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         elif term in ELEMENT_SECTIONS:
             element = term
 
+    lines: list[str] = []
+
     # 预设码区块放在攻略正文之前：它是用户明确要求的内容（--presets），
     # 且输出可能因长度上限被截断——放在前面保证不被截掉
-    preset_lines: list[str] = []
     if with_presets:
-        preset_lines.append("=== 预设码推荐 (Google Docs) ===")
+        preset_lines: list[str] = ["=== 预设码推荐 (Google Docs) ==="]
         presets = gd_fetcher.fetch_presets()
         if "Error" in presets:
             preset_lines.append("  [预设码抓取失败]")
@@ -249,17 +286,27 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
             section = extract_element_preset_section(presets, element)
             preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {element} 相关内容。")
         preset_lines.append("")
-
-    lines += preset_lines
+        lines += preset_lines
 
     if element:
+        index_text = st_fetcher.fetch_infodoc_index()
+        if index_text:
+            lines.append("=== 索引页（Rotation / 主控位 / 支援位） ===")
+            lines.append(strip_game_markup(index_text))
+            lines.append("")
+
         lines.append(f"=== {ELEMENT_CN[element]}队文字攻略 (stelladb /infodoc/{element.lower()}) ===")
         infodoc_text = st_fetcher.fetch_infodoc(element.lower())
         if infodoc_text and "Error" not in infodoc_text:
+            if is_character:
+                infodoc_text = slice_character_sections(infodoc_text, character_en, lookup.get_character_names())
             lines.append(strip_game_markup(replacer.replace(infodoc_text)))
         else:
             lines.append("  [抓取失败]")
         lines.append("")
+
+    if not lines:
+        lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
 
     return _fit_lines(lines, max_length)
 
