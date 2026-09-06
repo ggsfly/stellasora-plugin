@@ -76,3 +76,24 @@
 
 技能升级优先度在 stelladb /infodoc/<元素> 页面的 "Skill Upgrade Priority" 区块中。
 格式如 `1/1/10/1 (Support Skill only)`，表示四个技能等级推荐。
+
+## 元素队 infodoc 攻略输出规则
+
+当用户问某角色的攻略（"XX攻略/XX怎么配队/XX秘纹/XX纹章"）时，资料来自两个页面：
+- **索引页**（/infodoc）：含 Rotation（输出手法）+ 显式槽位标注（"X (Main Slot)"、"Y (1st Supp. Slot)"、"Z (2nd Supp. Slot)"）
+- **详细页**（/infodoc/{元素}）：含秘纹推荐列表（带 C1/C6 标注）+ 纹章词条优先级 + 技能升级优先度 + 角色描述
+
+### 必须输出
+1. **队伍阵容**：必须完整给出整支队伍的全部成员，标注谁负责**主控位（Main Slot）**、谁负责**支援位（Supp Slot，含 1st/2nd）**。问询的角色负责什么位置必须明确。来源：索引页的槽位标注。注意（Oracle 审查重大项 3）：从索引页提取队伍信息时，严格只取属于当前角色元素（如赤霞对应 Ignis/火）的队伍行，忽略其他元素并列的无关行。
+2. **秘纹（Disc）推荐**：必须完整给出推荐秘纹名称列表，**从左到右按网页出现顺序排列**。**不回答 C1、C6** 标注（去掉名称后的 (C1)/(C6) 后缀）。来源：详细页的 Priority Potentials / Recommended Main Discs 区块。
+3. **纹章（Emblem）词条推荐**：按本知识库既有"纹章推荐表格结构"输出格式给出。来源：详细页的 Emblem 区块。
+4. **输出手法（Rotation）**：**默认不给出**，除非用户明确要求（如"XX输出手法""XX怎么连招""XX Rotation"）。来源：索引页的 Rotation 行。严格只取当前元素列对应的输出手法。
+
+（注：以上 1、2 条标注"必须完整给出"——按主提示词规则 4，此类内容不受 300 字上限约束。）
+
+### 多队伍
+- 若该角色有多个流派/build（如 Chaton Dark Ray + Chaton Hybrid），逐一列出每支队伍的上述信息。
+
+### 禁止输出
+- **Priority Potentials、Optional Potentials** 区块——不回答这些区块的原始潜能升级项列表（如"Mark of Darkness +3 levels"这类逐条潜能升级项）。
+- 角色的长篇 Description 原文——不整段照搬，只提取上述要点。
