@@ -36,6 +36,7 @@ from service import (  # noqa: E402
     query_how,
     query_what,
 )
+from text_clean import strip_markdown  # noqa: E402
 
 _GAME_KNOWLEDGE_CACHE: Optional[str] = None
 
@@ -410,6 +411,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             cache = self._get_answer_cache()
             cached_answer = cache.get(cache_key)
             if cached_answer:
+                cached_answer = strip_markdown(cached_answer)
                 self.ctx.logger.info("直接发送缓存命中: key=%s", cache_key)
                 try:
                     sent = await self.ctx.send.text(cached_answer, stream_id)
@@ -479,6 +481,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             return not_found
 
         answer = str((llm_result or {}).get("response") or "").strip()
+        answer = strip_markdown(answer)
         if not (llm_result or {}).get("success") or not answer:
             self.ctx.logger.error(
                 "直接发送模式 LLM 加工失败: %s",

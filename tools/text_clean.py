@@ -122,3 +122,60 @@ def detect_element(text: str) -> str | None:
 def clean_stelladb_html(text: str) -> str:
     """兼容旧接口：清理 HTML 标签。"""
     return re.sub(r"<[^>]+>", "", text).strip()
+
+
+# ---- Markdown 标记清理（直发 LLM 输出清洗）----
+
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
+_MD_HEADING_RE = re.compile(r"(?m)^#{1,6}\s*")
+_MD_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z]*\n?([\s\S]*?)```")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_MD_LIST_RE = re.compile(r"(?m)^[-*+]\s+")
+_MD_TABLE_DIVIDER_RE = re.compile(r"(?m)^\|?\s*[-:]+[-| :]*\|?$")
+_MD_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+
+def strip_markdown(text: str) -> str:
+    """清理文本中的 markdown 格式标记（**、*、###、`、- 列表、表格管道符等），面向纯文本场景。
+
+    实现规则：
+    - **x** -> x, *x* -> x
+    - 行首 ### x -> x
+    - ```x``` -> x, `x` -> x
+    - 行首 - x / * x -> x
+    - | a | b | -> a / b (折叠表格管道符)
+    - 压缩 3+ 连续换行为 2
+    """
+    if not text:
+        return text
+
+    # 1. 代码块与行内代码
+    text = _MD_CODE_BLOCK_RE.sub(r"\1", text)
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+
+    # 2. 粗体与斜体
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_ITALIC_RE.sub(r"\1", text)
+
+    # 3. 标题标记（行首 #、##、### 等）
+    text = _MD_HEADING_RE.sub("", text)
+
+    # 4. 无序列表符（行首 - 、* 、+ ）
+    text = _MD_LIST_RE.sub("", text)
+
+    # 5. 表格分隔线（|---|---|）
+    text = _MD_TABLE_DIVIDER_RE.sub("", text)
+
+    # 6. 表格管道符（| a | b | -> a / b）
+    def _clean_table_line(match: re.Match) -> str:
+        line = match.group(0)
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        return " / ".join(cells) if cells else ""
+
+    text = re.sub(r"(?m)^\|.*\|$", _clean_table_line, text)
+
+    # 7. 压缩连续多余空行并去除首尾空白
+    text = _MD_MULTI_NEWLINE_RE.sub("\n\n", text)
+    return text.strip()
+
