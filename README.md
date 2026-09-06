@@ -222,11 +222,8 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
 ## 开发
 
 ```bash
-# 字典一致性测试
-python tests/test_dict.py
-
-# 术语覆盖率抽查
-python tests/check_term_coverage.py
+# 全量回归测试（单文件，支持按节运行：python tests/test_all.py B G J）
+python tests/test_all.py
 
 # 网络连通性自检
 python tools/probe_google_doc.py

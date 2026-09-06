@@ -7,6 +7,7 @@
 ### 重构
 
 - **移除 model_resolver 私有依赖**：LLM 调用改为 SDK 直接透传 `ctx.llm.generate(model=llm_model)`，不再依赖主程序内部类，符合插件 SDK 跨仓库边界规范
+- **测试合并精简**：11 个测试文件合并为单一 `tests/test_all.py`（A-J 十节、64 项断言），共享 Mock 脚手架，支持按节运行（如 `python tests/test_all.py B G J`）
 
 ### 修复
 
