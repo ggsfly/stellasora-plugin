@@ -206,12 +206,25 @@ _TOP_ANCHOR_RE = re.compile(r"\s*⏏\s*Back to Top\s*⏏\s*", re.IGNORECASE)
 # 索引页行内导航段（队名行中夹带的翻页按钮，不属于任何元素队伍）
 _NAV_CELLS = {"<< Prev", "Next >>"}
 
+# Potentials 标签行：'Priority Potentials ...' / 'Optional Potentials ...' 开头的行。
+# 该标签行只造成 LLM 把后续 "+3 levels" 数据行整理成"优先潜能/可选潜能"章节
+# （实例副作用），直接删除标签行；数据行保留（秘纹/纹章/潜能在同区块内按行
+# 混排、无法按行区分，由知识库规则约束 LLM 不单独整理潜能章节）
+_POTENTIAL_LINE_RE = re.compile(r"^(?:Priority|Optional) Potentials\b", re.IGNORECASE)
+
 
 def strip_infodoc_noise(text: str) -> str:
-    """清理 infodoc 文本中的表格行号碎片与多余空行（token 精简）。"""
+    """清理 infodoc 文本中的表格行号碎片、Potentials 标签行与多余空行（token 精简）。"""
     if not text:
         return text
-    kept = [line for line in text.split("\n") if not _ROW_NUM_LINE_RE.match(line.strip())]
+    kept = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if _ROW_NUM_LINE_RE.match(stripped):
+            continue
+        if _POTENTIAL_LINE_RE.match(stripped):
+            continue
+        kept.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 

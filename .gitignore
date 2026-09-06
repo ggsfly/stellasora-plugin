@@ -14,3 +14,4 @@ __pycache__/
 # 归档（非必要数据，见 docs/stage1_report.md）
 data/_archive/
 data/.cache_sim/
+data/.cache_diag/
