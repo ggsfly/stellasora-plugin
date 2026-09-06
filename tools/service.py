@@ -194,51 +194,149 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     return _fit_lines(lines, max_length)
 
 
-def slice_character_sections(infodoc_text: str, character_en: str, all_character_names: list) -> str:
-    """从 infodoc 详细页中切分出指定角色的攻略段落（多 build 全取）。
+# 详细页 HTML 表格的行号列折叠出的纯数字行（如 "19"、"125"），对 LLM 无意义
+_ROW_NUM_LINE_RE = re.compile(r"^\d{1,3}$")
 
-    - 每行以 ' | ' 分割单元格
-    - 角色段起始行：任一单元格以 character_en 开头，后跟空格、'(' 或单元格结束
-    - 遇到下一个已知角色起始行结束当前段
-    - 未命中时回退整页全文
+# 区块锚点行内的导航片段：'⏏ Back to Top ⏏'（含前后空格），行内队名保留
+_TOP_ANCHOR_RE = re.compile(r"\s*⏏\s*Back to Top\s*⏏\s*", re.IGNORECASE)
+
+# 索引页行内导航段（队名行中夹带的翻页按钮，不属于任何元素队伍）
+_NAV_CELLS = {"<< Prev", "Next >>"}
+
+
+def strip_infodoc_noise(text: str) -> str:
+    """清理 infodoc 文本中的表格行号碎片与多余空行（token 精简）。"""
+    if not text:
+        return text
+    kept = [line for line in text.split("\n") if not _ROW_NUM_LINE_RE.match(line.strip())]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def _split_cells(line: str) -> list:
+    return [c.strip() for c in line.split(" | ") if c.strip()]
+
+
+def extract_team_block(infodoc_text: str, character_en: str, all_character_names: list) -> tuple:
+    """从详细页切出**包含问询角色的整支队伍区块**，并按区块内角色出现顺序返回成员。
+
+    详细页为单元素纵向布局，每个队伍区块结构（实测）：
+        <主控角色> (<build>) | ⏏ Back to Top ⏏   ← 区块锚点行（首个角色 = 主控位）
+        ...主控 build（描述/技能优先度/秘纹/纹章）...
+        <支援角色1> (<星级>)                       ← 后续角色 = 支援位
+        <支援角色1> 的说明段...
+        <下一队主控角色> (...) | ⏏ Back to Top ⏏  ← 下一队伍区块开始
+
+    槽位判定规则（stelladb 排版约定）：**区块内第一个角色 = 主控位，后续角色均为
+    支援位**——无需回查索引页的位置信息。问询角色可能是主控位，也可能是支援位：
+    支援位问询时从其所在区块的区块头（⏏ 锚点行）开始截取，保证拿到完整队伍。
+
+    返回 (区块文本, 按出现顺序去重的成员英文名列表)；未命中时返回 (整页全文, [])。
     """
     if not infodoc_text:
-        return infodoc_text
+        return infodoc_text, []
 
     char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
     en_names = [n for n in all_character_names if isinstance(n, str) and n.isascii() and len(n) >= 2]
-    other_res = [
-        re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")
-        for n in en_names
-        if n != character_en
-    ]
+    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
 
     lines = infodoc_text.split("\n")
-    collected: list[str] = []
-    in_section = False
-    matched_any = False
 
-    for line in lines:
-        cells = [c.strip() for c in line.split(" | ")]
+    # 1. 问询角色的区块头：其 ⏏ 锚点行（她是主控）；找不到则取其首次出现行
+    #    之前最近的 ⏏ 锚点行（她是支援，区块头 = 所属配队的主控锚点）
+    anchor_idx = -1
+    first_seen_idx = -1
+    for li, line in enumerate(lines):
+        cells = _split_cells(line)
+        is_anchor = ("⏏" in line or "Back to Top" in line)
+        if anchor_idx < 0 and is_anchor and any(char_re.match(c) for c in cells):
+            anchor_idx = li
+        if first_seen_idx < 0 and any(char_re.match(c) for c in cells):
+            first_seen_idx = li
+    if first_seen_idx < 0:
+        return infodoc_text, []
+    if anchor_idx < 0:
+        # 问询角色是支援位：向前找最近的区块锚点行（区块头 = 主控）
+        for li in range(first_seen_idx, -1, -1):
+            if "⏏" in lines[li] or "Back to Top" in lines[li]:
+                anchor_idx = li
+                break
+    if anchor_idx < 0:
+        return infodoc_text, []
 
-        # 匹配当前角色段起始行
-        if any(char_re.match(c) for c in cells):
-            in_section = True
-            matched_any = True
-            collected.append(line)
+    # 2. 区块终点：锚点行之后的下一个 ⏏ 行（页尾 BACK TO TOP 行也算边界）
+    end_idx = len(lines)
+    for li in range(anchor_idx + 1, len(lines)):
+        if "⏏" in lines[li] or "Back to Top" in lines[li]:
+            end_idx = li
+            break
+
+    block_lines = [_TOP_ANCHOR_RE.sub("", lines[anchor_idx]).rstrip(" |").strip()]
+    block_lines.extend(lines[anchor_idx + 1:end_idx])
+    block = re.sub(r"\n{3,}", "\n\n", "\n".join(block_lines)).strip()
+
+    # 3. 成员 = 区块内**按出现顺序**的已知角色名（锚点行首格必为主控）。
+    #    必须按行序扫描而非按名字表序遍历，否则主控位判定会错乱。
+    members: list = []
+    seen: set = set()
+    for line in block_lines:
+        for c in _split_cells(line):
+            for name, name_re in name_res:
+                if name not in seen and name_re.match(c):
+                    seen.add(name)
+                    members.append(name)
+
+    return block, members
+
+
+def extract_rotation(index_text: str, character_en: str) -> str:
+    """从索引页提取目标角色所在队伍的 Rotation（输出手法）——索引页唯一用途。
+
+    索引页按队伍区块分行（队名行 / Rotation 标签行 / Rotation 内容行 / 槽位行 / ...），
+    行内各段按六元素顺序排列：
+    - 队名行可能夹带导航段（"<< Prev" / "Next >>"），剔除后与 Rotation 行段序一致
+    - 定位队名行中 character_en 的段序 i，取 Rotation 内容行的第 i 段
+
+    段数不一致（空缺压缩错位）或未定位到锚点时返回空串，由调用方如实说明缺失。
+    """
+    if not index_text:
+        return ""
+    char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)", re.IGNORECASE)
+
+    anchor_i = -1
+    rotation_label_i = -1
+    rotation_content = ""
+
+    for li, line in enumerate(index_text.split("\n")):
+        cells = _split_cells(line)
+        if not cells:
             continue
 
-        # 匹配其他已知角色起始行，结束当前角色段
-        if any(any(r.match(c) for r in other_res) for c in cells):
-            in_section = False
+        # 队名行：含 character_en 段 → 记录剔除导航段后的段序
+        if anchor_i < 0 and any(char_re.match(c) for c in cells):
+            kept = [c for c in cells if c not in _NAV_CELLS]
+            for ci, c in enumerate(kept):
+                if char_re.match(c):
+                    anchor_i = ci
+                    break
             continue
 
-        if in_section:
-            collected.append(line)
+        # Rotation 标签行：多数非空段以 Rotation 开头
+        if rotation_label_i < 0 and len(cells) >= 3 and sum(1 for c in cells if c.lower().startswith("rotation")) >= 3:
+            rotation_label_i = li
+            continue
 
-    if not matched_any:
-        return infodoc_text
-    return "\n".join(collected)
+        # Rotation 内容行：标签行之后的首个多段行
+        if rotation_label_i >= 0 and li > rotation_label_i and len(cells) >= 3:
+            rotation_content = line
+            break
+
+    if anchor_i < 0 or not rotation_content:
+        return ""
+
+    content_cells = _split_cells(rotation_content)
+    if anchor_i >= len(content_cells):
+        return ""
+    return content_cells[anchor_i]
 
 
 def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length: Optional[int] = None) -> str:
@@ -289,20 +387,41 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         lines += preset_lines
 
     if element:
-        index_text = st_fetcher.fetch_infodoc_index()
-        if index_text:
-            lines.append("=== 索引页（Rotation / 主控位 / 支援位） ===")
-            # 索引页同样要过字典替换：支援位成员的英文名（如 Ann/Nazuka）在此页出现，
-            # 不过 replacer 会漏译，LLM 只能按发音自由音译（如"安"/"纳兹卡"）
-            lines.append(strip_game_markup(replacer.replace(index_text)))
-            lines.append("")
+        # 索引页唯一作用：提取输出手法（Rotation）——仅角色查询需要；
+        # 槽位不回查（详细页区块内第一个角色即主控位，后续均为支援位）
+        index_text = st_fetcher.fetch_infodoc_index() if is_character else ""
 
         lines.append(f"=== {ELEMENT_CN[element]}队文字攻略 (stelladb /infodoc/{element.lower()}) ===")
         infodoc_text = st_fetcher.fetch_infodoc(element.lower())
         if infodoc_text and "Error" not in infodoc_text:
+            infodoc_text = strip_infodoc_noise(infodoc_text)
             if is_character:
-                infodoc_text = slice_character_sections(infodoc_text, character_en, lookup.get_character_names())
-            lines.append(strip_game_markup(replacer.replace(infodoc_text)))
+                block, members = extract_team_block(infodoc_text, character_en, lookup.get_character_names())
+
+                # 队伍槽位块：区块内第一个角色 = 主控位，其余 = 支援位
+                #（问询角色可能是主控位也可能是支援位，由区块出现顺序自然决定）
+                if members:
+                    member_display = []
+                    for name in members:
+                        member_res = lookup.lookup_term(name)
+                        member_display.append(member_res["cn"] if member_res else name)
+                    lines.append("=== 队伍槽位 ===")
+                    lines.append(f"主控位：{member_display[0]}")
+                    if len(member_display) > 1:
+                        lines.append("支援位：" + "、".join(member_display[1:]))
+                    lines.append("")
+
+                # Rotation 块：仅索引页提供；知识库规则约定默认不转述，
+                # 用户明确询问输出手法时由 LLM 取用
+                rotation = extract_rotation(index_text, character_en)
+                if rotation:
+                    lines.append("=== 输出手法（Rotation，索引页） ===")
+                    lines.append(strip_game_markup(replacer.replace(rotation)))
+                    lines.append("")
+
+                lines.append(strip_game_markup(replacer.replace(block)))
+            else:
+                lines.append(strip_game_markup(replacer.replace(infodoc_text)))
         else:
             lines.append("  [抓取失败]")
         lines.append("")

@@ -341,10 +341,10 @@ def run_fetcher_index() -> None:
             urllib.request.urlopen = original
 
 
-# ===== 节 F：how 双页抓取与角色段切分 =====
+# ===== 节 F：how 抓取（详细页队伍区块 + 索引页 Rotation） =====
 
 def run_query_how_section() -> None:
-    print("--- F how 双页切分 ---")
+    print("--- F 详细页队伍区块 + 索引页 Rotation ---")
     cache_dir = Path(tempfile.mkdtemp(prefix="stellasora_section_"))
     orig = {
         "infodoc": service.StelladbFetcher.fetch_infodoc,
@@ -352,14 +352,22 @@ def run_query_how_section() -> None:
         "trekker": service.StelladbFetcher.fetch_trekker,
         "presets": service.GoogleDocFetcher.fetch_presets,
     }
-    # 索引页 mock 含支援位成员 Ann/Nazuka（模拟真实 stelladb 索引页布局），
-    # 用于锁定回归：索引页也必须过字典替换（Ann→杏子, Nazuka→夏花）
-    mock_index = "Chaton (Dark Ray) | Rotation | Chaton (Main Slot) | Ann (1st Supp. Slot) | Nazuka (2nd Supp. Slot)"
+    # 详细页 mock：按真实结构（区块锚点行带 ⏏；区块内首角色=主控，后续=支援）
     mock_detailed = (
-        "Chaton (Dark Ray) | Main Slot | Skill Priority\n"
+        "Chaton (Dark Ray) | ⏏ Back to Top ⏏\n"
+        "Chaton (5★) | 1+/10/1/1+ (Main Skill >> Auto Attack = Ultimate)\n"
         "Chaton build details: Skill 1 > Skill 2\n"
-        "Flora | 1st Supp Slot | Supp Build\n"
-        "Flora build details: Supp only\n"
+        "Flora (4★) | 1/1/10/1 (Support Skill only)\n"
+        "Flora is the irreplaceable support of this team\n"
+        "Snowish Laru (Cannon) | ⏏ Back to Top ⏏\n"
+        "Snowish build details: other team only\n"
+    )
+    # 索引页 mock：Rotation 按六元素列段排列，猫眼（火）在第 2 段
+    mock_index = (
+        "Nazuna-Donna | Chaton (Dark Ray) | Wraith (Melee) | << Prev | Firefly WIP | Next >> | Otoha (Laser)\n"
+        "Rotation | Rotation (WIP) | Rotation | Rotation | Rotation (WIP) | Rotation\n"
+        "idk yet | Chaton Rotation content here | Wraith comps | Terra goals | Lux notes | Umbra tips\n"
+        "Donna (1st Supp. Slot) | Flora (1st Supp. Slot) | Gerie (1st Supp. Slot)\n"
     )
     try:
         # 离线保证：trekker 固定返回火属性文本，避免测试依赖外部网络
@@ -367,38 +375,60 @@ def run_query_how_section() -> None:
         service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
 
+        # 场景 1：问询主控位角色（猫眼）
         material = service.query_how("Chaton", cache_dir, with_presets=False)
-        idx_i, idx_c = material.find("索引页"), material.find("猫眼 (暗黑射线)")
-        check("F1 索引页前置且严格保序",
-              idx_i > -1 and idx_c > -1 and idx_i < idx_c, f"{idx_i} < {idx_c}")
-        check("F2 角色段切分：含猫眼段不含 Flora 段",
-              "猫眼 (暗黑射线)" in material and "紫槿 build details" not in material)
-        check("F8 索引页支援位成员过字典替换（Ann→杏子, Nazuka→夏花）",
-              "杏子 (1st Supp. Slot)" in material and "夏花 (2nd Supp. Slot)" in material
-              and "Ann (" not in material and "Nazuka (" not in material)
+        check("F1 主控问询：区块含猫眼段+紫槿支援段，不含其他队",
+              "猫眼 (5★)" in material and "irreplaceable support" in material
+              and "Snowish build details" not in material)
+        check("F2 主控问询槽位块：猫眼=主控位, 紫槿=支援位，全中文",
+              "主控位：猫眼" in material and "支援位：紫槿" in material
+              and "Chaton：" not in material and "Flora：" not in material)
+        check("F3 Rotation 仅取猫眼所在列段",
+              "猫眼 循环手法 content here" in material
+              and "Wraith comps" not in material and "idk yet" not in material)
 
+        # 场景 2：问询支援位角色（紫槿/Flora）→ 槽位块主控仍为猫眼
+        material_supp = service.query_how("Flora", cache_dir, with_presets=False)
+        check("F4 支援位问询：主控位仍为猫眼（不预设问询角色=主控）",
+              "主控位：猫眼" in material_supp and "支援位：紫槿" in material_supp
+              and "irreplaceable support" in material_supp)
+
+        # 场景 3：预设码保序
         service.GoogleDocFetcher.fetch_presets = lambda self: "=== 预设码推荐 ===\nChaton\nMain Trekker\nPreset Code\nABCD1234EFGH5678IJKL\n"
         material_p = service.query_how("Chaton", cache_dir, with_presets=True)
-        idx_p, idx_i2 = material_p.find("预设码"), material_p.find("索引页")
-        check("F3 预设码 < 索引页 严格保序", idx_p > -1 and idx_i2 > -1 and idx_p < idx_i2, f"{idx_p} < {idx_i2}")
+        idx_p, idx_s = material_p.find("预设码"), material_p.find("队伍槽位")
+        check("F5 预设码 < 队伍槽位 严格保序", idx_p > -1 and idx_s > -1 and idx_p < idx_s, f"{idx_p} < {idx_s}")
 
+        # 场景 4：元素查询——不切分、无槽位/Rotation 块
         material_elem = service.query_how("火", cache_dir, with_presets=False)
-        check("F4 元素查询不切分（整页返回）", "Supp only" in material_elem)
+        check("F6 元素查询不切分（整页返回，无槽位/Rotation块）",
+              "Snowish build details" in material_elem
+              and "队伍槽位" not in material_elem and "输出手法" not in material_elem)
 
+        # 场景 5：角色未命中 → 回退整页全文
         service.StelladbFetcher.fetch_infodoc = lambda self, element: "Flora build details: Supp only\n"
-        check("F5 角色未命中时回退整页全文",
+        check("F7 角色未命中时回退整页全文",
               "Supp only" in service.query_how("Chaton", cache_dir, with_presets=False))
 
+        # 场景 6：索引页空串 → 无 Rotation 块，槽位块正常
         service.StelladbFetcher.fetch_infodoc_index = lambda self: ""
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
         material_no_idx = service.query_how("Chaton", cache_dir, with_presets=False)
-        check("F6 索引页为空串时省略区块不崩",
-              "索引页" not in material_no_idx and "build details" in material_no_idx)
+        check("F8 索引页空串时槽位块正常、无Rotation块",
+              "主控位：猫眼" in material_no_idx and "输出手法" not in material_no_idx)
 
+        # 场景 7：infodoc Error
         service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
         service.StelladbFetcher.fetch_infodoc = lambda self, element: "Error fetching infodoc."
-        check("F7 infodoc 含 Error 时标注[抓取失败]",
+        check("F9 infodoc 含 Error 时标注[抓取失败]",
               "[抓取失败]" in service.query_how("Chaton", cache_dir, with_presets=False))
+
+        # 场景 8：Rotation 段数错位保护
+        bad_index = "Chaton (Dark Ray)\nRotation\nonly_one_cell\n"
+        service.StelladbFetcher.fetch_infodoc_index = lambda self: bad_index
+        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
+        material_bad = service.query_how("Chaton", cache_dir, with_presets=False)
+        check("F10 Rotation 段数错位时安全省略", "输出手法" not in material_bad)
     finally:
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]
