@@ -11,6 +11,7 @@ CLI 运行时用 data/.cache。
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from pathlib import Path
@@ -22,6 +23,8 @@ from fetcher_google_doc import GoogleDocFetcher
 from fetcher_stelladb import StelladbFetcher
 import term_replace as _term_replace_module
 from text_clean import detect_element, strip_game_markup
+
+logger = logging.getLogger("stellasora.service")
 
 ELEMENT_SECTIONS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
 ELEMENT_CN = {
@@ -216,19 +219,32 @@ def _split_cells(line: str) -> list:
     return [c.strip() for c in line.split(" | ") if c.strip()]
 
 
+def _collect_members(lines_slice: list, name_res: list, seen: set, members: list) -> None:
+    """从若干行中按出现顺序收集未收录的已知角色名（就地追加到 members）。"""
+    for line in lines_slice:
+        for c in _split_cells(line):
+            for name, name_re in name_res:
+                if name not in seen and name_re.match(c):
+                    seen.add(name)
+                    members.append(name)
+
+
 def extract_team_block(infodoc_text: str, character_en: str, all_character_names: list) -> tuple:
-    """从详细页切出**包含问询角色的整支队伍区块**，并按区块内角色出现顺序返回成员。
+    """从详细页切出**包含问询角色的整支队伍区块**（同角色多 build 自动合并），
+    并按区块内角色出现顺序返回成员。
 
     详细页为单元素纵向布局，每个队伍区块结构（实测）：
-        <主控角色> (<build>) | ⏏ Back to Top ⏏   ← 区块锚点行（首个角色 = 主控位）
-        ...主控 build（描述/技能优先度/秘纹/纹章）...
-        <支援角色1> (<星级>)                       ← 后续角色 = 支援位
+        <队伍名角色> (<build>) | ⏏ Back to Top ⏏   ← 区块锚点行（队名 ≠ 主控！）
+        <主控角色> (<星级>) | 技能优先度            ← 区块体首个角色详情段 = 主控位
+        ...主控 build（描述/秘纹/纹章）...
+        <支援角色1> (<星级>)                       ← 区块体后续角色 = 支援位
         <支援角色1> 的说明段...
-        <下一队主控角色> (...) | ⏏ Back to Top ⏏  ← 下一队伍区块开始
+        <下一队> (...) | ⏏ Back to Top ⏏           ← 下一队伍区块开始
 
-    槽位判定规则（stelladb 排版约定）：**区块内第一个角色 = 主控位，后续角色均为
-    支援位**——无需回查索引页的位置信息。问询角色可能是主控位，也可能是支援位：
-    支援位问询时从其所在区块的区块头（⏏ 锚点行）开始截取，保证拿到完整队伍。
+    槽位判定规则：**区块体（锚点行之后）内第一个角色详情段 = 主控位，后续角色均为
+    支援位**；锚点行队名角色不参与成员提取（队伍命名可 ≠ 主控，如暗队
+    Otoha (Laser) 的主控是 Cosette）。问询角色可能是主控位，也可能是支援位：
+    支援位问询时自动向前锚定其所属配队的区块头。
 
     返回 (区块文本, 按出现顺序去重的成员英文名列表)；未命中时返回 (整页全文, [])。
     """
@@ -241,83 +257,73 @@ def extract_team_block(infodoc_text: str, character_en: str, all_character_names
 
     lines = infodoc_text.split("\n")
 
-    # 1. 问询角色的区块头：其 ⏏ 锚点行（她是主控）；找不到则取其首次出现行
-    #    之前最近的 ⏏ 锚点行（她是支援，区块头 = 所属配队的主控锚点）
-    anchor_idx = -1
-    first_seen_idx = -1
+    # 1. 扫描：所有 ⏏ 锚点行；问询角色的锚点行（她是主控）；其首次"区块体内"出现行
+    #    （她是支援位）。首次出现只认锚点行之后——页面顶部目录行不算，避免目录区
+    #    匹配污染区块定位（Bug 1 修复）。
+    anchor_lines: list = []   # 所有 ⏏ 锚点行（升序）
+    own_anchor = -1           # 问询角色的锚点行
+    first_body_seen = -1      # 首个锚点行之后，问询角色首次出现行
     for li, line in enumerate(lines):
         cells = _split_cells(line)
-        is_anchor = ("⏏" in line or "Back to Top" in line)
-        if anchor_idx < 0 and is_anchor and any(char_re.match(c) for c in cells):
-            anchor_idx = li
-        if first_seen_idx < 0 and any(char_re.match(c) for c in cells):
-            first_seen_idx = li
-    if first_seen_idx < 0:
-        return infodoc_text, []
-    if anchor_idx < 0:
-        # 问询角色是支援位：向前找最近的区块锚点行（区块头 = 主控）
-        for li in range(first_seen_idx, -1, -1):
-            if "⏏" in lines[li] or "Back to Top" in lines[li]:
-                anchor_idx = li
-                break
-    if anchor_idx < 0:
+        is_anchor = "⏏" in line or "Back to Top" in line
+        char_here = any(char_re.match(c) for c in cells)
+        if is_anchor:
+            anchor_lines.append(li)
+            if own_anchor < 0 and char_here:
+                own_anchor = li
+        if first_body_seen < 0 and anchor_lines and char_here:
+            first_body_seen = li
+
+    if not anchor_lines:
         return infodoc_text, []
 
-    # 2. 区块终点：锚点行之后的下一个 ⏏ 行（页尾 BACK TO TOP 行也算边界）
+    # 2. 区块定位
+    if own_anchor >= 0:
+        anchor_idx = own_anchor      # 问询角色是某队锚点（主控/队名角色）
+    elif first_body_seen >= 0:
+        # 问询角色是支援位：取其首次出现行之前最近的锚点行（所属配队区块头）
+        prev = [a for a in anchor_lines if a < first_body_seen]
+        if not prev:
+            return infodoc_text, []
+        anchor_idx = prev[-1]
+    else:
+        return infodoc_text, []
+
+    # 3. 区块终点：无上限地向后吞并"锚点行匹配问询角色"的连续区块（同角色多 build
+    #    全取，不设次数上限——Bug 2 修复）；遇到其他角色的锚点行即止。
+    anchor_owner = next(
+        (n for n, r in name_res if any(r.match(c) for c in _split_cells(lines[anchor_idx]))),
+        None,
+    )
+    cursor = anchor_idx
     end_idx = len(lines)
-    for li in range(anchor_idx + 1, len(lines)):
-        if "⏏" in lines[li] or "Back to Top" in lines[li]:
-            end_idx = li
+    while True:
+        nxt = next((a for a in anchor_lines if a > cursor), -1)
+        if nxt < 0:
+            end_idx = len(lines)
+            break
+        nxt_cells = _split_cells(_TOP_ANCHOR_RE.sub("", lines[nxt]))
+        if anchor_owner and any(r.match(c) for c in nxt_cells for n, r in name_res if n == anchor_owner):
+            cursor = nxt  # 同角色多 build → 继续吞并
+        else:
+            end_idx = nxt  # 下一队伍区块开始
             break
 
+    # 4. 区块文本：锚点行（剥离 ⏏，保留队名）+ 区块体；成员 = 区块体（排除所有锚点行）
+    body_anchors = {a for a in anchor_lines if anchor_idx <= a < end_idx}
     block_lines = [_TOP_ANCHOR_RE.sub("", lines[anchor_idx]).rstrip(" |").strip()]
-    block_lines.extend(lines[anchor_idx + 1:end_idx])
+    block_lines.extend(
+        _TOP_ANCHOR_RE.sub("", lines[li]).rstrip(" |").strip()
+        for li in range(anchor_idx + 1, end_idx)
+        if li not in body_anchors
+    )
     block = re.sub(r"\n{3,}", "\n\n", "\n".join(block_lines)).strip()
 
-    # 3. 成员 = 区块内**按出现顺序**的已知角色名。
-    #    锚点行本身（区块标题，如 'Otoha (Laser)'）不参与成员提取——
-    #    队名角色不一定是主控（如暗队 Otoha (Laser) 的主控是 Cosette，
-    #    区块体中 'Cosette occupies this team's Main slot' 为准）。
-    #    主控 = 区块体中第一个出现详情段的角色（'X (5★)' 星级行）。
-    #    必须按行序扫描而非按名字表序遍历，否则主控位判定会错乱。
+    # 5. 成员 = 区块体（锚点行之后）按出现顺序的已知角色名。
+    #    锚点行队名角色不参与成员提取（队名 ≠ 主控，详见函数 docstring）。
     members: list = []
     seen: set = set()
-    for line in block_lines[1:]:  # 跳过锚点行
-        for c in _split_cells(line):
-            for name, name_re in name_res:
-                if name not in seen and name_re.match(c):
-                    seen.add(name)
-                    members.append(name)
-
-    # 4. 同角色多 build 合并：角色名出现在多个连续区块标题时（如 Chaton 暗黑射线
-    #    + Hybrid），其支援链相同——把后续同队区块的成员并入当前成员表。
-    #    实现方式：向后再扫最多 2 个区块，若其锚点行以问询角色开头且成员重叠，
-    #    则合并（去重保序）。
-    cursor = end_idx
-    for _ in range(2):
-        if cursor >= len(lines):
-            break
-        # 下一个锚点行
-        next_anchor = -1
-        for li in range(cursor, len(lines)):
-            if "⏏" in lines[li] or "Back to Top" in lines[li]:
-                next_anchor = li
-                break
-        if next_anchor < 0:
-            break
-        next_cells = _split_cells(_TOP_ANCHOR_RE.sub("", lines[next_anchor]))
-        if not any(char_re.match(c) for c in next_cells):
-            break  # 下一个区块不是问询角色 → 停止合并
-        # 合并下一区块的成员
-        for li in range(next_anchor + 1, len(lines)):
-            if li != next_anchor and ("⏏" in lines[li] or "Back to Top" in lines[li]):
-                break
-            for c in _split_cells(lines[li]):
-                for name, name_re in name_res:
-                    if name not in seen and name_re.match(c):
-                        seen.add(name)
-                        members.append(name)
-        cursor = next_anchor + 1
+    _collect_members(block_lines[1:], name_res, seen, members)
 
     return block, members
 
@@ -432,8 +438,9 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
             if is_character:
                 block, members = extract_team_block(infodoc_text, character_en, lookup.get_character_names())
 
-                # 队伍槽位块：区块内第一个角色 = 主控位，其余 = 支援位
-                #（问询角色可能是主控位也可能是支援位，由区块出现顺序自然决定）
+                # 队伍槽位块：区块体（锚点行之后）第一个角色详情段 = 主控位，
+                # 其余 = 支援位（问询角色可能是主控位也可能是支援位，
+                # 由区块内出现顺序自然决定）
                 if members:
                     member_display = []
                     for name in members:
@@ -444,6 +451,11 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
                     if len(member_display) > 1:
                         lines.append("支援位：" + "、".join(member_display[1:]))
                     lines.append("")
+                else:
+                    # 区块文本存在但未识别到任何成员：槽位块省略并留痕，
+                    # 便于上游数据结构变化时及时发现
+                    logger.warning("query_how(%s): 区块文本 %d 字符但未识别到成员，槽位块省略",
+                                   term, len(block))
 
                 # Rotation 块：仅索引页提供；知识库规则约定默认不转述，
                 # 用户明确询问输出手法时由 LLM 取用
