@@ -292,7 +292,9 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         index_text = st_fetcher.fetch_infodoc_index()
         if index_text:
             lines.append("=== 索引页（Rotation / 主控位 / 支援位） ===")
-            lines.append(strip_game_markup(index_text))
+            # 索引页同样要过字典替换：支援位成员的英文名（如 Ann/Nazuka）在此页出现，
+            # 不过 replacer 会漏译，LLM 只能按发音自由音译（如"安"/"纳兹卡"）
+            lines.append(strip_game_markup(replacer.replace(index_text)))
             lines.append("")
 
         lines.append(f"=== {ELEMENT_CN[element]}队文字攻略 (stelladb /infodoc/{element.lower()}) ===")

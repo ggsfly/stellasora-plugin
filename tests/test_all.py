@@ -352,7 +352,9 @@ def run_query_how_section() -> None:
         "trekker": service.StelladbFetcher.fetch_trekker,
         "presets": service.GoogleDocFetcher.fetch_presets,
     }
-    mock_index = "Chaton (Dark Ray) | Rotation | (Main Slot) | Supp Slot"
+    # 索引页 mock 含支援位成员 Ann/Nazuka（模拟真实 stelladb 索引页布局），
+    # 用于锁定回归：索引页也必须过字典替换（Ann→杏子, Nazuka→夏花）
+    mock_index = "Chaton (Dark Ray) | Rotation | Chaton (Main Slot) | Ann (1st Supp. Slot) | Nazuka (2nd Supp. Slot)"
     mock_detailed = (
         "Chaton (Dark Ray) | Main Slot | Skill Priority\n"
         "Chaton build details: Skill 1 > Skill 2\n"
@@ -366,11 +368,14 @@ def run_query_how_section() -> None:
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
 
         material = service.query_how("Chaton", cache_dir, with_presets=False)
-        idx_i, idx_c = material.find("索引页"), material.find("Chaton")
+        idx_i, idx_c = material.find("索引页"), material.find("猫眼 (暗黑射线)")
         check("F1 索引页前置且严格保序",
               idx_i > -1 and idx_c > -1 and idx_i < idx_c, f"{idx_i} < {idx_c}")
-        check("F2 角色段切分：含 Chaton 段不含 Flora 段",
-              "Chaton (Dark Ray)" in material and "Flora build details" not in material)
+        check("F2 角色段切分：含猫眼段不含 Flora 段",
+              "猫眼 (暗黑射线)" in material and "紫槿 build details" not in material)
+        check("F8 索引页支援位成员过字典替换（Ann→杏子, Nazuka→夏花）",
+              "杏子 (1st Supp. Slot)" in material and "夏花 (2nd Supp. Slot)" in material
+              and "Ann (" not in material and "Nazuka (" not in material)
 
         service.GoogleDocFetcher.fetch_presets = lambda self: "=== 预设码推荐 ===\nChaton\nMain Trekker\nPreset Code\nABCD1234EFGH5678IJKL\n"
         material_p = service.query_how("Chaton", cache_dir, with_presets=True)
