@@ -39,3 +39,14 @@ class StelladbFetcher:
         url = f"https://stelladb.pages.dev/infodoc/{element.lower()}"
         res = self.fetch_url(url)
         return res if res else "Error fetching infodoc."
+
+    def fetch_infodoc_index(self) -> str:
+        """抓取 infodoc 索引页（含各元素队 Rotation / Main Slot / Supp Slot 信息）。
+
+        索引页是多元素并列的表格，extract_ssr_content 折叠空单元格后列结构丢失，
+        但行内各元素的队伍名/Rotation/槽位标注仍按元素顺序排列，
+        LLM 可根据角色名匹配定位。
+        """
+        url = "https://stelladb.pages.dev/infodoc"
+        res = self.fetch_url(url)
+        return res if res else ""
