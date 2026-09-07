@@ -10,12 +10,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal, Optional
 import asyncio
 import json
 import sys
 import time
-from pathlib import Path
-from typing import Any, Literal, Optional
 
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
@@ -191,6 +192,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._cache_dir: Path | None = None
         self._answer_cache: CacheManager | None = None
         self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
+        self._sync_task: asyncio.Task[Any] | None = None
 
     # ===== 生命周期 =====
 
@@ -210,8 +212,55 @@ class StellaSoraPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
 
+    @staticmethod
+    def _calculate_delay_to_sync(
+        now: Optional[datetime] = None,
+        target_hour: int = 17,
+        target_minute: int = 0,
+    ) -> float:
+        """计算当前本地时间距离下一个目标同步时间（默认 17:00:00）的秒数。
+
+        若当前未过目标时间，计算到今日目标时间；若已过，计算到明日目标时间。
+        """
+        if now is None:
+            now = datetime.now()
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+
+    async def _schedule_daily_sync(self) -> None:
+        """每日 17:00 自动定时静默全量同步离线数据后台任务。"""
+        try:
+            while True:
+                delay = self._calculate_delay_to_sync()
+                self.ctx.logger.info("星塔旅人离线数据定时同步计划在 %.1f 秒后执行（目标: 17:00）", delay)
+                await asyncio.sleep(delay)
+                try:
+                    self.ctx.logger.info("开始执行每日 17:00 离线数据全量定时同步...")
+                    await asyncio.to_thread(sync_offline_data, sync_all=True)
+                    # 清空直发成品缓存（self._get_answer_cache()._memory_cache.clear() 并清理 answers 磁盘缓存）
+                    answers_dir = self._cache_dir_ready() / "answers"
+                    if answers_dir.exists():
+                        for p in answers_dir.glob("*.json"):
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+                    try:
+                        self._get_answer_cache()._memory_cache.clear()
+                    except Exception:
+                        pass
+                    self.ctx.logger.info("每日 17:00 离线数据定时同步完成")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.ctx.logger.warning("每日 17:00 离线数据定时同步执行异常: %s", exc)
+        except asyncio.CancelledError:
+            self.ctx.logger.info("每日定时同步后台任务已取消并优雅退出")
+
     async def on_load(self) -> None:
-        """插件加载：准备运行时缓存目录并同步 overrides 配置。
+        """插件加载：准备运行时缓存目录并同步 overrides 配置，启动每日 17:00 定时同步任务。
 
         字典缓存放 runtime_dir（非持久，可随时重建）；
         字典本体在插件包内 data/（只读）。
@@ -219,10 +268,15 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._apply_overrides_config()
+        self._sync_task = asyncio.create_task(self._schedule_daily_sync())
         self.ctx.logger.info("星塔旅人插件已加载，缓存目录: %s", self._cache_dir)
 
     async def on_unload(self) -> None:
-        """插件卸载：清空运行时缓存引用（文件留给磁盘回收）。"""
+        """插件卸载：取消每日定时同步任务并清空运行时缓存引用（文件留给磁盘回收）。"""
+        if self._sync_task and not self._sync_task.done():
+            self._sync_task.cancel()
+            await asyncio.gather(self._sync_task, return_exceptions=True)
+        self._sync_task = None
         self._cache_dir = None
         self._answer_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")

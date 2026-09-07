@@ -18,9 +18,11 @@
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
   J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
   K 手动更新指令    —— @Command('st_update') 鉴权拦截、授权后台同步、缓存清空与异常降级
+  L 定时自动同步    —— 每日 17:00 等待秒数计算、后台定时调度、同步完成清空缓存、on_unload 优雅取消
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import asyncio
 import json
 import shutil
@@ -830,6 +832,86 @@ async def run_manual_update() -> None:
         plug.sync_offline_data = orig_sync
 
 
+# ===== 节 L：定时自动同步与生命周期注销 =====
+
+async def run_daily_sync_schedule() -> None:
+    """测试每日 17:00 等待秒数计算、后台任务调度、同步缓存清理与注销。"""
+    # 1. 等待秒数算法断言
+    # Case 1: 当前 16:59:50 -> 目标当天 17:00:00 -> 10 秒
+    t1 = datetime(2026, 9, 8, 16, 59, 50)
+    delay1 = plug.StellaSoraPlugin._calculate_delay_to_sync(t1, target_hour=17, target_minute=0)
+    check("L1 未过 17:00 等待秒数精确到当天 17:00", delay1 == 10.0)
+
+    # Case 2: 当前正好 17:00:00 -> 目标明天 17:00:00 -> 86400 秒 (24h)
+    t2 = datetime(2026, 9, 8, 17, 0, 0)
+    delay2 = plug.StellaSoraPlugin._calculate_delay_to_sync(t2, target_hour=17, target_minute=0)
+    check("L2 正好 17:00:00 等待秒数为明天 17:00（86400秒）", delay2 == 86400.0)
+
+    # Case 3: 当前已过 17:00:05 -> 目标明天 17:00:00 -> 86400 - 5 = 86395 秒
+    t3 = datetime(2026, 9, 8, 17, 0, 5)
+    delay3 = plug.StellaSoraPlugin._calculate_delay_to_sync(t3, target_hour=17, target_minute=0)
+    check("L3 已过 17:00 等待秒数计算至明天 17:00（86395秒）", delay3 == 86395.0)
+
+    # Case 4: 上午 10:00:00 -> 目标当天 17:00:00 -> 7 * 3600 = 25200 秒
+    t4 = datetime(2026, 9, 8, 10, 0, 0)
+    delay4 = plug.StellaSoraPlugin._calculate_delay_to_sync(t4, target_hour=17, target_minute=0)
+    check("L4 上午时间计算至当天 17:00（25200秒）", delay4 == 25200.0)
+
+    # 2. 模拟极短延迟触发同步与缓存清理
+    sync_called = []
+    orig_sync = plug.sync_offline_data
+
+    def mock_sync_offline_data(**kwargs):
+        sync_called.append(kwargs)
+        return {"status": "ok"}
+
+    plug.sync_offline_data = mock_sync_offline_data
+    p, ctx = make_plugin(ttl=3600)
+
+    # 模拟 delay 序列：第一次返回 0.05 秒触发同步，后续返回 3600 秒防空转
+    delays = [0.05, 3600.0]
+
+    def mock_calculate_delay(*args, **kwargs):
+        if delays:
+            return delays.pop(0)
+        return 3600.0
+
+    orig_calc = p._calculate_delay_to_sync
+    p._calculate_delay_to_sync = mock_calculate_delay
+
+    try:
+        # 加载插件，启动后台任务
+        await p.on_load()
+        check("L5 on_load 成功创建后台任务 _sync_task", p._sync_task is not None and not p._sync_task.done())
+
+        # 准备缓存文件与内存数据
+        answers_dir = p._cache_dir_ready() / "answers"
+        answers_dir.mkdir(parents=True, exist_ok=True)
+        dummy_file = answers_dir / "sched_test.json"
+        dummy_file.write_text("{}", encoding="utf-8")
+        cache_mgr = p._get_answer_cache()
+        cache_mgr._memory_cache["sched_key"] = "cached_val"
+
+        # 等待后台任务唤醒并完成一次同步 (0.05s 延时 + 执行)
+        await asyncio.sleep(0.15)
+
+        check("L6 后台任务触发 sync_offline_data(sync_all=True)", len(sync_called) >= 1 and sync_called[0].get("sync_all") is True)
+        check("L7 同步后 answers 磁盘缓存被清空", not dummy_file.exists())
+        check("L8 同步后 answers 内存缓存被清空", len(cache_mgr._memory_cache) == 0)
+
+        # 3. on_unload 优雅注销与取消
+        task_ref = p._sync_task
+        await p.on_unload()
+        check("L9 on_unload 后 _sync_task 被置为 None", p._sync_task is None)
+        check("L10 后台任务被成功取消并完成 (done)", task_ref is not None and task_ref.done())
+    finally:
+        plug.sync_offline_data = orig_sync
+        p._calculate_delay_to_sync = orig_calc
+        if p._sync_task and not p._sync_task.done():
+            p._sync_task.cancel()
+            await asyncio.gather(p._sync_task, return_exceptions=True)
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -844,11 +926,12 @@ SECTIONS = {
     "I": ("非阻塞探针", run_nonblocking),
     "J": ("工具参数描述", run_tool_query_desc),
     "K": ("手动更新指令", run_manual_update),
+    "L": ("定时自动同步", run_daily_sync_schedule),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
-ASYNC_SECTIONS = {"G", "H", "I", "K"}
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+ASYNC_SECTIONS = {"G", "H", "I", "K", "L"}
 
 
 async def run_async_sections(keys: list) -> None:
