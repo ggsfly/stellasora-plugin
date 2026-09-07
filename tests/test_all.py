@@ -352,13 +352,23 @@ def run_query_how_section() -> None:
         "trekker": service.StelladbFetcher.fetch_trekker,
         "presets": service.GoogleDocFetcher.fetch_presets,
     }
-    # 详细页 mock：按真实结构（区块锚点行带 ⏏；区块内首角色=主控，后续=支援）
+    # 详细页 mock：按真实结构（区块锚点行带 ⏏；区块内首角色=主控，后续=支援；
+    # 每角色段含 描述/技能优先度/秘纹/纹章完整四件套）
     mock_detailed = (
         "Chaton (Dark Ray) | ⏏ Back to Top ⏏\n"
+        "Description | Skill Upgrade Priority\n"
         "Chaton (5★) | 1+/10/1/1+ (Main Skill >> Auto Attack = Ultimate)\n"
         "Chaton build details: Skill 1 > Skill 2\n"
+        "Priority Potentials | Recommended Main Discs\n"
+        "Cat Disc (C1) | Snow Disc (C6)\n"
+        "Optional Potentials | Emblem\n"
+        "Affix Priority | Fire PEN | 110 | Crit Rate | 15%\n"
+        "Main Skill Lv. | +3 levels | Fire DMG | 20%\n"
+        "Description | Skill Upgrade Priority\n"
         "Flora (4★) | 1/1/10/1 (Support Skill only)\n"
         "Flora is the irreplaceable support of this team\n"
+        "Priority Potentials | Emblem\n"
+        "Affix Priority | Charge Eff. | 40% | Support Skill Lv. | +3 levels\n"
         "Snowish Laru (Cannon) | ⏏ Back to Top ⏏\n"
         "Snowish build details: other team only\n"
     )
@@ -375,47 +385,49 @@ def run_query_how_section() -> None:
         service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
 
-        # 场景 1：问询主控位角色（猫眼）
-        material = service.query_how("Chaton", cache_dir, with_presets=False)
-        check("F1 主控问询：区块含猫眼段+紫槿支援段，不含其他队",
-              "猫眼 (5★)" in material and "irreplaceable support" in material
+        # 场景 1：问询主控位角色（猫眼），问"攻略"→ guide 模式（描述+技能+纹章）
+        material = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
+        check("F1 主控问询：队名行+本角色标签+队友段，不含其他队",
+              "配队1（猫眼 (暗黑射线)）" in material
+              and "本角色猫眼（主控位）" in material and "队友紫槿（支援位）" in material
               and "Snowish build details" not in material)
-        check("F2 主控问询槽位块：猫眼=主控位, 紫槿=支援位，全中文",
-              "主控位：猫眼" in material and "支援位：紫槿" in material
-              and "Chaton：" not in material and "Flora：" not in material)
+        check("F2 guide 模式含描述与纹章转置、无秘纹段",
+              "描述：" in material and "纹章推荐：" in material
+              and "70级：" in material and "80级：" in material
+              and "推荐主位秘纹：" not in material)
         check("F3 Rotation 仅取猫眼所在列段",
               "猫眼 循环手法 content here" in material
               and "Wraith comps" not in material and "idk yet" not in material)
 
-        # 场景 2：问询支援位角色（紫槿/Flora）→ 槽位块主控仍为猫眼
-        material_supp = service.query_how("Flora", cache_dir, with_presets=False)
-        check("F4 支援位问询：主控位仍为猫眼（不预设问询角色=主控）",
-              "主控位：猫眼" in material_supp and "支援位：紫槿" in material_supp
+        # 场景 2：问询支援位角色（紫槿/Flora）→ 本角色=紫槿（支援位），主控=猫眼
+        material_supp = service.query_how("Flora", cache_dir, with_presets=False, question="紫槿攻略")
+        check("F4 支援位问询：本角色紫槿(支援位)，猫眼为队友(主控位)",
+              "本角色紫槿（支援位）" in material_supp and "队友猫眼（主控位）" in material_supp
               and "irreplaceable support" in material_supp)
 
-        # 场景 3：预设码保序
+        # 场景 3：预设码保序（预设码在最前）
         service.GoogleDocFetcher.fetch_presets = lambda self: "=== 预设码推荐 ===\nChaton\nMain Trekker\nPreset Code\nABCD1234EFGH5678IJKL\n"
-        material_p = service.query_how("Chaton", cache_dir, with_presets=True)
-        idx_p, idx_s = material_p.find("预设码"), material_p.find("队伍槽位")
-        check("F5 预设码 < 队伍槽位 严格保序", idx_p > -1 and idx_s > -1 and idx_p < idx_s, f"{idx_p} < {idx_s}")
+        material_p = service.query_how("Chaton", cache_dir, with_presets=True, question="猫眼攻略")
+        idx_p, idx_t = material_p.find("预设码"), material_p.find("配队1")
+        check("F5 预设码 < 配队正文 严格保序", idx_p > -1 and idx_t > -1 and idx_p < idx_t, f"{idx_p} < {idx_t}")
 
-        # 场景 4：元素查询——不切分、无槽位/Rotation 块
+        # 场景 4：元素查询——不切分、无配队/Rotation 块
         material_elem = service.query_how("火", cache_dir, with_presets=False)
-        check("F6 元素查询不切分（整页返回，无槽位/Rotation块）",
+        check("F6 元素查询不切分（整页返回，无配队/Rotation块）",
               "Snowish build details" in material_elem
-              and "队伍槽位" not in material_elem and "输出手法" not in material_elem)
+              and "配队1" not in material_elem and "输出手法" not in material_elem)
 
         # 场景 5：角色未命中 → 回退整页全文
         service.StelladbFetcher.fetch_infodoc = lambda self, element: "Flora build details: Supp only\n"
         check("F7 角色未命中时回退整页全文",
               "Supp only" in service.query_how("Chaton", cache_dir, with_presets=False))
 
-        # 场景 6：索引页空串 → 无 Rotation 块，槽位块正常
+        # 场景 6：索引页空串 → 无 Rotation 块，配队正文正常
         service.StelladbFetcher.fetch_infodoc_index = lambda self: ""
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
-        material_no_idx = service.query_how("Chaton", cache_dir, with_presets=False)
-        check("F8 索引页空串时槽位块正常、无Rotation块",
-              "主控位：猫眼" in material_no_idx and "输出手法" not in material_no_idx)
+        material_no_idx = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
+        check("F8 索引页空串时配队正文正常、无Rotation块",
+              "本角色猫眼（主控位）" in material_no_idx and "输出手法" not in material_no_idx)
 
         # 场景 7：infodoc Error
         service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
@@ -427,7 +439,7 @@ def run_query_how_section() -> None:
         bad_index = "Chaton (Dark Ray)\nRotation\nonly_one_cell\n"
         service.StelladbFetcher.fetch_infodoc_index = lambda self: bad_index
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
-        material_bad = service.query_how("Chaton", cache_dir, with_presets=False)
+        material_bad = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
         check("F10 Rotation 段数错位时安全省略", "输出手法" not in material_bad)
 
         # 场景 9：队名角色 ≠ 主控（暗队 Otoha (Laser) 实例——主控是 Cosette）
@@ -440,11 +452,37 @@ def run_query_how_section() -> None:
             "Otoha's laser build revolves on the Soul Rend effect\n"
         )
         service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_umbra
-        material_otoha = service.query_how("Otoha", cache_dir, with_presets=False)
+        material_otoha = service.query_how("Otoha", cache_dir, with_presets=False, question="乙叶攻略")
         check("F11 队名角色≠主控（Otoha队主控=珂赛特）",
-              "主控位：珂赛特" in material_otoha
-              and "主控位：乙叶" not in material_otoha
-              and "支援位" in material_otoha)
+              "本角色乙叶（支援位）" in material_otoha
+              and "队友珂赛特（主控位）" in material_otoha)
+
+        # 场景 10：多角色联合——2 角色同队 → 单队输出（find_teams_by_members 全链路）
+        mock_aqua = (
+            "Nazuna-Donna | ⏏ Back to Top ⏏\n"
+            "Description | Skill Upgrade Priority\n"
+            "Nazuna (5★) | 10/10/1/10 (Main Skill > Ultimate)\n"
+            "Nazuna is the main dealer of this team\n"
+            "Donna (4★) | 1/1/10/1 (Support Skill only)\n"
+            "Donna supports with heals and buffs\n"
+        )
+        service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Aqua character data with Aqua element"
+        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_aqua
+        hit = service.find_teams_by_members(["小禾", "多娜"], cache_dir)
+        check("F12 多角色队伍字典匹配（小禾+多娜 → 同队命中）",
+              hit is not None and hit["team_name"] == "Nazuna-Donna"
+              and set(hit["members"]) == {"Nazuna", "Donna"})
+
+        # 场景 11：联合命中后 query_how 按多成员模式输出单队
+        material_team = service.query_how("小禾", cache_dir, with_presets=False, question="小禾和多娜的配队", members=["Nazuna", "Donna"])
+        check("F13 联合查询单队输出（无其他队+双本角色标签）",
+              material_team.count("配队1（") == 1
+              and "本角色小禾" in material_team and "本角色多娜" in material_team
+              and "Snowish build details" not in material_team)
+
+        # 场景 14：不同队角色组合 → 未命中
+        miss = service.find_teams_by_members(["小禾", "Flora"], cache_dir)
+        check("F14 不同队组合未命中", miss is None)
     finally:
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]

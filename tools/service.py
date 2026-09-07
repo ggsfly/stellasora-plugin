@@ -151,6 +151,36 @@ def count_character_names(text: str) -> int:
     return sum(1 for name in _get_lookup().get_character_names() if name in text)
 
 
+def find_character_names(text: str) -> list:
+    """返回 text 中命中的角色名列表（英文名，长名优先防子串误配）。
+
+    命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
+    先命中的长名保留、被覆盖区间的短名跳过）。
+    """
+    if not text:
+        return []
+    lookup = _get_lookup()
+    names = sorted(lookup.get_character_names(), key=len, reverse=True)
+    found: list = []
+    masked = list(text)
+    for name in names:
+        if not name or len(name) < 2:
+            continue
+        start = 0
+        while True:
+            idx = text.find(name, start)
+            if idx < 0:
+                break
+            if all(m == "#" for m in masked[idx:idx + len(name)]):
+                pass
+            elif all(m is None for m in masked[idx:idx + len(name)]):
+                found.append(name)
+                for k in range(idx, idx + len(name)):
+                    masked[k] = "#"
+            start = idx + 1
+    return found
+
+
 def _fit_lines(lines: list, max_length: Optional[int]) -> str:
     """把行列表拼成文本，超长时按行边界截断并标注（绝不切在行中间）。
 
@@ -207,24 +237,15 @@ _TOP_ANCHOR_RE = re.compile(r"\s*⏏\s*Back to Top\s*⏏\s*", re.IGNORECASE)
 _NAV_CELLS = {"<< Prev", "Next >>"}
 
 # Potentials 标签行：'Priority Potentials ...' / 'Optional Potentials ...' 开头的行。
-# 该标签行只造成 LLM 把后续 "+3 levels" 数据行整理成"优先潜能/可选潜能"章节
-# （实例副作用），直接删除标签行；数据行保留（秘纹/纹章/潜能在同区块内按行
-# 混排、无法按行区分，由知识库规则约束 LLM 不单独整理潜能章节）
-_POTENTIAL_LINE_RE = re.compile(r"^(?:Priority|Optional) Potentials\b", re.IGNORECASE)
-
-
 def strip_infodoc_noise(text: str) -> str:
-    """清理 infodoc 文本中的表格行号碎片、Potentials 标签行与多余空行（token 精简）。"""
+    """清理 infodoc 文本中的表格行号碎片与多余空行（token 精简）。
+
+    注意：Potentials 标签行**不在此处删除**——parse_infodoc_teams 需要它们
+    触发 disc/emblem/pot 模式切换。
+    """
     if not text:
         return text
-    kept = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if _ROW_NUM_LINE_RE.match(stripped):
-            continue
-        if _POTENTIAL_LINE_RE.match(stripped):
-            continue
-        kept.append(line)
+    kept = [line for line in text.split("\n") if not _ROW_NUM_LINE_RE.match(line.strip())]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
@@ -242,15 +263,179 @@ def _collect_members(lines_slice: list, name_res: list, seen: set, members: list
                     members.append(name)
 
 
+def _parse_team_body(block_lines: list, name_res: list) -> tuple:
+    """解析单支队伍区块体 → (members, roles, segments)。
+
+    状态机（实测结构）：
+        Description | Skill Upgrade Priority   ← 角色段头
+        <角色> (<星级>) | <技能升级优先度>       ← 角色行（含技能优先度）
+        <描述文本 / ★ Key Notes>
+        Priority Potentials | Recommended Main Discs   ← 秘纹锚（数据入 discs）
+        <秘纹数据>
+        Optional Potentials | Emblem            ← 纹章锚（数据行转置）
+        Affix Priority | <词条|数值...>          ← 纹章列模板首行
+        <下一角色段头> / 区块尾
+
+    槽位规则：区块体（锚点行之后）首个角色详情段 = 主控位，后续 = 支援位。
+    Priority/Optional Potentials 的数据行**全程丢弃**（用户明确无需抓取）。
+    """
+    members: list = []
+    roles: dict = {}
+    segments: dict = {}
+    seen: set = set()
+    seg: Optional[dict] = None
+    mode = "normal"           # normal | disc | emblem | pot
+    emblem_cols: list = []    # 纹章列模板（None = 空列）
+    emblem_cursor = 0
+    emblem_pending = None
+
+    def _flush_emblem_into(target: Optional[dict]) -> None:
+        """把 emblem 转置缓冲按 70/80/90 级写入目标角色段。"""
+        grade_labels = ["70级", "80级", "90级"]
+        if target is None:
+            return
+        for ci, col in enumerate(emblem_cols):
+            label = grade_labels[ci] if ci < len(grade_labels) else f"第{ci + 1}档"
+            if col:
+                target["emblem"].append(f"{label}：{'、'.join(col)}")
+            else:
+                target["emblem"].append(f"{label}：无需升级")
+        emblem_cols.clear()
+
+    def _close_segment() -> None:
+        """结束当前角色段：冲刷纹章转置并入队。"""
+        nonlocal seg, mode
+        if seg is not None and seg.get("en"):
+            _flush_emblem_into(seg)
+            segments[seg["en"]] = seg
+            if seg["en"] not in members:
+                members.append(seg["en"])
+                roles[seg["en"]] = "主控位" if len(members) == 1 else "支援位"
+        seg = None
+        mode = "normal"
+
+    for line in block_lines:
+        low = line.lower()
+        cells = _split_cells(line)
+
+        # 区块内嵌套的锚点行（同队多 build 的第二锚）→ 视作段边界
+        if "⏏" in line or "Back to Top" in line:
+            _close_segment()
+            continue
+
+        # 角色段头
+        if "description" in low and "skill upgrade priority" in low:
+            _close_segment()
+            seg = {"en": None, "skill": "", "description": [], "discs": [], "emblem": []}
+            continue
+
+        # Potentials 标签行 → 模式切换（判定顺序：Discs 优先 → Emblem → 纯 Potentials。
+        # 标签行常为混排形态，如 "Priority Potentials | Recommended Main Discs"——
+        # 其数据行是秘纹而非潜能，误判为 pot 会把秘纹/纹章全部丢弃。
+        # 注意：标签行**不关闭角色段**——"Optional Potentials | Emblem" 出现在段中，
+        # 其后的纹章数据仍属于当前角色段）
+        if "recommended main discs" in low:
+            mode = "disc"
+            continue
+        if "emblem" in low and len(line) <= 60:
+            mode = "emblem"
+            continue
+        if re.match(r"^\s*(?:Priority|Optional) Potentials\b", line, re.IGNORECASE):
+            _close_segment()
+            mode = "pot"
+            continue
+
+        # 角色行（"已知角色 + ★"行）：段内遇到新角色 → 自动收尾上一段并开新段
+        #（兼容两种形态：每段有 Description 头的常规布局，与无头行的变体）
+        char_match = None
+        for name, r in name_res:
+            if r.match(cells[0]) and any("★" in c for c in cells):
+                char_match = name
+                break
+
+        if char_match is not None:
+            if seg is not None and seg.get("en"):
+                _close_segment()
+            seg = {"en": char_match, "skill": cells[1] if len(cells) > 1 else "",
+                   "description": [], "discs": [], "emblem": []}
+            if char_match not in members:
+                members.append(char_match)
+                roles[char_match] = "主控位" if len(members) == 1 else "支援位"
+            continue
+
+        if seg is None:
+            continue
+
+        # 段内数据行分派
+        if mode == "disc":
+            seg["discs"].append(line)
+            continue
+        if mode == "emblem":
+            first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
+            if first_is_affix:
+                emblem_cols = _split_emblem_columns(cells[1:])
+                emblem_cursor = 0
+                emblem_pending = None
+                continue
+
+            def _fill_entry_local(entry: str) -> None:
+                nonlocal emblem_cursor
+                if not emblem_cols:
+                    return
+                for _ in range(len(emblem_cols)):
+                    if emblem_cursor >= len(emblem_cols):
+                        emblem_cursor = 0
+                    if emblem_cols[emblem_cursor] is not None:
+                        emblem_cols[emblem_cursor].append(entry)
+                        emblem_cursor += 1
+                        return
+                    emblem_cursor += 1
+
+            flushed = False
+            for c in cells:
+                if emblem_pending is not None:
+                    _fill_entry_local(f"{emblem_pending} {c}".strip())
+                    emblem_pending = None
+                elif _EMBLEM_VALUE_RE.match(c):
+                    continue  # 孤立数值格：保守丢弃
+                elif len(c) > 40:
+                    # 长句（描述/署名）→ 冲刷纹章并退出 emblem 模式
+                    _close_segment()
+                    seg = {"en": None, "skill": "", "description": [line], "discs": [], "emblem": []}
+                    flushed = True
+                    break
+                else:
+                    emblem_pending = c
+            if not flushed:
+                continue
+        if mode == "pot":
+            # 潜能数据行（'+3 levels' 结尾的短行）丢弃；叙述行恢复段内描述
+            if cells and all(c.endswith("levels") or re.match(r"^[\d.]+%$", c) for c in cells if c):
+                continue
+            mode = "normal"
+            if seg is not None:
+                seg["description"].append(line)
+            continue
+        # normal：描述文本
+        seg["description"].append(line)
+
+    _close_segment()
+    return members, roles, segments
+
+
 def extract_team_blocks(infodoc_text: str, character_en: str, all_character_names: list) -> list:
-    """从详细页收集**所有包含问询角色的队伍区块**。
+    """从详细页收集**所有包含问询角色的队伍区块**（结构化段级解析）。
 
     详细页为单元素纵向布局，每个队伍区块结构（实测）：
         <队伍名角色> (<build>) | ⏏ Back to Top ⏏   ← 区块锚点行（队名 ≠ 主控！）
-        <主控角色> (<星级>) | 技能优先度            ← 区块体首个角色详情段 = 主控位
-        ...主控 build（描述/秘纹/纹章）...
-        <支援角色1> (<星级>)                       ← 区块体后续角色 = 支援位
-        <下一队> (...) | ⏏ Back to Top ⏏           ← 下一队伍区块开始
+        Description | Skill Upgrade Priority         ← 角色段头
+        <主控角色> (<星级>) | <技能升级优先度>        ← 区块体首个角色详情段 = 主控位
+        <描述文本 / ★ Key Notes>
+        Priority Potentials | Recommended Main Discs ← 秘纹锚（数据入 discs）
+        <秘纹数据>
+        Optional Potentials | Emblem                 ← 纹章锚（数据行转置）
+        Affix Priority | <词条|数值...>               ← 纹章列模板首行
+        <下一角色段头> / <下一队伍锚点行>
 
     槽位判定规则：**区块体（锚点行之后）内第一个角色详情段 = 主控位，后续角色均为
     支援位**；锚点行队名角色不参与成员提取（队伍命名可 ≠ 主控，如暗队
@@ -260,8 +445,10 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
     花铃/翡冷翠等队的支援）：她作为锚点行队名 → 该区块收集（asker_role=main）；
     她作为区块体成员 → 其所属区块也收集（asker_role=support）。
 
-    返回区块信息列表 [{name, text, members, asker_role}, ...]，按页面出现顺序
-    排列；未命中时返回 []。
+    Returns:
+        区块信息列表 [{name, members, roles, segments, asker_role}...]，
+        按页面出现顺序排列；未命中时返回 []。segments[en] = {"skill": str,
+        "description": [行], "discs": [行], "emblem": [行]}。
     """
     if not infodoc_text:
         return []
@@ -284,7 +471,7 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
     if not anchors:
         return []
 
-    # 2. 逐区块确定边界与成员；收集包含问询角色的区块
+    # 2. 逐区块解析；收集包含问询角色的区块
     results: list = []
     for idx, (start, team_name) in enumerate(anchors):
         end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(lines)
@@ -297,50 +484,22 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
         ]
         block_lines = [team_name] + [bl for bl in body_lines if bl]
 
-        members: list = []
-        seen: set = set()
-        _collect_members(block_lines[1:], name_res, seen, members)
+        members, roles, segments = _parse_team_body(block_lines, name_res)
 
         # 收集条件：问询角色是队名角色 或 区块体成员
-        if char_re.match(team_name) or character_en in seen:
-            block = re.sub(r"\n{3,}", "\n\n", "\n".join(block_lines)).strip()
+        asker_hit = char_re.match(team_name) or character_en in members
+        if asker_hit:
             # asker_role：区块体首个角色详情段 = 主控位；问询角色排首位则主控
             asker_role = "main" if members and members[0] == character_en else "support"
             results.append({
                 "name": team_name,
-                "text": block,
                 "members": list(members),
+                "roles": dict(roles),
+                "segments": dict(segments),
                 "asker_role": asker_role,
             })
 
     return results
-
-
-def _extract_member_segment(block_lines: list, char_re) -> list:
-    """从队伍区块中截取**问询角色的详情子段**（支援位问询的资料精简）。
-
-    角色详情段 = 该角色的 'X (星级)' 行（或其 Description 段头行）起，
-    到下一个 Description 段头行 / 区块尾。未定位到角色行时返回原区块（回退）。
-    """
-    char_idx = -1
-    for i, line in enumerate(block_lines):
-        cells = _split_cells(line)
-        if any(char_re.match(c) for c in cells):
-            char_idx = i
-            break
-    if char_idx < 0:
-        return block_lines
-    seg_start = 0
-    for i in range(char_idx, -1, -1):
-        if block_lines[i].strip().lower().startswith("description"):
-            seg_start = i
-            break
-    seg_end = len(block_lines)
-    for i in range(char_idx + 1, len(block_lines)):
-        if block_lines[i].strip().lower().startswith("description"):
-            seg_end = i
-            break
-    return block_lines[seg_start:seg_end]
 
 
 def extract_rotation(index_text: str, character_en: str) -> str:
@@ -541,6 +700,87 @@ def _restructure_block(body_lines: list) -> list:
     return out
 
 
+def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
+    """联合查询：判定 2-3 个角色是否共属同一配队。
+
+    流程（用户约定）：把现有队伍做成"仅成员集合"字典 → 全部角色命中同一队伍
+    才放行；否则返回 None（由调用方回"未找到"）。
+
+    **队伍可以跨元素混编**（如小禾-多娜-苍兰队），因此候选页为全部六元素
+    详情页逐一扫描，不做"首角色元素"捷径。
+
+    Args:
+        terms: 问句中命中的角色名列表（中英文均可，内部 lookup_term 归一为
+            英文名；归一后去重，不足 2 个或超过 3 个视为不命中）
+        cache_dir: 缓存目录（fetcher 参数）
+
+    Returns:
+        命中时 {"team_name": 完整队名, "members": [英文名按序],
+        "element": 队伍元素, "page_text": 剥离噪声后的元素页全文}；
+        任一角色未命中或无共同队伍时 None。
+    """
+    if not terms:
+        return None
+    lookup, _last, st_fetcher, _gd, _replacer = _get_services(cache_dir)
+    en_names: list = []
+    for term in terms:
+        res = lookup.lookup_term(term)
+        if not res or res.get("cat") != "Character":
+            return None  # 非角色词条直接判不命中
+        if res["en"] not in en_names:
+            en_names.append(res["en"])
+    if len(en_names) < 2 or len(en_names) > 3:
+        return None  # 归一后不是 2-3 个角色
+
+    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
+    wanted = set(en_names)
+
+    # 全元素页逐一扫描（抓取缓存 1h TTL，重复查询零成本）
+    for element in ELEMENT_SECTIONS:
+        infodoc_text = st_fetcher.fetch_infodoc(element.lower())
+        if not infodoc_text or "Error" in infodoc_text:
+            continue
+        clean = strip_infodoc_noise(infodoc_text)
+        lines = clean.split("\n")
+
+        # 队伍字典：{队名: 成员英文名列表}，单页扫描一次
+        current_name = ""
+        current_members: list = []
+        teams: dict = {}
+        order: list = []
+        for line in lines:
+            if "⏏" in line or "Back to Top" in line:
+                cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
+                cells = _split_cells(cleaned)
+                if cells:
+                    if current_name:
+                        teams[current_name] = current_members
+                    current_name = cells[0]
+                    current_members = []
+                    if current_name not in teams:
+                        order.append(current_name)
+                continue
+            if not current_name:
+                continue
+            for c in _split_cells(line):
+                for n, r in name_res:
+                    if n not in current_members and r.match(c):
+                        current_members.append(n)
+        if current_name:
+            teams[current_name] = current_members
+
+        # 匹配：所有角色都在同一队伍里
+        for name in order:
+            if wanted.issubset(set(teams.get(name, []))):
+                return {
+                    "team_name": name,
+                    "members": teams[name],
+                    "element": element,
+                    "page_text": clean,
+                }
+    return None
+
+
 def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length: Optional[int] = None) -> str:
     """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。"""
     lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
@@ -588,6 +828,81 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         preset_lines.append("")
         lines += preset_lines
 
+def query_how(
+    term: str,
+    cache_dir: Path,
+    with_presets: bool = False,
+    max_length: Optional[int] = None,
+    question: str = "",
+    members: Optional[list] = None,
+) -> str:
+    """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。
+
+    Args:
+        question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
+        members: 多角色联合查询的角色英文名列表（2-3 个）；非空时仅输出
+            同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
+    """
+    lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
+    res = lookup.lookup_term(term)
+    if not res:
+        return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
+
+    element: Optional[str] = None
+    character_en = res["en"]
+    character_cn = res["cn"]
+    is_character = res["cat"] == "Character"
+
+    if is_character:
+        num_id = res["id"].split(".")[1]
+        trekker_text = st_fetcher.fetch_trekker(num_id)
+        element = detect_element(trekker_text)
+
+    if not element:
+        if res["en"] in ELEMENT_SECTIONS:
+            element = res["en"]
+        elif term in ELEMENT_SECTIONS:
+            element = term
+
+    # 问法裁剪模式判定（省 token：资料按问法过滤字段）
+    low_q = question or ""
+    if any(k in low_q for k in ("完整", "详细", "全部", "所有")):
+        mode = "full"
+    elif any(k in low_q for k in ("配队", "队伍", "阵容")):
+        mode = "team"
+    elif "纹章" in low_q:
+        mode = "emblem"
+    elif "秘纹" in low_q:
+        mode = "disc"
+    elif any(k in low_q for k in ("技能", "升级", "加点")):
+        mode = "skill"
+    else:
+        mode = "guide"
+
+    lines: list[str] = []
+
+    # 预设码区块放在攻略正文之前：它是用户明确要求的内容（--presets），
+    # 且输出可能因长度上限被截断——放在前面保证不被截掉
+    if with_presets:
+        preset_lines: list[str] = ["=== 预设码推荐 (Google Docs) ==="]
+        presets = gd_fetcher.fetch_presets()
+        if "Error" in presets:
+            preset_lines.append("  [预设码抓取失败]")
+        elif is_character:
+            block = extract_preset_block(presets, character_en)
+            if block:
+                preset_lines.append(strip_game_markup(replacer.replace(block)))
+            elif element:
+                section = extract_element_preset_section(presets, element)
+                preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {character_en} 相关内容。")
+            else:
+                preset_lines.append(f"  预设码文档中未找到 {character_en} 相关内容。")
+        elif element:
+            section = extract_element_preset_section(presets, element)
+            preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {element} 相关内容。")
+        preset_lines.append("")
+        lines += preset_lines
+
     if element:
         # 索引页唯一作用：提取输出手法（Rotation）——仅角色查询需要；
         # 槽位不回查（详细页区块体首个角色详情段即主控位，后续均为支援位）
@@ -598,30 +913,15 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         if infodoc_text and "Error" not in infodoc_text:
             infodoc_text = strip_infodoc_noise(infodoc_text)
             if is_character:
+                also = [m for m in (members or []) if m != character_en]
                 teams = extract_team_blocks(infodoc_text, character_en, lookup.get_character_names())
+                # 多角色联合查询：只保留同时包含全部成员的队伍
+                if also:
+                    wanted = set(also) | {character_en}
+                    teams = [t for t in teams if wanted.issubset(set(t["members"]))]
                 if teams:
-                    # 队伍槽位块：逐队伍列出主控/支援；成员集合相同的连续多 build
-                    # 队伍合并为一行（队名并列），避免槽位重复刷屏
-                    lines.append("=== 队伍槽位（按队伍） ===")
-                    slot_groups: list = []  # [(队名列表, 成员列表)]
-                    for team in teams:
-                        member_display = []
-                        for name in team["members"]:
-                            member_res = lookup.lookup_term(name)
-                            member_display.append(member_res["cn"] if member_res else name)
-                        if slot_groups and slot_groups[-1][1] == member_display:
-                            slot_groups[-1][0].append(team["name"])
-                        else:
-                            slot_groups.append(([team["name"]], member_display))
-                    for names, member_display in slot_groups:
-                        # 队名过字典替换（角色名+build 名均中文化，保留流派信息）
-                        team_names = [strip_game_markup(replacer.replace(n)) for n in names]
-                        slot_line = f"[{team_names[0] if len(team_names) == 1 else ' / '.join(team_names)}] 主控位：{member_display[0]}"
-                        if len(member_display) > 1:
-                            slot_line += "；支援位：" + "、".join(member_display[1:])
-                        lines.append(slot_line)
-                    lines.append("")
-
+                    # 输出顺序：问询角色（们）排区块首位的队伍在前——保持页序即可，
+                    # 槽位与定位已在各成员标签中体现
                     # Rotation 块：仅索引页提供；知识库规则约定默认不转述，
                     # 用户明确询问输出手法时由 LLM 取用
                     rotation = extract_rotation(index_text, character_en)
@@ -630,18 +930,39 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
                         lines.append(strip_game_markup(replacer.replace(rotation)))
                         lines.append("")
 
-                    # 各队伍正文：
-                    # - 问询角色为主控位的区块 → 全文（她的 build 与配队完整资料）
-                    # - 问询角色为支援位的区块 → 只发队名 + 她的详情段
-                    #   （避免多队全量资料撑爆直发 LLM 的 300 字输出）
-                    char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
-                    for team in teams:
-                        body_lines = team["text"].split("\n")
-                        if team["asker_role"] == "support":
-                            body_lines = _extract_member_segment(body_lines, char_re)
-                        restructured = _restructure_block(body_lines)
-                        lines.append(strip_game_markup(replacer.replace("\n".join(restructured))))
-                        lines.append("")
+                    asker_set = set(members) if members else {character_en}
+
+                    for team_idx, team in enumerate(teams):
+                        # 队名行（过字典替换，保留 build 流派信息）
+                        lines.append(f"配队{team_idx + 1}（{strip_game_markup(replacer.replace(team['name']))}）")
+
+                        # 成员顺序：问询角色优先，其余按区块内出现顺序
+                        ordered = [m for m in team["members"] if m in asker_set]
+                        ordered += [m for m in team["members"] if m not in asker_set]
+
+                        for m in ordered:
+                            seg = team["segments"].get(m)
+                            if not seg:
+                                continue
+                            role = team["roles"].get(m, "支援位")
+                            is_asker = m in asker_set
+                            tag = "本角色" if is_asker else "队友"
+                            member_res = lookup.lookup_term(m)
+                            member_cn = member_res["cn"] if member_res else m
+                            lines.append(f"{tag}{member_cn}（{role}）")
+
+                            if mode in ("full", "guide", "team") and seg["description"]:
+                                lines.append("描述：")
+                                lines.extend(seg["description"])
+                            if mode in ("full", "guide", "skill", "team") and seg["skill"]:
+                                lines.append(f"技能升级优先度：{seg['skill']}")
+                            if mode == "disc" and seg["discs"]:
+                                lines.append("推荐主位秘纹：")
+                                lines.extend(seg["discs"])
+                            if mode in ("full", "guide", "emblem", "team") and seg["emblem"]:
+                                lines.append("纹章推荐：")
+                                lines.extend(seg["emblem"])
+                            lines.append("")
                 else:
                     # 区块未命中（如问询角色不在本元素页）：回退整页
                     lines.append(strip_game_markup(replacer.replace(infodoc_text)))
@@ -655,6 +976,81 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
 
     return _fit_lines(lines, max_length)
+
+
+def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
+    """联合查询：判定 2-3 个角色是否共属同一配队。
+
+    流程（用户约定）：把现有队伍做成"仅成员集合"字典 → 全部角色命中同一队伍
+    才放行；否则返回 None（由调用方回"未找到"）。
+
+    Args:
+        terms: 问句中命中的角色名（中英文均可，内部 lookup_term 归一为英文名，
+            归一后去重；归一后不足 2 个或超过 3 个视为不命中）
+        cache_dir: 缓存目录（fetcher 参数）
+
+    Returns:
+        命中时 {"team_name": 完整队名, "members": [英文名], "element": 元素}；
+        任一角色未命中或无共同队伍时 None。
+    """
+    if not terms:
+        return None
+    lookup, _last, st_fetcher, _gd, _replacer = _get_services(cache_dir)
+    en_names: list = []
+    for term in terms:
+        res = lookup.lookup_term(term)
+        if not res or res.get("cat") != "Character":
+            return None  # 非角色词条直接判不命中
+        if res["en"] not in en_names:
+            en_names.append(res["en"])
+    if len(en_names) < 2 or len(en_names) > 3:
+        return None  # 归一后不是 2-3 个角色
+
+    # 以第一个角色的元素页为唯一候选页（同队角色必同元素）
+    probe = en_names[0]
+    num_id = lookup.lookup_term(probe)["id"].split(".")[1]
+    element = detect_element(st_fetcher.fetch_trekker(num_id))
+    if not element:
+        return None
+    infodoc_text = st_fetcher.fetch_infodoc(element.lower())
+    if not infodoc_text or "Error" in infodoc_text:
+        return None
+
+    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
+    lines = strip_infodoc_noise(infodoc_text).split("\n")
+    wanted = set(en_names)
+
+    # 队伍字典：{队名: 成员英文名列表}，全页扫描一次
+    current_name = ""
+    current_members: list = []
+    teams: dict = {}
+    order: list = []
+    for line in lines:
+        if "⏏" in line or "Back to Top" in line:
+            cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
+            cells = _split_cells(cleaned)
+            if cells:
+                if current_name:
+                    teams[current_name] = current_members
+                current_name = cells[0]
+                current_members = []
+                if current_name not in teams:
+                    order.append(current_name)
+            continue
+        if not current_name:
+            continue
+        for c in _split_cells(line):
+            for n, r in name_res:
+                if n not in current_members and r.match(c):
+                    current_members.append(n)
+    if current_name:
+        teams[current_name] = current_members
+
+    # 匹配：所有角色都在同一队伍里
+    for name in order:
+        if wanted.issubset(set(teams.get(name, []))):
+            return {"team_name": name, "members": teams[name], "element": element}
+    return None
 
 
 _PRESET_CODE_RE = re.compile(r"[A-Za-z0-9]{20,}")
