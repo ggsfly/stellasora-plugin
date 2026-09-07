@@ -774,8 +774,11 @@ def query_how(
         trekker_text = st_fetcher.fetch_trekker(num_id)
         element = detect_element(trekker_text)
 
-    if not element and is_character:
-        # trekker 页无元素信息（如新角色未建页）：全元素页扫描找其所在队伍
+        # trekker 页的 detect_element 是全文关键词搜索，可能被页面里其他元素
+        # 关键词误判（如薇洛（盛夏）trekker 页含 Lux 关联字但实际是 Aqua 队）。
+        # 权威判定：全元素页扫描找角色真实所在队伍页；扫描确认后才采信
+        # trekker 的判定结果，扫描发现不一致时以扫描为准。
+        scanned = None
         for elem in ELEMENT_SECTIONS:
             page = st_fetcher.fetch_infodoc(elem.lower())
             if not page or "Error" in page:
@@ -784,10 +787,17 @@ def query_how(
             for probe_line in strip_infodoc_noise(page).split("\n"):
                 probe_cells = _split_cells(probe_line)
                 if any(char_re_probe.match(c) for c in probe_cells):
-                    element = elem
+                    scanned = elem
                     break
-            if element:
+            if scanned:
                 break
+        if scanned and element and scanned != element:
+            logger.info(
+                "element 修正: %s trekker=%s → 扫描=%s", character_en, element, scanned
+            )
+            element = scanned
+        elif scanned:
+            element = scanned
 
     if not element:
         if res["en"] in ELEMENT_SECTIONS:
