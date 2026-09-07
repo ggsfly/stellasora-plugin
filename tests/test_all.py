@@ -486,6 +486,60 @@ def run_query_how_section() -> None:
         # 场景 14：不同队角色组合 → 未命中
         miss = service.find_teams_by_members(["小禾", "Flora"], cache_dir)
         check("F14 不同队组合未命中", miss is None)
+
+        # 场景 15：多角色别名识别与多 build 连续吞并（F15 回归用例）
+        # 1. 动态别名 "春科" -> "科洛妮丝（新春）"
+        service.configure_overrides(aliases={"春科": "科洛妮丝（新春）"})
+        try:
+            # find_character_names 识别别名并输出官方名
+            extracted = service.find_character_names("春科 猫眼 谁好")
+            check("F15-1 俗称别名提取为官方角色名",
+                  "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
+                  f"提取结果: {extracted}")
+
+            # 2. 多 build 连续吞并（同一角色多 build 区块连续排列，向后吞并合并成员且队伍不发生断裂）
+            mock_multi_build = (
+                "Chaton (Dark Ray) | ⏏ Back to Top ⏏\n"
+                "Description | Skill Upgrade Priority\n"
+                "Chaton (5★) | 10/10/1/10\n"
+                "Chaton Dark Ray DPS details\n"
+                "Springseek Coronis (5★) | 1/1/10/1\n"
+                "Coronis NY support details\n"
+                "Priority Potentials | Recommended Main Discs\n"
+                "Disc A | Disc B\n"
+                "Chaton (Hybrid) | ⏏ Back to Top ⏏\n"
+                "Description | Skill Upgrade Priority\n"
+                "Chaton (5★) | 1/10/10/1\n"
+                "Chaton Hybrid alternate build\n"
+                "Springseek Coronis (5★) | 1/1/10/1\n"
+                "Coronis NY support details for hybrid\n"
+            )
+            # 验证底层 extract_team_blocks 对同角色多 build 的完整解析与成员保留
+            blocks = service.extract_team_blocks(
+                mock_multi_build, "Chaton", service._get_lookup().get_character_names()
+            )
+            check("F15-2 extract_team_blocks 对多build完整解析且各build队伍不断裂",
+                  len(blocks) == 2
+                  and blocks[0]["name"] == "Chaton (Dark Ray)"
+                  and blocks[1]["name"] == "Chaton (Hybrid)"
+                  and "Springseek Coronis" in blocks[0]["members"]
+                  and "Springseek Coronis" in blocks[1]["members"])
+
+            # 验证基于别名提取的角色在 find_teams_by_members 中精准同队命中
+            service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_multi_build
+            alias_hit = service.find_teams_by_members(extracted, cache_dir)
+            check("F15-3 别名提取后多角色联合同队命中",
+                  alias_hit is not None
+                  and alias_hit["team_name"] == "Chaton (Dark Ray)"
+                  and set(alias_hit["members"]) == {"Chaton", "Springseek Coronis"})
+
+            # 验证 query_how 联合单队输出与双角色标识
+            mat_team = service.query_how("猫眼", cache_dir, with_presets=False,
+                                         question="春科和猫眼", members=["Chaton", "Springseek Coronis"])
+            check("F15-4 联合查询双角色标签输出且排版完整",
+                  "本角色猫眼" in mat_team and "本角色科洛妮丝（新春）" in mat_team)
+        finally:
+            service.configure_overrides(aliases={})
     finally:
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]
@@ -830,6 +884,57 @@ async def run_manual_update() -> None:
         check("K15 异常返回码为 1 且包含错误信息", fail_res[2] == 1 and "network down" in fail_res[1])
     finally:
         plug.sync_offline_data = orig_sync
+
+    # 5. 离线持久化数据读取与 force_update 参数
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        # 准备 offline 假数据（路径为 infodocs/*.txt 或 *.json，presets/presets.txt 或 presets.json）
+        offline_infodocs = tmp_dir / "offline" / "infodocs"
+        offline_infodocs.mkdir(parents=True, exist_ok=True)
+        (offline_infodocs / "index.txt").write_text("Offline Infodoc Index Content", encoding="utf-8")
+        (offline_infodocs / "ignis.txt").write_text("Offline Ignis Detailed Content", encoding="utf-8")
+
+        offline_presets = tmp_dir / "offline" / "presets"
+        offline_presets.mkdir(parents=True, exist_ok=True)
+        (offline_presets / "presets.txt").write_text("Offline Presets TSV Content", encoding="utf-8")
+
+        st_fetcher = service.StelladbFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
+        gd_fetcher = service.GoogleDocFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
+
+        network_calls: list = []
+
+        def mock_urlopen(req, timeout=10):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            network_calls.append(url)
+            return _FakeHTTPResponse(b"Online Fresh Content")
+
+        orig_urlopen = urllib.request.urlopen
+        try:
+            urllib.request.urlopen = mock_urlopen
+
+            # 5.1 force_update=False 时直接读取 offline 本地文件，不发生网络请求
+            res_idx = st_fetcher.fetch_infodoc_index(force_update=False)
+            res_elem = st_fetcher.fetch_infodoc("ignis", force_update=False)
+            res_pre = gd_fetcher.fetch_presets(force_update=False)
+
+            check("K16 force_update=False 优先读取离线文件",
+                  res_idx == "Offline Infodoc Index Content"
+                  and res_elem == "Offline Ignis Detailed Content"
+                  and "Offline Presets TSV Content" in res_pre)
+            check("K17 离线命中时不产生网络调用", len(network_calls) == 0, str(network_calls))
+
+            # 5.2 force_update=True 时绕过离线文件发起网络请求
+            res_idx_force = st_fetcher.fetch_infodoc_index(force_update=True)
+            res_elem_force = st_fetcher.fetch_infodoc("ignis", force_update=True)
+            res_pre_force = gd_fetcher.fetch_presets(force_update=True)
+
+            check("K18 force_update=True 强制抓取在线新数据",
+                  res_idx_force == "Online Fresh Content"
+                  and res_elem_force == "Online Fresh Content"
+                  and "Online Fresh Content" in res_pre_force)
+            check("K19 force_update=True 发起 3 次网络请求", len(network_calls) == 3, str(network_calls))
+        finally:
+            urllib.request.urlopen = orig_urlopen
 
 
 # ===== 节 L：定时自动同步与生命周期注销 =====
