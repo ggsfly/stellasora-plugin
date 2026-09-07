@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 import asyncio
 import json
+import logging
 import sys
 import time
 
@@ -60,6 +61,29 @@ def _load_game_knowledge() -> str:
         except Exception:
             _GAME_KNOWLEDGE_CACHE = ""
     return _GAME_KNOWLEDGE_CACHE
+
+
+logger = logging.getLogger("stellasora.plugin")
+
+# 直发提示词单一事实源文档路径与模块级缓存（修改文档后需重启插件生效）
+_PROMPT_DOC_PATH = Path(__file__).resolve().parent / "docs" / "prompts.md"
+_PROMPT_DOC_CACHE: Optional[str] = None
+
+
+def _load_prompt_doc() -> Optional[str]:
+    """加载 docs/prompts.md 直发提示词文档（模块级缓存，单一事实源）。
+
+    提示词文档是直发模式的必需项：缺失或读取失败记录 error 并返回 None
+    （不回退内嵌旧文），由 _direct_send 显式处理失败。
+    """
+    global _PROMPT_DOC_CACHE
+    if _PROMPT_DOC_CACHE is None:
+        try:
+            _PROMPT_DOC_CACHE = _PROMPT_DOC_PATH.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.error("加载直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH, exc)
+            _PROMPT_DOC_CACHE = None
+    return _PROMPT_DOC_CACHE
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -341,46 +365,11 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     # ===== 直接发送模式 =====
 
-    # 说明：游戏机制知识与输出格式规范的单一事实源为 docs/game_knowledge.md（{knowledge_block}），本 Prompt 仅保留回答行为约束；本 Prompt 为插件内嵌模板，非 prompts/ 目录模板，不受多语言同步约束。
-    _DIRECT_SEND_PROMPT = (
-        "{persona_block}"
-        "{knowledge_block}"
-        "你是星塔旅人（Stella Sora）游戏攻略助手。用户在 QQ 群里问了下面这个问题，"
-        "下面还附有一份由攻略站抓取的、已替换为官方中文译名的原始攻略资料。\n"
-        "你的任务：\n"
-        "1. 只依据资料回答用户问的问题，资料里与问题无关的条目不要列出\n"
-        "2. 按上面的人格与表达风格用简体中文自然口语输出，面向 QQ 群聊场景，直接给出答案本身\n"
-        "3. 数值、等级必须与资料完全一致\n"
-        "4. 资料按「配队N（队伍名）→ 成员（定位）→ 各成员四类字段」分块。资料是"
-        "全量的——你根据用户问题自行决定输出哪些内容：\n"
-        "   a. 问题含「完整/详细/全部/所有」→ 全量输出：每个队伍的全部成员、"
-        "全部字段逐一列出，不限字数；同一字段在多个队伍中内容相同时只详述一次，"
-        "其余队伍注明\"与配队N相同\"即可（去重不删内容）\n"
-        "   b. 用户只问「配队」→ 只输出每个队伍的：队伍名、各成员及其定位、成员描述；"
-        "不输出技能升级优先度、秘纹和纹章\n"
-        "   c. 用户只问「纹章」→ 只输出队伍名和各成员的纹章推荐\n"
-        "   d. 用户只问「秘纹」→ 只输出队伍名和各成员的推荐主位秘纹\n"
-        "   e. 用户只问「技能/升级」→ 只输出队伍名和各成员的技能升级优先度\n"
-        "   f. 其他笼统问法（如只说\"XX攻略\"）→ 输出格式：每个队伍输出"
-        "\"队伍名、本角色（定位）、描述、技能升级优先度、纹章推荐\"，然后"
-        "\"队友名（定位）队友名（定位）……\"连续一行列举全部队友（不展开队友的"
-        "描述/技能/纹章）；不超过 2000 字；队伍较多时全部队伍都要输出，不得省略\n"
-        "   g. 一个角色在多个队伍中，同质字段（纹章/秘纹推荐）往往大差不差——"
-        "内容重复时合并概述或注明\"与配队N相同\"，禁止复制粘贴刷屏\n"
-        "5. 不要输出「根据攻略」「查到如下」之类的元描述，不要加开场白和结束语\n"
-        "6. 预设码保持原样\n"
-        "7. 输出中不留英文：资料里残余的英文单词和句子（地名、专有名词、描述等）"
-        "一律译为自然的简体中文；译名拿不准时用中文意译，不要原样保留英文\n"
-        "8. 【资料不足】的判定只看资料与问题是否**完全无关**：只要资料里有任何与问题"
-        "相关的内容（哪怕缺少细节分支、数值收益），都必须直接输出这些内容作为答案，"
-        "**绝不允许**在答案前面加上【资料不足】前缀；"
-        "缺少的细节（如分支好感度）用一句话注明即可，不要影响正常回答\n"
-        "9. 不要使用任何 markdown 格式（**加粗**、### 标题、|表格|、- 列表、`代码` 等），"
-        "用纯文本和自然分隔（空格、顿号、换行）输出，面向 QQ 群聊纯文本场景；"
-        "纹章推荐的 70级/80级/90级 各占一行，禁止压成一行\n\n"
-        "【用户问题】\n{question}\n\n"
-        "【攻略资料】\n{material}"
-    )
+    # 说明：直发 Prompt 的单一事实源为 docs/prompts.md（含 {persona_block}/{knowledge_block}/{question}/{material} 占位符与回答规则 1-9），
+    # 由模块级 _load_prompt_doc() 加载（模块级缓存，修改文档后需重启插件生效）；加载失败为 None，
+    # _direct_send 开头显式判 None 返回"未找到相关攻略。"，不回退内嵌旧文。
+    # 本 Prompt 为插件自维护文档模板，非 prompts/ 目录模板，不受多语言同步约束。
+    _DIRECT_SEND_PROMPT: Optional[str] = _load_prompt_doc()
 
     async def _config_get_value(self, key: str, default: Any) -> Any:
         """读取宿主全局配置值（Host 返回 {success, value} 结构，解包 value）。"""
@@ -455,9 +444,15 @@ class StellaSoraPlugin(MaiBotPlugin):
           replyer 统一注入；否则人格化语气会在 replyer 历史渲染（无归属
           纯文本）中被误归属为用户发言（bot 与用户同名时必现）。
 
-        失败语义：任何失败（LLM 失败/目标缺失）返回"未找到相关攻略。"。
+        失败语义：任何失败（提示词文档缺失/LLM 失败/目标缺失）返回"未找到相关攻略。"。
         """
         not_found = {"name": tool_name, "content": "未找到相关攻略。"}
+
+        # 提示词单一事实源守卫：docs/prompts.md 加载失败时不静默兜底、不回退内嵌旧文
+        if self._DIRECT_SEND_PROMPT is None:
+            self.ctx.logger.error("直发提示词文档缺失，无法加工攻略，返回未找到")
+            return not_found
+
         question = (question or "").strip()
         if not question:
             self.ctx.logger.warning("直接发送模式缺少用户问题，返回未找到")

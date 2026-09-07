@@ -259,6 +259,15 @@ python tests/test_all.py
 python tools/probe_google_doc.py
 ```
 
+### 提示词文档
+
+直接发送模式的 LLM 提示词以 `docs/prompts.md` 为单一事实源：插件启动时由 `plugin.py` 的
+`_load_prompt_doc()` 读取并缓存于模块级变量，修改该文件后需**重启插件**才能生效。
+文档含 4 个占位符（`persona_block`/`knowledge_block`/`question`/`material`）与回答规则 1-9；
+若文档缺失或读取失败，直发相关查询将返回"未找到相关攻略。"并记录 error 日志。
+
+- 游戏机制知识文档（`docs/game_knowledge.md`，注入 `{knowledge_block}` 占位符）修改后同样需重启生效。
+
 ## 关于与致谢
 
 - **本项目由 AI 辅助开发制作**

@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import asyncio
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -111,6 +112,17 @@ class MockSend:
     async def text(self, text, stream_id, **kwargs):
         self.sent.append((stream_id, text))
         return True
+
+
+class _ListLogHandler(logging.Handler):
+    """捕获指定 logger 的日志记录，供失败路径断言（caplog 等价物）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
 
 
 def make_plugin(ttl: int = 0, dedup: int = 0):
@@ -679,6 +691,48 @@ async def run_direct_send() -> None:
     check("G18 反 markdown 指令注入",
           "不要使用任何 markdown 格式" in ctx20.llm.calls[0]["prompt"]
           and "已直接发送" in r22.get("content", ""))
+
+    # G19 提示词单一事实源：docs/prompts.md 加载成功且含关键规则标记（走插件同一加载路径）
+    p23, ctx23 = make_plugin()
+    await p23.on_load()
+    loaded_prompt = plug._load_prompt_doc()
+    check("G19 提示词文档加载成功且含三标记",
+          isinstance(loaded_prompt, str)
+          and "不要使用任何 markdown 格式" in loaded_prompt
+          and "2000 字" in loaded_prompt
+          and "预设码保持原样" in loaded_prompt)
+
+    # G20-G21 失败路径：monkeypatch 提示词文档路径为不存在并清空模块缓存，
+    # 按插件加载同一路径重新赋值类属性 → _direct_send 返回未找到 + 双路 error 日志
+    ctx_logger = logging.getLogger("plugin.ggsfly.stellasora-plugin")  # 与 make_plugin 的 plugin_id 对应
+    module_logger = logging.getLogger("stellasora.plugin")
+    ctx_handler, module_handler = _ListLogHandler(), _ListLogHandler()
+    ctx_logger.addHandler(ctx_handler)
+    module_logger.addHandler(module_handler)
+    saved_doc_path = plug._PROMPT_DOC_PATH
+    saved_doc_cache = plug._PROMPT_DOC_CACHE
+    saved_prompt = plug.StellaSoraPlugin._DIRECT_SEND_PROMPT
+    plug._PROMPT_DOC_PATH = Path(tempfile.mkdtemp(prefix="stellasora_g20_")) / "prompts.md"
+    plug._PROMPT_DOC_CACHE = None
+    plug.StellaSoraPlugin._DIRECT_SEND_PROMPT = plug._load_prompt_doc()
+    try:
+        ctx23.llm, ctx23.send = MockLLM(), MockSend()
+        r23 = await p23._direct_send(
+            tool_name="stellasora_how", question="夏花攻略", material="资料",
+            direct=True, query="夏花", stream_id="stream_g20",
+        )
+        check("G20 提示词文档缺失→未找到且不调 LLM 不发送",
+              r23 == {"name": "stellasora_how", "content": "未找到相关攻略。"}
+              and ctx23.llm.calls == [] and ctx23.send.sent == [])
+        check("G21 提示词文档缺失记录 error 日志（加载器+守卫双路）",
+              any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in module_handler.records)
+              and any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in ctx_handler.records))
+    finally:
+        plug._PROMPT_DOC_PATH = saved_doc_path
+        plug._PROMPT_DOC_CACHE = saved_doc_cache
+        plug.StellaSoraPlugin._DIRECT_SEND_PROMPT = saved_prompt
+        ctx_logger.removeHandler(ctx_handler)
+        module_logger.removeHandler(module_handler)
 
 
 # ===== 节 H：输出格式（verbatim trust + infodoc 输出规则） =====
