@@ -580,125 +580,6 @@ def _split_emblem_columns(cells: list) -> list:
             i += 1
     return columns
 
-
-def _restructure_block(body_lines: list) -> list:
-    """角色段结构化（token 精简 + 消除 LLM 分列歧义）：
-
-    - Potentials 标签行及其纯潜能数据行删除（用户明确无需抓取）
-    - "Recommended Main Discs" 标签行 → "=== 推荐主位秘纹 ===" 锚
-    - "Emblem"/"Affix Priority" → "=== 纹章 ===" 锚；其后数据按
-      **列模板 + 光标填充**转置：每行 = 一个优先序层，列 = 70/80/90 级；
-      'Not needed/无需升级' 空列自动跳过；单元格内换行折叠的溢出词条
-      按非空列顺序纵向拼接。消除"无列头表格被 LLM 自由分列"的歧义
-    """
-    out: list = []
-    mode = "normal"           # normal | disc | emblem | pot
-    emblem_cols: list = []    # 每列 = None（空列）或 list[str]（条目）
-    emblem_cursor = 0         # 下一个待填充的非空列索引
-    emblem_pending = None     # 待配对的词条格（跨行折叠）
-
-    def _flush_emblem() -> None:
-        """输出各纹章等级行（列 = 70/80/90 级）。"""
-        grade_labels = ["70级", "80级", "90级"]
-        for ci, col in enumerate(emblem_cols):
-            label = grade_labels[ci] if ci < len(grade_labels) else f"第{ci + 1}档"
-            if col:
-                out.append(f"{label}：{'、'.join(col)}")
-            else:
-                out.append(f"{label}：无需升级")
-        emblem_cols.clear()
-
-    def _fill_entry(entry: str) -> None:
-        """把词条填入下一个非空列（光标循环——溢出条目接续到下一非空列）。"""
-        nonlocal emblem_cursor
-        if not emblem_cols:
-            return
-        for _ in range(len(emblem_cols)):
-            if emblem_cursor >= len(emblem_cols):
-                emblem_cursor = 0  # 回绕：溢出词条接续填充（多词条列）
-            if emblem_cols[emblem_cursor] is not None:
-                emblem_cols[emblem_cursor].append(entry)
-                emblem_cursor += 1
-                return
-            emblem_cursor += 1
-        # 全列皆空（理论不可达）：丢弃
-
-    for line in body_lines:
-        low = line.lower()
-        cells = _split_cells(line)
-
-        # Potentials 纯标签行（无秘纹/纹章语义）→ 潜能数据模式（数据行丢弃）
-        if re.match(r"^\s*(?:Priority|Optional) Potentials\b", line, re.IGNORECASE) and "disc" not in low and "emblem" not in low:
-            _flush_emblem()
-            mode = "pot"
-            continue
-        # 推荐主位秘纹锚
-        if "recommended main discs" in low:
-            _flush_emblem()
-            mode = "disc"
-            out.append("=== 推荐主位秘纹 ===")
-            continue
-        # 纹章锚：Emblem 标签行，或 Affix Priority 数据首行（部分区块无 Emblem 标签）
-        first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
-        if "emblem" in low or (first_is_affix and mode != "emblem"):
-            _flush_emblem()
-            mode = "emblem"
-            if not out or not out[-1].startswith("=== 纹章 ==="):
-                out.append("=== 纹章 ===")
-            if first_is_affix:
-                # 列模板：Not needed/无需升级 = 空列；[词条, 数值] = 有内容列
-                emblem_cols = _split_emblem_columns(cells[1:])
-                emblem_cursor = 0
-                emblem_pending = None
-            continue
-        # 新角色子段/区块边界 → 冲刷并回到 normal
-        if "skill upgrade priority" in low or "⏏" in line or "back to top" in low:
-            _flush_emblem()
-            mode = "normal"
-            out.append(line)
-            continue
-
-        if mode == "emblem":
-            # 同区块第二角色的 Affix 行 → 冲刷上一角色纹章并开启新列模板
-            if first_is_affix := (cells and cells[0].lower() in ("affix priority", "词条优先级")):
-                _flush_emblem()
-                emblem_cols = _split_emblem_columns(cells[1:])
-                emblem_cursor = 0
-                emblem_pending = None
-                continue
-            # 跨行折叠的格子流：词条格等待数值格配对；长句行退出 emblem 模式
-            flushed = False
-            for c in cells:
-                if emblem_pending is not None:
-                    _fill_entry(f"{emblem_pending} {c}".strip())
-                    emblem_pending = None
-                elif _EMBLEM_VALUE_RE.match(c):
-                    # 孤立数值格（无前置词条）：保守丢弃
-                    continue
-                elif len(c) > 40:
-                    # 长句（描述/署名）→ 冲刷并退出 emblem 模式
-                    _flush_emblem()
-                    mode = "normal"
-                    out.append(line)
-                    flushed = True
-                    break
-                else:
-                    emblem_pending = c
-            if not flushed:
-                continue
-        if mode == "pot":
-            # 潜能数据行（'+3 levels' 结尾的短行）丢弃；叙述行恢复 normal
-            if cells and all(c.endswith("levels") or re.match(r"^[\d.]+%$", c) for c in cells if c):
-                continue
-            mode = "normal"
-            out.append(line)
-            continue
-        out.append(line)
-
-    _flush_emblem()
-    return out
-
-
 def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
     """联合查询：判定 2-3 个角色是否共属同一配队。
 
@@ -839,6 +720,14 @@ def query_how(
 ) -> str:
     """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。
 
+    Args:
+        term: 查询词（角色名/元素名，经 lookup_term 归一）
+        question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
+        members: 多角色联合查询的问询角色英文名列表（2-3 个）；非空时仅输出
+            同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
+        element_override: 联合查询时由 find_teams_by_members 确定的队伍元素页
+            （问询角色可能各自属于多个元素页，队伍所在页以匹配结果为准）
+    
     Args:
         question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
         members: 多角色联合查询的角色英文名列表（2-3 个）；非空时仅输出
