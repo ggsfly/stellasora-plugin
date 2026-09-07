@@ -391,10 +391,10 @@ def run_query_how_section() -> None:
               "配队1（猫眼 (暗黑射线)）" in material
               and "本角色猫眼（主控位）" in material and "队友紫槿（支援位）" in material
               and "Snowish build details" not in material)
-        check("F2 guide 模式含描述与纹章转置、无秘纹段",
-              "描述：" in material and "纹章推荐：" in material
-              and "70级：" in material and "80级：" in material
-              and "推荐主位秘纹：" not in material)
+        check("F2 资料全量（描述/技能/秘纹/纹章四类字段齐全，输出裁剪交由 prompt）",
+              "描述：" in material and "技能升级优先度：" in material
+              and "推荐主位秘纹：" in material and "纹章推荐：" in material
+              and "70级：" in material and "80级：" in material)
         check("F3 Rotation 仅取猫眼所在列段",
               "猫眼 循环手法 content here" in material
               and "Wraith comps" not in material and "idk yet" not in material)

@@ -856,12 +856,49 @@ def query_how(
     character_cn = res["cn"]
     is_character = res["cat"] == "Character"
 
+    # 查询侧兜底：非角色条目命中但存在 cn 前缀匹配的唯一 Character 条目时，
+    # 自动改路由到该角色（如 "薇洛" 命中 Item，但 "薇洛（盛夏）" 是 Character）
+    if not is_character:
+        candidates = [
+            cn_name for cn_name in lookup.get_character_names()
+            if cn_name.startswith(res["cn"]) or res["en"] in cn_name
+        ]
+        char_hits = []
+        for cn_name in candidates:
+            char_res = lookup.lookup_term(cn_name)
+            if char_res and char_res.get("cat") == "Character":
+                char_hits.append(char_res)
+        uniq = {r["en"] for r in char_hits}
+        if len(uniq) == 1:
+            res = char_hits[0]
+            character_cn = res["cn"]
+            term = cn_name = res["cn"]  # 后续提示用角色本名
+
+    character_en = res["en"]
+    character_cn = res["cn"]
+    is_character = res["cat"] == "Character"
+
     if element_override:
         element = element_override
     elif is_character:
         num_id = res["id"].split(".")[1]
         trekker_text = st_fetcher.fetch_trekker(num_id)
         element = detect_element(trekker_text)
+
+    if not element and is_character:
+        # trekker 页无元素信息（如新角色未建页）：全元素页扫描找其所在队伍
+        for elem in ELEMENT_SECTIONS:
+            page = st_fetcher.fetch_infodoc(elem.lower())
+            if not page or "Error" in page:
+                continue
+            char_re_probe = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
+            for probe_line in strip_infodoc_noise(page).split("\n"):
+                probe_cells = _split_cells(probe_line)
+                if any(char_re_probe.match(c) for c in probe_cells):
+                    element = elem
+                    break
+            if element:
+                break
 
     if not element:
         if res["en"] in ELEMENT_SECTIONS:
@@ -956,17 +993,29 @@ def query_how(
                             member_cn = member_res["cn"] if member_res else m
                             lines.append(f"{tag}{member_cn}（{role}）")
 
-                            if mode in ("full", "guide", "team") and seg["description"]:
+                            # 资料层全量（输入放宽）：所有成员的所有字段一律进资料，
+                            # 只过 replacer（字典译名）+ strip_game_markup；
+                            # 输出精简（按问裁剪）完全由 prompt 规则 4 控制回答内容
+                            if seg["description"]:
                                 lines.append("描述：")
-                                lines.extend(seg["description"])
-                            if mode in ("full", "guide", "skill", "team") and seg["skill"]:
-                                lines.append(f"技能升级优先度：{seg['skill']}")
-                            if mode == "disc" and seg["discs"]:
+                                lines.extend(
+                                    strip_game_markup(replacer.replace(d))
+                                    for d in seg["description"]
+                                )
+                            if seg["skill"]:
+                                lines.append(f"技能升级优先度：{strip_game_markup(replacer.replace(seg['skill']))}")
+                            if seg["discs"]:
                                 lines.append("推荐主位秘纹：")
-                                lines.extend(seg["discs"])
-                            if mode in ("full", "guide", "emblem", "team") and seg["emblem"]:
+                                lines.extend(
+                                    strip_game_markup(replacer.replace(d))
+                                    for d in seg["discs"]
+                                )
+                            if seg["emblem"]:
                                 lines.append("纹章推荐：")
-                                lines.extend(seg["emblem"])
+                                lines.extend(
+                                    strip_game_markup(replacer.replace(d))
+                                    for d in seg["emblem"]
+                                )
                             lines.append("")
                 else:
                     # 区块未命中（如问询角色不在本元素页）：回退整页

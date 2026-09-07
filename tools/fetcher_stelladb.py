@@ -1,4 +1,5 @@
-﻿import urllib.request
+﻿import time
+import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Optional
@@ -10,19 +11,22 @@ class StelladbFetcher:
         self.cache = CacheManager(cache_dir, ttl_seconds=3600)
         self.headers = {"User-Agent": "Mozilla/5.0"}
 
-    def fetch_url(self, url: str) -> Optional[str]:
+    def fetch_url(self, url: str, retries: int = 1) -> Optional[str]:
+        """抓取 URL（带 1 次网络重试——stelladb 偶发 SSL 握手超时）。"""
         cached = self.cache.get(url)
         if cached: return cached
-        try:
-            req = urllib.request.Request(url, headers=self.headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                if response.getcode() == 200:
-                    html = response.read().decode("utf-8")
-                    text = extract_ssr_content(html)
-                    self.cache.set(url, text)
-                    return text
-        except Exception:
-            pass
+        for attempt in range(retries + 1):
+            try:
+                req = urllib.request.Request(url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    if response.getcode() == 200:
+                        html = response.read().decode("utf-8")
+                        text = extract_ssr_content(html)
+                        self.cache.set(url, text)
+                        return text
+            except Exception:
+                if attempt < retries:
+                    time.sleep(1.5)  # 重试前短暂等待
         return None
 
     def fetch_trekker(self, numeric_id: str) -> str:
