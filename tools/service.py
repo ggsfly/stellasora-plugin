@@ -285,11 +285,16 @@ def _parse_team_body(block_lines: list, name_res: list) -> tuple:
     seg: Optional[dict] = None
     mode = "normal"           # normal | disc | emblem | pot
     emblem_cols: list = []    # 纹章列模板（None = 空列）
-    emblem_cursor = 0
+    emblem_cursor = 0         # 下一个待填充的非空列索引（轮转发牌）
+    emblem_overflow: list = []  # 保留字段：防御性兼容（当前逻辑不使用）
     emblem_pending = None
 
     def _flush_emblem_into(target: Optional[dict]) -> None:
-        """把 emblem 转置缓冲按 70/80/90 级写入目标角色段。"""
+        """把 emblem 转置按 70/80/90 级写入目标角色段。
+
+        溢出行按"轮转发牌"模型接续到非空列（实测 aqua 页 Suntide 段
+        row126→70级列、row127→90级列、row195→80级列），无"未标注"情况。
+        """
         grade_labels = ["70级", "80级", "90级"]
         if target is None:
             return
@@ -373,40 +378,39 @@ def _parse_team_body(block_lines: list, name_res: list) -> tuple:
             first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
             if first_is_affix:
                 emblem_cols = _split_emblem_columns(cells[1:])
-                emblem_cursor = 0
+                emblem_overflow = []
                 emblem_pending = None
                 continue
 
-            def _fill_entry_local(entry: str) -> None:
-                nonlocal emblem_cursor
-                if not emblem_cols:
-                    return
-                for _ in range(len(emblem_cols)):
-                    if emblem_cursor >= len(emblem_cols):
-                        emblem_cursor = 0
-                    if emblem_cols[emblem_cursor] is not None:
-                        emblem_cols[emblem_cursor].append(entry)
-                        emblem_cursor += 1
-                        return
-                    emblem_cursor += 1
-
-            flushed = False
-            for c in cells:
-                if emblem_pending is not None:
-                    _fill_entry_local(f"{emblem_pending} {c}".strip())
-                    emblem_pending = None
-                elif _EMBLEM_VALUE_RE.match(c):
-                    continue  # 孤立数值格：保守丢弃
-                elif len(c) > 40:
-                    # 长句（描述/署名）→ 冲刷纹章并退出 emblem 模式
-                    _close_segment()
-                    seg = {"en": None, "skill": "", "description": [line], "discs": [], "emblem": []}
-                    flushed = True
-                    break
-                else:
-                    emblem_pending = c
-            if not flushed:
-                continue
+            # 数据行分派（Google Sheet 溢出模型，实测 row125-127）：
+            # - Affix 主行的词条进列模板对应等级
+            # - 溢出行（Affix 主行填满后的数据行）按"非空列轮转"接续：
+            #   每对词条填入下一个非空列，对间 cursor 前进，列尾回绕。
+            #   实测 aqua 页 Suntide 段：溢出行 1 对 1 → 70级列（cursor 0 起）；
+            #   跨行 cursor 保持前进（row127 的 Engulfing Tide → 90级列）
+            if any(col is not None for col in emblem_cols):
+                pairs = _split_emblem_columns(cells)
+                has_real = any(p is not None for p in pairs)
+                if has_real:
+                    for p in pairs:
+                        if p is None:
+                            continue
+                        filled = False
+                        for ci in range(emblem_cursor, len(emblem_cols)):
+                            if emblem_cols[ci] is not None:
+                                emblem_cols[ci].append(p if isinstance(p, str) else p[0])
+                                emblem_cursor = ci + 1
+                                filled = True
+                                break
+                        if not filled:
+                            # cursor 后无非空列 → 回绕到最前（溢出条目超过列容量）
+                            for ci in range(len(emblem_cols)):
+                                if emblem_cols[ci] is not None:
+                                    emblem_cols[ci].append(p if isinstance(p, str) else p[0])
+                                    emblem_cursor = ci + 1
+                                    filled = True
+                                    break
+                    continue
         if mode == "pot":
             # 潜能数据行（'+3 levels' 结尾的短行）丢弃；叙述行恢复段内描述
             if cells and all(c.endswith("levels") or re.match(r"^[\d.]+%$", c) for c in cells if c):
