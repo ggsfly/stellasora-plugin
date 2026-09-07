@@ -12,7 +12,7 @@ CLI 运行时用 data/.cache。
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import json
 import logging
@@ -36,6 +36,9 @@ ELEMENT_CN = {
 
 # 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+# 统一队伍-槽位表缓存（data/offline/presets/team_table.json）
+_team_table_cache: Optional[Dict[str, Any]] = None
 
 # 模块级单例（按数据目录缓存，避免每次调用重载 8.8MB 字典）；
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
@@ -421,7 +424,7 @@ def _parse_team_body(block_lines: list, name_res: list) -> tuple:
         #（兼容两种形态：每段有 Description 头的常规布局，与无头行的变体）
         char_match = None
         for name, r in name_res:
-            if r.match(cells[0]) and any("★" in c for c in cells):
+            if cells and r.match(cells[0]) and any("★" in c for c in cells):
                 char_match = name
                 break
 
@@ -571,6 +574,132 @@ def extract_team_blocks(infodoc_text: str, character_en: str, all_character_name
             })
 
     return results
+
+
+def load_team_table() -> Dict[str, Any]:
+    """加载统一队伍-槽位表（data/offline/presets/team_table.json）。
+
+    缺失或损坏时记录警告日志并返回空表结构 {"rows": [], "report": {}}，
+    不抛出异常。读取成功后缓存于 _team_table_cache。
+    """
+    global _team_table_cache
+    if _team_table_cache is not None:
+        return _team_table_cache
+
+    table_path = _DATA_DIR / "offline" / "presets" / "team_table.json"
+    if not table_path.is_file():
+        logger.warning("team_table.json not found: %s", table_path)
+        _team_table_cache = {"rows": [], "report": {}}
+        return _team_table_cache
+
+    try:
+        with table_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "rows" in data:
+            _team_table_cache = data
+        else:
+            logger.warning("team_table.json invalid structure: root dict missing 'rows'")
+            _team_table_cache = {"rows": [], "report": {}}
+    except Exception as e:
+        logger.warning("Failed to load team_table.json: %s", e)
+        _team_table_cache = {"rows": [], "report": {}}
+
+    return _team_table_cache
+
+
+def reload_team_table() -> None:
+    """清除统一队伍-槽位表缓存，强制下次查询重新读盘。"""
+    global _team_table_cache
+    _team_table_cache = None
+
+
+def find_team_rows(
+    member_ids: list[int],
+    element: Optional[str] = None,
+) -> list[dict]:
+    """按成员 CharId 集合与可选元素过滤查询统一队伍-槽位表中的匹配行。
+
+    匹配规则：
+        - 成员过滤：请求的所有 member_ids 必须全包含于该行 slots 的 char_id 集合中；
+        - 元素过滤：若传入 element，则行 element 不区分大小写精确匹配。
+    """
+    table = load_team_table()
+    rows = table.get("rows", [])
+    if not rows:
+        return []
+
+    wanted_ids = set(member_ids)
+    target_elem = element.lower() if element else None
+
+    matches: list[dict] = []
+    for row in rows:
+        if target_elem and row.get("element", "").lower() != target_elem:
+            continue
+        row_char_ids = {
+            slot["char_id"]
+            for slot in row.get("slots", [])
+            if isinstance(slot, dict) and "char_id" in slot
+        }
+        if wanted_ids <= row_char_ids:
+            matches.append(row)
+
+    return matches
+
+
+def extract_block_by_name(
+    infodoc_text: str,
+    block_name: str,
+    all_character_names: Optional[list] = None,
+) -> Optional[dict]:
+    """从详细页按锚点队名精确提取单个队伍区块体并结构化解析。
+
+    复用 _TOP_ANCHOR_RE 锚点拆分与 _parse_team_body 解析逻辑。
+
+    Returns:
+        匹配时返回 dict {"name": block_name, "members": members, "roles": roles, "segments": segments}，
+        未命中时返回 None。
+    """
+    if not infodoc_text or not block_name:
+        return None
+
+    if all_character_names is None:
+        all_character_names = _get_lookup().get_character_names()
+
+    en_names = [n for n in all_character_names if isinstance(n, str) and n.isascii() and len(n) >= 2]
+    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
+
+    lines = infodoc_text.split("\n")
+    anchors: list[Tuple[int, str]] = []
+    for li, line in enumerate(lines):
+        if "⏏" in line or "Back to Top" in line:
+            cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
+            cells = _split_cells(cleaned)
+            if not cells:
+                continue
+            anchors.append((li, cells[0]))
+
+    if not anchors:
+        return None
+
+    for idx, (start, team_name) in enumerate(anchors):
+        if team_name != block_name:
+            continue
+        end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(lines)
+        body_lines = [
+            _TOP_ANCHOR_RE.sub("", lines[li]).rstrip(" |").strip()
+            for li in range(start + 1, end)
+            if not ("⏏" in lines[li] or "Back to Top" in lines[li])
+        ]
+        block_lines = [team_name] + [bl for bl in body_lines if _split_cells(bl)]
+        members, roles, segments = _parse_team_body(block_lines, name_res)
+        return {
+            "name": block_name,
+            "members": list(members),
+            "roles": dict(roles),
+            "segments": dict(segments),
+        }
+
+    return None
 
 
 def extract_rotation(index_text: str, character_en: str) -> str:

@@ -1164,6 +1164,168 @@ Nazuna Team
     )
 
 
+# ===== 节 N：slot 查询服务测试 =====
+
+def run_section_n() -> None:
+    """测试 slot 查询服务：表加载/交集查询/元素过滤/缓存失效/异常兜底/按名提取区块。"""
+    import unittest.mock
+
+    # 1. 构造内联 fixture 表：包含有码行、无码行、跨元素行
+    fixture_table = {
+        "rows": [
+            {
+                "main_key": "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
+                "preset_code": "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
+                "element": "aqua",
+                "slots": [
+                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                    {"char_id": 130, "en": "Donna", "cn": "多娜"},
+                    {"char_id": 125, "en": "Canglan", "cn": "苍兰"},
+                ],
+                "team_name_preset": "Nazuna-Donna Team",
+                "team_name_infodoc": "Nazuna-Donna",
+                "guide_ref": {"element": "aqua", "block": "Nazuna-Donna"},
+                "rotation": "Nazuna rotation",
+            },
+            {
+                "main_key": "aqua::Nazuna-Freesia::Tilia",
+                "preset_code": None,
+                "element": "aqua",
+                "slots": [
+                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                    {"char_id": 127, "en": "Freesia", "cn": "芙莉西亚"},
+                    {"char_id": 110, "en": "Tilia", "cn": "缇莉亚"},
+                ],
+                "team_name_preset": "",
+                "team_name_infodoc": "Nazuna-Freesia",
+                "guide_ref": {"element": "aqua", "block": "Nazuna-Freesia"},
+                "rotation": "",
+            },
+            {
+                "main_key": "ignis::Kagari::Flora",
+                "preset_code": None,
+                "element": "ignis",
+                "slots": [
+                    {"char_id": 140, "en": "Kagari", "cn": "篝"},
+                    {"char_id": 130, "en": "Donna", "cn": "多娜"},
+                    {"char_id": 115, "en": "Flora", "cn": "芙萝拉"},
+                ],
+                "team_name_preset": "",
+                "team_name_infodoc": "Kagari",
+                "guide_ref": {"element": "ignis", "block": "Kagari"},
+                "rotation": "",
+            },
+        ],
+        "report": {"invalid_rows": []},
+    }
+
+    try:
+        # 注入 fixture 表到缓存中进行隔离测试
+        service._team_table_cache = fixture_table
+
+        # N1: 单角色查询命中（含无码行）
+        rows_156 = service.find_team_rows([156])
+        check(
+            "N1 单角色查询命中所有含该角色的队伍（含无码行）",
+            len(rows_156) == 2
+            and any(r["preset_code"] is not None for r in rows_156)
+            and any(r["preset_code"] is None for r in rows_156),
+            f"rows_156={rows_156}",
+        )
+
+        # N2: 双角色交集查询精准命中
+        rows_156_130 = service.find_team_rows([156, 130])
+        check(
+            "N2 双角色交集查询精准命中同时包含两者的行",
+            len(rows_156_130) == 1
+            and rows_156_130[0]["main_key"] == "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
+            f"rows_156_130={rows_156_130}",
+        )
+
+        # N3: 元素过滤（大小写不敏感且排他）
+        rows_donna_aqua = service.find_team_rows([130], element="aqua")
+        rows_donna_ignis = service.find_team_rows([130], element="IGNIS")
+        rows_donna_terra = service.find_team_rows([130], element="terra")
+        check(
+            "N3 元素过滤大小写不敏感且精准排他",
+            len(rows_donna_aqua) == 1
+            and rows_donna_aqua[0]["element"] == "aqua"
+            and len(rows_donna_ignis) == 1
+            and rows_donna_ignis[0]["element"] == "ignis"
+            and len(rows_donna_terra) == 0,
+            f"aqua={len(rows_donna_aqua)}, ignis={len(rows_donna_ignis)}, terra={len(rows_donna_terra)}",
+        )
+
+        # N4: 零命中与冲突条件
+        rows_empty = service.find_team_rows([999999])
+        rows_conflict = service.find_team_rows([156, 140])
+        check(
+            "N4 不存在角色或冲突成员交集返回空列表",
+            rows_empty == [] and rows_conflict == [],
+            f"empty={rows_empty}, conflict={rows_conflict}",
+        )
+
+        # N5: reload_team_table 清除缓存
+        service.reload_team_table()
+        check("N5 reload_team_table 成功清除缓存", service._team_table_cache is None)
+
+        # N6: 缓存加载失败处理（损坏文件 / 缺失文件 -> {"rows": [], "report": {}} 不崩溃）
+        service.reload_team_table()
+        with unittest.mock.patch.object(service.Path, "open", side_effect=ValueError("Corrupted JSON")):
+            res_corrupt = service.load_team_table()
+        check(
+            "N6 文件损坏时记录日志并返回空表结构不抛异常",
+            res_corrupt == {"rows": [], "report": {}},
+            f"res_corrupt={res_corrupt}",
+        )
+
+        service.reload_team_table()
+        with unittest.mock.patch.object(service.Path, "is_file", return_value=False):
+            res_missing = service.load_team_table()
+        check(
+            "N7 文件缺失时记录日志并返回空表结构不抛异常",
+            res_missing == {"rows": [], "report": {}},
+            f"res_missing={res_missing}",
+        )
+
+        # N8: 真实磁盘 team_table.json 加载测试（行数 > 0 且格式有效）
+        service.reload_team_table()
+        real_table = service.load_team_table()
+        real_rows = real_table.get("rows", [])
+        check(
+            "N8 真实 team_table.json 成功加载且行数 > 0",
+            len(real_rows) > 0 and service._team_table_cache is not None,
+            f"count={len(real_rows)}",
+        )
+
+        # N9: extract_block_by_name 对真实 aqua.json 提取 Nazuna-Donna
+        aqua_path = DATA_DIR / "offline" / "infodocs" / "aqua.json"
+        with aqua_path.open("r", encoding="utf-8") as f:
+            aqua_data = json.load(f)["data"]
+        block = service.extract_block_by_name(aqua_data, "Nazuna-Donna")
+        check(
+            "N9 extract_block_by_name 提取真实区块成功且结构完整",
+            block is not None
+            and block.get("name") == "Nazuna-Donna"
+            and block.get("members") == ["Nazuna", "Donna", "Freesia"]
+            and block.get("roles", {}).get("Nazuna") == "主控位"
+            and block.get("roles", {}).get("Donna") == "支援位"
+            and len(block.get("segments", {})) == 3,
+            f"block={block}",
+        )
+
+        # N10: extract_block_by_name 不存在区块或空输入返回 None
+        none_block = service.extract_block_by_name(aqua_data, "NonExistentBlockXYZ")
+        empty_block = service.extract_block_by_name("", "Nazuna-Donna")
+        check(
+            "N10 extract_block_by_name 不存在区块或空输入返回 None",
+            none_block is None and empty_block is None,
+            f"none_block={none_block}, empty_block={empty_block}",
+        )
+    finally:
+        service.reload_team_table()
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -1180,10 +1342,11 @@ SECTIONS = {
     "K": ("手动更新指令", run_manual_update),
     "L": ("定时自动同步", run_daily_sync_schedule),
     "M": ("统一队伍-槽位表构建器", run_section_m),
+    "N": ("slot 查询服务", run_section_n),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L"}
 
 
