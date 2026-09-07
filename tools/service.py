@@ -11,11 +11,13 @@ CLI 运行时用 data/.cache。
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Dict, Optional
+
+import json
 import logging
 import re
 import threading
-from pathlib import Path
-from typing import Dict, Optional
 
 from cache import CacheManager
 from dict_lookup import DictLookup
@@ -43,6 +45,31 @@ _instances: Dict[str, tuple] = {}
 # 会双份解析 8.8MB 字典（【Metis 修订 #11】）
 _init_lock = threading.Lock()
 _pending_aliases: Dict[str, str] = {}
+_cached_overrides_aliases: Optional[Dict[str, str]] = None
+
+
+def _get_overrides_json_aliases() -> Dict[str, str]:
+    """读取 data/overrides.json 中的别名映射（人工底层修正层）。"""
+    global _cached_overrides_aliases
+    if _cached_overrides_aliases is None:
+        path = _DATA_DIR / "overrides.json"
+        if path.is_file():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    _cached_overrides_aliases = {
+                        k: v for k, v in (data.get("aliases", {}) or {}).items()
+                        if isinstance(k, str) and not k.startswith("_")
+                    }
+                else:
+                    _cached_overrides_aliases = {}
+            except Exception as e:
+                logger.warning("Failed to load overrides.json aliases: %s", e)
+                _cached_overrides_aliases = {}
+        else:
+            _cached_overrides_aliases = {}
+    return _cached_overrides_aliases
 
 
 def configure_overrides(
@@ -154,6 +181,10 @@ def count_character_names(text: str) -> int:
 def find_character_names(text: str) -> list:
     """返回 text 中命中的角色名列表（字典原名，长名优先防子串误配）。
 
+    在匹配角色名前先做别名替换预处理（支持 config.overrides.aliases 与
+    data/overrides.json），将玩家俗称/变体映射为官方角色名，避免多角色联合
+    查询识别失败。
+
     命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
     先命中的长名保留、被覆盖区间的短名跳过）。掩码 None = 未占用，
     "#" = 已被更长名占用。
@@ -161,6 +192,43 @@ def find_character_names(text: str) -> list:
     if not text:
         return []
     lookup = _get_lookup()
+
+    # 1. 收集别名映射（config.overrides.aliases 与 data/overrides.json 别名）
+    alias_map: Dict[str, str] = {}
+    candidate_aliases: Dict[str, str] = {}
+    candidate_aliases.update(_get_overrides_json_aliases())
+    candidate_aliases.update(lookup.custom_aliases)
+
+    for alias, target in candidate_aliases.items():
+        if not isinstance(alias, str) or len(alias.strip()) < 2:
+            continue
+        alias_clean = alias.strip()
+        official_name = None
+        res = lookup.lookup_term(alias_clean)
+        if res and res.get("cat") == "Character":
+            official_name = res.get("cn") or res.get("en")
+        elif target in lookup.get_character_names():
+            official_name = target
+        elif isinstance(target, str):
+            target_res = lookup.lookup_term(target)
+            if target_res and target_res.get("cat") == "Character":
+                official_name = target_res.get("cn") or target_res.get("en")
+            elif target in lookup._main_dict:
+                entry = lookup._main_dict[target]
+                if entry.get("cat") == "Character":
+                    official_name = entry.get("cn") or entry.get("en")
+
+        if official_name and official_name != alias_clean:
+            alias_map[alias_clean] = official_name
+
+    # 2. 预处理：按别名长度从长到短在 text 中替换为官方角色名
+    if alias_map:
+        pattern = re.compile(
+            "|".join(re.escape(k) for k in sorted(alias_map.keys(), key=len, reverse=True))
+        )
+        text = pattern.sub(lambda m: alias_map[m.group(0)], text)
+
+    # 3. 匹配角色名并做掩码去重叠
     names = sorted(lookup.get_character_names(), key=len, reverse=True)
     found: list = []
     masked: list = [None] * len(text)  # None = 未占用（修复：之前是字符列表恒非 None）
