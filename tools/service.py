@@ -809,21 +809,6 @@ def query_how(
         elif term in ELEMENT_SECTIONS:
             element = term
 
-    # 问法裁剪模式判定（省 token：资料按问法过滤字段）
-    low_q = question or ""
-    if any(k in low_q for k in ("完整", "详细", "全部", "所有")):
-        mode = "full"
-    elif any(k in low_q for k in ("配队", "队伍", "阵容")):
-        mode = "team"
-    elif "纹章" in low_q:
-        mode = "emblem"
-    elif "秘纹" in low_q:
-        mode = "disc"
-    elif any(k in low_q for k in ("技能", "升级", "加点")):
-        mode = "skill"
-    else:
-        mode = "guide"
-
     lines: list[str] = []
 
     # 预设码区块放在攻略正文之前：它是用户明确要求的内容（--presets），
@@ -896,9 +881,9 @@ def query_how(
                             member_cn = member_res["cn"] if member_res else m
                             lines.append(f"{tag}{member_cn}（{role}）")
 
-                            # 资料层全量（输入放宽）：所有成员的所有字段一律进资料，
+                            # 资料层全量（B 路线）：所有成员的所有字段一律进资料，
                             # 只过 replacer（字典译名）+ strip_game_markup；
-                            # 输出精简（按问裁剪）完全由 prompt 规则 4 控制回答内容
+                            # 输出裁剪完全由 prompt 规则 4 指引 LLM 自行完成
                             if seg["description"]:
                                 lines.append("描述：")
                                 lines.extend(
