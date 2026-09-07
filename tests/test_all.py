@@ -670,7 +670,8 @@ async def run_output_format() -> None:
         service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Ignis character data with Ignis element"
         res = await p3.handle_how(query="赤霞", question="赤霞攻略", group_id="g1", stream_id="s_h3")
         prompt = ctx3.llm.calls[0]["prompt"]
-        missing = [kw for kw in ("队伍阵容", "主控位", "秘纹", "纹章", "默认不给出") if kw not in prompt]
+        # 新版关键词：资料结构约定 + 按问裁剪 + 多队去重
+        missing = [kw for kw in ("本角色", "队友", "配队", "纹章", "去重", "秘纹") if kw not in prompt]
         check("H2 prompt 含 infodoc 输出规则关键词",
               not missing and "已直接发送" in res["content"], f"缺少 {missing}")
     finally:

@@ -32,6 +32,8 @@ from service import (  # noqa: E402
     check_permission,
     configure_overrides,
     count_character_names,
+    find_character_names,
+    find_teams_by_members,
     lookup_term,
     query_how,
     query_what,
@@ -66,7 +68,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.1", description="配置版本")
+    config_version: str = Field(default="1.2.0", description="配置版本")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -294,10 +296,18 @@ class StellaSoraPlugin(MaiBotPlugin):
         "1. 只依据资料回答用户问的问题，资料里与问题无关的条目不要列出\n"
         "2. 按上面的人格与表达风格用简体中文自然口语输出，面向 QQ 群聊场景，直接给出答案本身\n"
         "3. 数值、等级必须与资料完全一致\n"
-        "4. 回复长度由问题决定：问题含「完整/全部/所有/详细」，或询问某角色/玩法的资料、"
-        "攻略全貌时，必须分区块全量列举资料内容（属性、技能、潜能、天赋、消耗、喜好等各区块都要），"
-        "不限字数；否则只回答所问要点，不超过 300 字"
-        "；知识文档标注\"必须完整给出\"的内容不受 300 字上限约束\n"
+        "4. 资料按「配队N（队伍名）→ 本角色（定位）→ 队友（定位）」分块，每成员含"
+        "描述/技能升级优先度/推荐主位秘纹/纹章推荐四类字段。输出裁剪规则：\n"
+        "   a. 用户问题含「完整/详细/全部/所有」→ 全量输出：每个队伍的全部成员、"
+        "全部字段逐一列出，不限字数；同一字段在多个队伍中内容相同时只详述一次，"
+        "其余队伍注明\"与配队N相同\"即可（去重不删内容）\n"
+        "   b. 用户只问「配队」→ 只输出每个队伍的：队伍名、各成员及其定位、成员描述；"
+        "不输出技能升级优先度、秘纹和纹章\n"
+        "   c. 用户只问「纹章」→ 只输出队伍名和各成员的纹章推荐\n"
+        "   d. 用户只问「秘纹」→ 只输出队伍名和各成员的推荐主位秘纹\n"
+        "   e. 用户只问「技能/升级」→ 只输出队伍名和各成员的技能升级优先度\n"
+        "   f. 其他笼统问法（如只说\"XX攻略\"）→ 输出队伍名、成员定位、每个成员的"
+        "描述与纹章推荐（不超过 300 字；若队伍较多则优先输出最相关的 1-2 个队伍）\n"
         "5. 不要输出「根据攻略」「查到如下」之类的元描述，不要加开场白和结束语\n"
         "6. 预设码保持原样\n"
         "7. 输出中不留英文：资料里残余的英文单词和句子（地名、专有名词、描述等）"
@@ -684,20 +694,52 @@ class StellaSoraPlugin(MaiBotPlugin):
             query, presets, kwargs.get("group_id", ""), kwargs.get("user_id", ""),
         )
         # Fix D：同 handle_what，query_how 为同步重活（抓取+替换），放入线程池执行
+        effective_question = (question or "").strip() or query
+        # 多角色联合查询：问句命中 2-3 个角色 → 队伍字典匹配（跨元素混编支持，
+        # 全元素页扫描）；命中 → 单队输出；≥4 个或未命中 → 统一"未找到"
+        found_members = await asyncio.to_thread(find_character_names, effective_question)
+        if len(found_members) >= 2:
+            if len(found_members) > 3:
+                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            match = await asyncio.to_thread(find_teams_by_members, found_members, self._cache_dir_ready())
+            if not match:
+                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            # 命中：把主问角色设为队名首角色（其元素页已由 find_teams_by_members 确定），
+            # 其余角色作为 members 传入，query_how 按单队全量输出
+            text = await asyncio.to_thread(
+                query_how,
+                match["members"][0],
+                self._cache_dir_ready(),
+                with_presets=bool(presets),
+                max_length=int(self.config.query.default_max_length),
+                question=effective_question,
+                members=match["members"],
+                element_override=match["element"],
+            )
+            if "未在字典中找到" in text:
+                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            return await self._send_or_relay(text, effective_question, presets, **kwargs)
+
+        # 单角色查询
         text = await asyncio.to_thread(
             query_how,
             query,
             self._cache_dir_ready(),
             with_presets=bool(presets),
             max_length=int(self.config.query.default_max_length),
+            question=effective_question,
         )
         # 未找到时不走 LLM 加工，直接返回给 planner 自行处理（approach B）
         if "未在字典中找到" in text:
             return {"name": "stellasora_how", "content": "未在星塔旅人游戏中找到该角色或元素。"}
+        return await self._send_or_relay(text, effective_question, presets, **kwargs)
+
+    async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
+        """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。"""
+        query = effective_question
         # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer（approach A）
         # 联合查询检测：用户原话命中 ≥2 个角色名时强制回传，planner 汇总后单条回复避免刷屏
         # count_character_names 内含正则匹配，同样为同步 CPU 重活，放入线程池
-        effective_question = (question or "").strip() or query
         direct = self.config.query.direct_send and (
             await asyncio.to_thread(count_character_names, effective_question)
         ) < 2

@@ -152,17 +152,18 @@ def count_character_names(text: str) -> int:
 
 
 def find_character_names(text: str) -> list:
-    """返回 text 中命中的角色名列表（英文名，长名优先防子串误配）。
+    """返回 text 中命中的角色名列表（字典原名，长名优先防子串误配）。
 
     命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
-    先命中的长名保留、被覆盖区间的短名跳过）。
+    先命中的长名保留、被覆盖区间的短名跳过）。掩码 None = 未占用，
+    "#" = 已被更长名占用。
     """
     if not text:
         return []
     lookup = _get_lookup()
     names = sorted(lookup.get_character_names(), key=len, reverse=True)
     found: list = []
-    masked = list(text)
+    masked: list = [None] * len(text)  # None = 未占用（修复：之前是字符列表恒非 None）
     for name in names:
         if not name or len(name) < 2:
             continue
@@ -171,9 +172,7 @@ def find_character_names(text: str) -> list:
             idx = text.find(name, start)
             if idx < 0:
                 break
-            if all(m == "#" for m in masked[idx:idx + len(name)]):
-                pass
-            elif all(m is None for m in masked[idx:idx + len(name)]):
+            if all(m is None for m in masked[idx:idx + len(name)]):
                 found.append(name)
                 for k in range(idx, idx + len(name)):
                     masked[k] = "#"
@@ -835,6 +834,7 @@ def query_how(
     max_length: Optional[int] = None,
     question: str = "",
     members: Optional[list] = None,
+    element_override: Optional[str] = None,
 ) -> str:
     """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。
 
@@ -842,6 +842,8 @@ def query_how(
         question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
         members: 多角色联合查询的角色英文名列表（2-3 个）；非空时仅输出
             同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
+        element_override: 多角色联合查询时由 find_teams_by_members 确定的队伍
+            元素页（问询角色可能各自有多个元素页，队伍所在页以匹配结果为准）
     """
     lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
     res = lookup.lookup_term(term)
@@ -853,7 +855,9 @@ def query_how(
     character_cn = res["cn"]
     is_character = res["cat"] == "Character"
 
-    if is_character:
+    if element_override:
+        element = element_override
+    elif is_character:
         num_id = res["id"].split(".")[1]
         trekker_text = st_fetcher.fetch_trekker(num_id)
         element = detect_element(trekker_text)
@@ -976,85 +980,6 @@ def query_how(
         lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
 
     return _fit_lines(lines, max_length)
-
-
-def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
-    """联合查询：判定 2-3 个角色是否共属同一配队。
-
-    流程（用户约定）：把现有队伍做成"仅成员集合"字典 → 全部角色命中同一队伍
-    才放行；否则返回 None（由调用方回"未找到"）。
-
-    Args:
-        terms: 问句中命中的角色名（中英文均可，内部 lookup_term 归一为英文名，
-            归一后去重；归一后不足 2 个或超过 3 个视为不命中）
-        cache_dir: 缓存目录（fetcher 参数）
-
-    Returns:
-        命中时 {"team_name": 完整队名, "members": [英文名], "element": 元素}；
-        任一角色未命中或无共同队伍时 None。
-    """
-    if not terms:
-        return None
-    lookup, _last, st_fetcher, _gd, _replacer = _get_services(cache_dir)
-    en_names: list = []
-    for term in terms:
-        res = lookup.lookup_term(term)
-        if not res or res.get("cat") != "Character":
-            return None  # 非角色词条直接判不命中
-        if res["en"] not in en_names:
-            en_names.append(res["en"])
-    if len(en_names) < 2 or len(en_names) > 3:
-        return None  # 归一后不是 2-3 个角色
-
-    # 以第一个角色的元素页为唯一候选页（同队角色必同元素）
-    probe = en_names[0]
-    num_id = lookup.lookup_term(probe)["id"].split(".")[1]
-    element = detect_element(st_fetcher.fetch_trekker(num_id))
-    if not element:
-        return None
-    infodoc_text = st_fetcher.fetch_infodoc(element.lower())
-    if not infodoc_text or "Error" in infodoc_text:
-        return None
-
-    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
-    lines = strip_infodoc_noise(infodoc_text).split("\n")
-    wanted = set(en_names)
-
-    # 队伍字典：{队名: 成员英文名列表}，全页扫描一次
-    current_name = ""
-    current_members: list = []
-    teams: dict = {}
-    order: list = []
-    for line in lines:
-        if "⏏" in line or "Back to Top" in line:
-            cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
-            cells = _split_cells(cleaned)
-            if cells:
-                if current_name:
-                    teams[current_name] = current_members
-                current_name = cells[0]
-                current_members = []
-                if current_name not in teams:
-                    order.append(current_name)
-            continue
-        if not current_name:
-            continue
-        for c in _split_cells(line):
-            for n, r in name_res:
-                if n not in current_members and r.match(c):
-                    current_members.append(n)
-    if current_name:
-        teams[current_name] = current_members
-
-    # 匹配：所有角色都在同一队伍里
-    for name in order:
-        if wanted.issubset(set(teams.get(name, []))):
-            return {"team_name": name, "members": teams[name], "element": element}
-    return None
-
-
-_PRESET_CODE_RE = re.compile(r"[A-Za-z0-9]{20,}")
-_PRESET_LABEL_RE = re.compile(r"Trekker|Preset Code|Slot", re.IGNORECASE)
 
 
 def extract_preset_block(presets_text: str, character_en: str) -> str:
