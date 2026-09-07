@@ -733,54 +733,6 @@ def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
     return None
 
 
-def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length: Optional[int] = None) -> str:
-    """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。"""
-    lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
-    res = lookup.lookup_term(term)
-    if not res:
-        return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
-
-    element: Optional[str] = None
-    character_en = res["en"]
-    character_cn = res["cn"]
-    is_character = res["cat"] == "Character"
-
-    if is_character:
-        num_id = res["id"].split(".")[1]
-        trekker_text = st_fetcher.fetch_trekker(num_id)
-        element = detect_element(trekker_text)
-
-    if not element:
-        if res["en"] in ELEMENT_SECTIONS:
-            element = res["en"]
-        elif term in ELEMENT_SECTIONS:
-            element = term
-
-    lines: list[str] = []
-
-    # 预设码区块放在攻略正文之前：它是用户明确要求的内容（--presets），
-    # 且输出可能因长度上限被截断——放在前面保证不被截掉
-    if with_presets:
-        preset_lines: list[str] = ["=== 预设码推荐 (Google Docs) ==="]
-        presets = gd_fetcher.fetch_presets()
-        if "Error" in presets:
-            preset_lines.append("  [预设码抓取失败]")
-        elif is_character:
-            block = extract_preset_block(presets, character_en)
-            if block:
-                preset_lines.append(strip_game_markup(replacer.replace(block)))
-            elif element:
-                section = extract_element_preset_section(presets, element)
-                preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {character_en} 相关内容。")
-            else:
-                preset_lines.append(f"  预设码文档中未找到 {character_en} 相关内容。")
-        elif element:
-            section = extract_element_preset_section(presets, element)
-            preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {element} 相关内容。")
-        preset_lines.append("")
-        lines += preset_lines
-
-
 def query_how(
     term: str,
     cache_dir: Path,
@@ -792,20 +744,22 @@ def query_how(
 ) -> str:
     """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。
 
+    资料层采用全量提供策略（B 路线）：所有匹配队伍及角色四类字段（描述、技能、
+    秘纹、纹章）均完整载入资料，输出裁剪与格式控制交由上层 LLM Prompt 完成。
+
     Args:
         term: 查询词（角色名/元素名，经 lookup_term 归一）
-        question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
-        members: 多角色联合查询的问询角色英文名列表（2-3 个）；非空时仅输出
-            同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
-        element_override: 联合查询时由 find_teams_by_members 确定的队伍元素页
-            （问询角色可能各自属于多个元素页，队伍所在页以匹配结果为准）
-    
-    Args:
-        question: 用户原话，用于判定输出裁剪模式（full/guide/team/emblem/disc/skill）
+        cache_dir: 本地缓存目录路径
+        with_presets: 是否在输出前附加预设码推荐内容
+        max_length: 输出文本最大字符数限制（None 表示不限制）
+        question: 用户原话（上层透传参数，本函数全量提供资料，输出裁剪交由 Prompt 控制）
         members: 多角色联合查询的角色英文名列表（2-3 个）；非空时仅输出
             同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
         element_override: 多角色联合查询时由 find_teams_by_members 确定的队伍
-            元素页（问询角色可能各自有多个元素页，队伍所在页以匹配结果为准）
+            元素页（问询角色可能各自属于多个元素页，队伍所在页以匹配结果为准）
+
+    Returns:
+        包含攻略文本（与可选预设码）的格式化字符串，未找到时返回提示信息
     """
     lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
     res = lookup.lookup_term(term)
@@ -814,30 +768,26 @@ def query_how(
 
     element: Optional[str] = None
     character_en = res["en"]
-    character_cn = res["cn"]
     is_character = res["cat"] == "Character"
 
     # 查询侧兜底：非角色条目命中但存在 cn 前缀匹配的唯一 Character 条目时，
     # 自动改路由到该角色（如 "薇洛" 命中 Item，但 "薇洛（盛夏）" 是 Character）
     if not is_character:
         candidates = [
-            cn_name for cn_name in lookup.get_character_names()
-            if cn_name.startswith(res["cn"]) or res["en"] in cn_name
+            c_name for c_name in lookup.get_character_names()
+            if c_name.startswith(res["cn"]) or res["en"] in c_name
         ]
         char_hits = []
-        for cn_name in candidates:
-            char_res = lookup.lookup_term(cn_name)
+        for c_name in candidates:
+            char_res = lookup.lookup_term(c_name)
             if char_res and char_res.get("cat") == "Character":
                 char_hits.append(char_res)
         uniq = {r["en"] for r in char_hits}
         if len(uniq) == 1:
             res = char_hits[0]
-            character_cn = res["cn"]
-            term = cn_name = res["cn"]  # 后续提示用角色本名
-
-    character_en = res["en"]
-    character_cn = res["cn"]
-    is_character = res["cat"] == "Character"
+            term = res["cn"]  # 后续提示用角色本名
+            character_en = res["en"]
+            is_character = True
 
     if element_override:
         element = element_override
