@@ -43,6 +43,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
 
 import service  # noqa: E402
+import team_table  # noqa: E402
 from dict_lookup import DictLookup  # noqa: E402
 from fetcher_stelladb import StelladbFetcher  # noqa: E402
 from term_replace import TermReplacer  # noqa: E402
@@ -1017,6 +1018,152 @@ async def run_daily_sync_schedule() -> None:
             await asyncio.gather(p._sync_task, return_exceptions=True)
 
 
+# ===== 节 M：统一队伍-槽位表构建器测试 =====
+
+def run_section_m() -> None:
+    """测试 team_table 构建器：解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化。"""
+    import base64
+    import struct
+
+    lookup = DictLookup(DATA_DIR)
+    lookup._load()
+
+    # M1 & M2: 预设码解码与异常兜底
+    sample_code = "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA"
+    decoded = team_table.decode_preset_code(sample_code)
+    check("M1 预设码解码样本 [156, 130, 125]", decoded == [156, 130, 125], f"decoded={decoded}")
+    check("M2 空串解码返回 None", team_table.decode_preset_code("") is None)
+    check("M3 短串与非法字符返回 None", team_table.decode_preset_code("short") is None and team_table.decode_preset_code("invalid@@@") is None)
+    check("M4 全零 CharId 返回 None", team_table.decode_preset_code("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") is None)
+
+    # M5-M7: 伪影清洗与弯引号规范化
+    artifact_doc = """Aqua
+Teresa’s Team
+\tMain Trekker
+\tPreset Code
+\tWIP
+\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
+\tAAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA
+"""
+    parsed = team_table.parse_presets_doc(artifact_doc)
+    check("M5 裸 WIP 行跳过不作为队名", len(parsed) == 2 and parsed[0]["team_name_raw"] == "Teresa’s Team")
+    check("M6 孤码正确归属前置队伍", parsed[1]["team_name_raw"] == "Teresa’s Team")
+
+    infodocs_curly = {
+        "aqua": """Teresa's Team | ⏏ Back to Top ⏏
+Nazuna (5★) | 1/1/1/1
+Donna (5★) | 1/1/1/1
+Freesia (5★) | 1/1/1/1
+⏏ BACK TO TOP ⏏
+"""
+    }
+    table_curly = team_table.build_team_table(artifact_doc, infodocs_curly, lookup, "")
+    check(
+        "M7 弯引号规范化关联直引号区块",
+        len(table_curly["rows"]) == 2
+        and table_curly["rows"][0]["guide_ref"] == {"element": "aqua", "block": "Teresa's Team"}
+        and table_curly["rows"][0]["team_name_preset"] == "Teresa’s Team"
+        and table_curly["rows"][0]["team_name_infodoc"] == "Teresa's Team",
+    )
+
+    # M8: Sparkla 3 码 -> 3 行同 guide_ref
+    sparkla_doc = """Terra
+Sparkla (Rapid Fire) WIP
+\tPreset Code
+\tAAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw
+\tAAAAjAAAAJwAAABrzbAbAADBgBgMBmAGGGAG
+\tAAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA
+"""
+    infodocs_sparkla = {
+        "terra": """Sparkla (Rapid Fire) WIP | ⏏ Back to Top ⏏
+Sparkla (5★) | 1/1/1/1
+Nazuna (5★) | 1/1/1/1
+Springseek Coronis (5★) | 1/1/1/1
+Tilia (5★) | 1/1/1/1
+Ridge (5★) | 1/1/1/1
+⏏ BACK TO TOP ⏏
+"""
+    }
+    table_sparkla = team_table.build_team_table(sparkla_doc, infodocs_sparkla, lookup, "")
+    sp_rows = table_sparkla["rows"]
+    check(
+        "M8 Sparkla 3 码生成 3 行且 guide_ref 一致",
+        len(sp_rows) == 3 and all(r["guide_ref"] == {"element": "terra", "block": "Sparkla (Rapid Fire) WIP"} for r in sp_rows),
+    )
+
+    # M9: 无码区块共享前缀拆行
+    infodocs_codeless = {
+        "aqua": """Nazuna-Freesia | ⏏ Back to Top ⏏
+Nazuna (5★) | 1/1/1/1
+Freesia (5★) | 1/1/1/1
+Tilia (5★) | 1/1/1/1
+Iris (5★) | 1/1/1/1
+⏏ BACK TO TOP ⏏
+"""
+    }
+    table_codeless = team_table.build_team_table("Aqua\n", infodocs_codeless, lookup, "")
+    cl_rows = table_codeless["rows"]
+    check(
+        "M9 无码区块 4 段按前缀拆出 2 行",
+        len(cl_rows) == 2
+        and cl_rows[0]["main_key"] == "aqua::Nazuna-Freesia::Tilia"
+        and cl_rows[1]["main_key"] == "aqua::Nazuna-Freesia::Iris"
+        and cl_rows[0]["preset_code"] is None
+        and cl_rows[0]["team_name_infodoc"] == "Nazuna-Freesia",
+    )
+
+    # M10: 无效行三例（2 段块/未知成员/孤码缺名）进 report 不入 rows
+    infodocs_invalid = {
+        "aqua": """Short-Block | ⏏ Back to Top ⏏
+Nazuna (5★) | 1/1/1/1
+Freesia (5★) | 1/1/1/1
+⏏ BACK TO TOP ⏏
+"""
+    }
+    fake_code = base64.b64encode(struct.pack(">III", 999999, 130, 125) + b"\x00" * 15).decode("utf-8")
+    invalid_presets_doc = f"""Aqua
+Fake Team
+\tPreset Code
+\t{fake_code}
+Ignis
+\tPreset Code
+\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
+"""
+    table_invalid = team_table.build_team_table(invalid_presets_doc, infodocs_invalid, lookup, "")
+    inv_reasons = [item["reason"] for item in table_invalid["report"]["invalid_rows"]]
+    check("M10 无效行不入 rows", len(table_invalid["rows"]) == 0)
+    check(
+        "M11 无效行报告记录三类原因（缺槽位/成员未知/缺名字）",
+        any("缺槽位" in r for r in inv_reasons)
+        and any("成员未知" in r for r in inv_reasons)
+        and any("缺名字" in r for r in inv_reasons),
+        str(inv_reasons),
+    )
+
+    # M12: Rotation 固化（三行结构、非空且逐字一致）
+    index_text_fixture = """Nazuna (5★) | Flora | Wraith
+Rotation | Rotation | Rotation
+Nazuna special 5-star combo rotation | Flora combo | Wraith combo
+"""
+    rot_expected = service.extract_rotation(index_text_fixture, "Nazuna")
+    table_rot = team_table.build_team_table(
+        """Aqua
+Nazuna Team
+\tPreset Code
+\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
+""",
+        {"aqua": ""},
+        lookup,
+        index_text_fixture,
+    )
+    rot_actual = table_rot["rows"][0]["rotation"] if table_rot["rows"] else ""
+    check(
+        "M12 Rotation 固化非空且与 extract_rotation 逐字一致",
+        bool(rot_actual) and rot_actual == rot_expected == "Nazuna special 5-star combo rotation",
+        f"actual={repr(rot_actual)}, expected={repr(rot_expected)}",
+    )
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -1032,10 +1179,11 @@ SECTIONS = {
     "J": ("工具参数描述", run_tool_query_desc),
     "K": ("手动更新指令", run_manual_update),
     "L": ("定时自动同步", run_daily_sync_schedule),
+    "M": ("统一队伍-槽位表构建器", run_section_m),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L"}
 
 
