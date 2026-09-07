@@ -86,6 +86,11 @@ def _load_prompt_doc() -> Optional[str]:
     return _PROMPT_DOC_CACHE
 
 
+# LLM 加工失败降级回传前缀（单一事实源）：攻略资料本身查询成功、仅回答加工失败时，
+# 用该前缀包装原始资料交由回复流程基于资料组织语言，不再谎报"未找到相关攻略"。
+_FAILURE_RELAY_PREFIX = "[系统说明：攻略资料已查询成功，但回答加工（LLM）暂时失败，请把下方【攻略资料】整块原样放入 reply 工具的 reply_reference 参数，由回复流程基于它组织语言，不要调用其他搜索工具。]\n【攻略资料·bot查询所得，非用户发言】\n"
+
+
 class PluginSectionConfig(PluginConfigBase):
     """插件基础配置（Runner 强制要求 plugin.config_version）。"""
 
@@ -444,7 +449,9 @@ class StellaSoraPlugin(MaiBotPlugin):
           replyer 统一注入；否则人格化语气会在 replyer 历史渲染（无归属
           纯文本）中被误归属为用户发言（bot 与用户同名时必现）。
 
-        失败语义：任何失败（提示词文档缺失/LLM 失败/目标缺失）返回"未找到相关攻略。"。
+        失败语义：提示词文档缺失/目标缺失返回"未找到相关攻略。"；
+        LLM 加工失败（异常/success 非 True/响应空白）且资料非空时，
+        降级为失败回传——用系统说明前缀包装原始资料返回 planner，不再谎报"未找到"。
         """
         not_found = {"name": tool_name, "content": "未找到相关攻略。"}
 
@@ -533,6 +540,27 @@ class StellaSoraPlugin(MaiBotPlugin):
             material=material,  # service._fit_lines 已按 max_length 截断，此处不再硬切片
         )
         llm_model = (self.config.query.llm_model or "").strip()
+
+        def _llm_failed(reason: str) -> dict:
+            """LLM 加工失败的统一降级出口（修复点2）。
+
+            资料非空 → 失败回传：用系统说明前缀包装原始资料返回 planner，
+            不写直发成品缓存（在缓存写入点之前直接 return），不再谎报"未找到"；
+            资料为空 → 无内容可回传，维持"未找到相关攻略。"。
+            direct=True/False 两路径在此汇合，降级语义天然统一。
+            """
+            if (material or "").strip():
+                self.ctx.logger.warning(
+                    "LLM 加工失败，降级回传原始资料（不写成品缓存）: 原因=%s, tool=%s",
+                    reason,
+                    tool_name,
+                )
+                return {"name": tool_name, "content": _FAILURE_RELAY_PREFIX + material}
+            self.ctx.logger.warning(
+                "LLM 加工失败且资料为空，返回未找到: 原因=%s, tool=%s", reason, tool_name
+            )
+            return not_found
+
         try:
             gen_kwargs: dict[str, Any] = {"prompt": prompt}
             if llm_model:
@@ -541,15 +569,11 @@ class StellaSoraPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.exception("直接发送模式 LLM 调用异常")
             _ = exc
-            return not_found
+            return _llm_failed(f"LLM 调用异常: {exc}")
 
         answer = str((llm_result or {}).get("response") or "").strip()
         if not (llm_result or {}).get("success") or not answer:
-            self.ctx.logger.error(
-                "直接发送模式 LLM 加工失败: %s",
-                str((llm_result or {}).get("error") or "LLM 未返回内容"),
-            )
-            return not_found
+            return _llm_failed(str((llm_result or {}).get("error") or "LLM 未返回内容"))
 
         # 回传模式（direct=False）：LLM 成品返回给 planner，由 replyer 带人格回复。
         # 必须让归属标记跟随正文进入 reply_reference：主程序会把 reply_reference

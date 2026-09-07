@@ -578,15 +578,25 @@ async def run_direct_send() -> None:
           "你的名字是麦麦" in llm.calls[0]["prompt"] and "表达风格" in llm.calls[0]["prompt"])
     check("G3 SDK 透传 model=utils", llm.calls[0].get("model") == "utils")
 
-    # G4-G6 失败分支：LLM 软失败/硬异常/stream 缺失 → 统一"未找到"
+    # G4-G6 失败分支：LLM 软失败→降级回传原始资料 / 硬异常→降级回传 / stream 缺失→未找到
+    # （修复点2：资料查询成功但 LLM 加工失败时不再谎报"未找到"，而是带系统说明回传原始资料）
     ctx.llm = MockLLM(fail=True)
     n_sent = len(send.sent)
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g4")
-    check("G4 LLM 软失败→未找到且未发送",
-          r["content"] == "未找到相关攻略。" and len(send.sent) == n_sent)
+    relay_content = str(r.get("content", ""))
+    check("G4 LLM 软失败→降级回传原始资料（前缀+原文+非未找到+不直发）",
+          relay_content.startswith("[系统说明")
+          and plug._FAILURE_RELAY_PREFIX in relay_content
+          and "夏花" in relay_content
+          and "未找到相关攻略" not in relay_content
+          and len(send.sent) == n_sent)
     ctx.llm = MockLLM(hard_fail=True)
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g5")
-    check("G5 LLM 硬异常→未找到", r["content"] == "未找到相关攻略。")
+    relay_content = str(r.get("content", ""))
+    check("G5 LLM 硬异常→降级回传原始资料（前缀+原文+非未找到）",
+          relay_content.startswith("[系统说明")
+          and "不要调用其他搜索工具" in relay_content
+          and "未找到相关攻略" not in relay_content)
     ctx.llm = MockLLM()
     r = await p.handle_what(query="猫眼", group_id="g1", stream_id="")
     check("G6 stream 缺失→未找到", r["content"] == "未找到相关攻略。")
@@ -733,6 +743,109 @@ async def run_direct_send() -> None:
         plug.StellaSoraPlugin._DIRECT_SEND_PROMPT = saved_prompt
         ctx_logger.removeHandler(ctx_handler)
         module_logger.removeHandler(module_handler)
+
+    # G22-G28 修复点2：LLM 加工失败降级回传（资料非空 → 系统说明+原始资料；不再谎报"未找到"）
+    relay_prefix = plug._FAILURE_RELAY_PREFIX
+
+    # G22 硬异常 + direct=True：返回工具结果（非聊天直发），内容=前缀+资料原文
+    p22, ctx22 = make_plugin()
+    await p22.on_load()
+    ctx22.llm = MockLLM(hard_fail=True)
+    r22 = await p22._direct_send(
+        tool_name="stellasora_how", question="夏花攻略", material="测试原始攻略资料XYZ",
+        direct=True, query="夏花", stream_id="stream_g22",
+    )
+    check("G22 LLM 硬异常降级回传（前缀+资料原文+非未找到+不直发聊天）",
+          str(r22.get("content", "")).startswith("[系统说明")
+          and relay_prefix in str(r22.get("content", ""))
+          and "测试原始攻略资料XYZ" in str(r22.get("content", ""))
+          and "未找到相关攻略" not in str(r22.get("content", ""))
+          and ctx22.send.sent == [])
+
+    # G23 direct=False（回传路径）统一降级语义：前缀+资料原文
+    p23b, ctx23b = make_plugin()
+    await p23b.on_load()
+    ctx23b.llm = MockLLM(hard_fail=True)
+    r23b = await p23b._direct_send(
+        tool_name="stellasora_what", question="猫眼资料", material="回传模式原始资料ABC",
+        direct=False, query="猫眼",
+    )
+    check("G23 direct=False 路径统一降级回传",
+          r23b.get("content") == relay_prefix + "回传模式原始资料ABC"
+          and ctx23b.send.sent == [])
+
+    # G24 降级动作记录 warning 日志（失败原因 + 降级动作）
+    g24_logger = logging.getLogger("plugin.ggsfly.stellasora-plugin")
+    g24_handler = _ListLogHandler()
+    g24_logger.addHandler(g24_handler)
+    try:
+        p24, ctx24 = make_plugin()
+        await p24.on_load()
+        ctx24.llm = MockLLM(fail=True)
+        r24 = await p24._direct_send(
+            tool_name="stellasora_how", question="夏花攻略", material="日志断言资料",
+            direct=True, query="夏花", stream_id="stream_g24",
+        )
+        check("G24 降级回传记录 warning 日志（失败原因+降级动作）",
+              "[系统说明" in str(r24.get("content", ""))
+              and any(r.levelno == logging.WARNING and "降级回传" in r.getMessage()
+                      and "mock LLM down" in r.getMessage() for r in g24_handler.records))
+    finally:
+        g24_logger.removeHandler(g24_handler)
+
+    # G25 资料为空（空串/纯空白）+ LLM 失败 → 维持"未找到相关攻略。"
+    p25, ctx25 = make_plugin()
+    await p25.on_load()
+    ctx25.llm = MockLLM(hard_fail=True)
+    r25a = await p25._direct_send(
+        tool_name="stellasora_how", question="夏花攻略", material="",
+        direct=True, query="夏花", stream_id="stream_g25a",
+    )
+    r25b = await p25._direct_send(
+        tool_name="stellasora_how", question="夏花攻略", material="   ",
+        direct=True, query="夏花", stream_id="stream_g25b",
+    )
+    check("G25 资料为空+LLM 失败→未找到（空串与纯空白一致）",
+          r25a == {"name": "stellasora_how", "content": "未找到相关攻略。"}
+          and r25b == {"name": "stellasora_how", "content": "未找到相关攻略。"})
+
+    # G26 降级回传不写直发成品缓存：同查询第二次仍重新调 LLM、内存缓存保持为空
+    # （对照 G13：成功路径第二次命中缓存 LLM 只调 1 次）
+    p26, ctx26 = make_plugin(ttl=86400)
+    await p26.on_load()
+    ctx26.llm = MockLLM(fail=True)
+    r26a = await p26.handle_how(query="夏花", group_id="g1", stream_id="stream_g26")
+    r26b = await p26.handle_how(query="夏花", group_id="g1", stream_id="stream_g26")
+    check("G26 降级回传不写缓存（二次查询重调 LLM+内存缓存为空+不直发）",
+          len(ctx26.llm.calls) == 2
+          and len(p26._get_answer_cache()._memory_cache) == 0
+          and str(r26a.get("content", "")).startswith("[系统说明")
+          and str(r26b.get("content", "")).startswith("[系统说明")
+          and ctx26.send.sent == [])
+
+    # G27 软失败（success=False）经 handle_how 真实链路降级回传
+    p27, ctx27 = make_plugin()
+    await p27.on_load()
+    ctx27.llm = MockLLM(fail=True)
+    r27 = await p27.handle_how(query="夏花", group_id="g1", stream_id="stream_g27")
+    check("G27 软失败经真实链路降级回传（前缀+含资料+非未找到）",
+          str(r27.get("content", "")).startswith("[系统说明")
+          and relay_prefix in str(r27.get("content", ""))
+          and "夏花" in str(r27.get("content", ""))
+          and "未找到相关攻略" not in str(r27.get("content", "")))
+
+    # G28 加工成功（响应纯空白视为失败）→ 降级回传：success=True 但 response 空白
+    p28, ctx28 = make_plugin()
+    await p28.on_load()
+    ctx28.llm = MockLLM(answer="   ")
+    r28 = await p28._direct_send(
+        tool_name="stellasora_how", question="夏花攻略", material="空白响应降级资料",
+        direct=True, query="夏花", stream_id="stream_g28",
+    )
+    check("G28 success=True 但响应空白→降级回传",
+          str(r28.get("content", "")).startswith("[系统说明")
+          and "空白响应降级资料" in str(r28.get("content", ""))
+          and "未找到相关攻略" not in str(r28.get("content", "")))
 
 
 # ===== 节 H：输出格式（verbatim trust + infodoc 输出规则） =====
