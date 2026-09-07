@@ -1,0 +1,711 @@
+﻿👽 Preset Codes
+Stella Sora Preset Codes (as of August 20, 2026)
+NOTE: You can download or make a copy of this document for your own use.
+This document serves as an extension of the Potential Builds section of the Mistique's Field Reports (Stella Sora INFODOC) spreadsheet to allow people to copy preset codes properly. Keep in mind that the document is subject to constant updates whenever new teams are discovered and if there is a need to update existing ones.
+Right now, this is only a compilation of preset codes and is just ordered based on the Limited Trekker release. There are plans to categorize the teams based on effectiveness for Boss Blitz/Menace Arena/Finale Echoing but it will take time to think of a proper format for it.
+________________
+
+
+How do I make sense of the Preset Codes?
+As of 7/7/2026, Morph’s Record Builder has been integrated for some preset codes. You may click on the preset code to open a link to an image showcasing each unit’s Potential priority (if it has one).
+
+
+For the potential levels listed in the build, these are their label designations:
+* Level 1: Safe to not upgrade past the base level
+* Level 2: Upgrade as much as you can, if you are able to
+* Level 6: Mandatory to max level
+To import a preset code, navigate to the Go button at the bottom right of the game screen then find Preset. After which, you can find the Import Preset button at the top right corner.
+________________
+
+
+Aqua
+Nazuna-Donna
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
+	
+
+Teresa-Donna
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	WIP
+	  
+
+	AAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA
+	
+
+Chitose (Main Skill)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAKAAAACCMAYjZAAwBsBsBs2AIGwA
+	  
+
+	AAAAkAAAAKAAAABvMAYjZAAwBsBsBsJ2wAAA
+	  
+
+	AAAAkAAAAKAAAAB9MAYjZAAwBsBsBqwAOAAA
+	Teresa Version
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAH8AAACCMAbDbACiQAgNkM2AGAwA
+	  
+
+	AAAAkAAAAH8AAABvMAbDbACiQAgNkMJ2wAAA
+	
+
+Chitose (Auto Attack)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAKAAAAB9zbAjBAAwBsBkBqwAKAwA
+	  
+
+	AAAAkAAAAKAAAAB/zbAjDAAwBsBkBqRAAGyA
+	Teresa Version
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAH8AAACCzbADDACkQABsgM2AIGwA
+	  
+
+	AAAAkAAAAH0AAAB/zbADDACsACgMAKxAAG2A
+	  
+
+	AAAAkAAAAH8AAABvzbADDACkQABsgMJ2wAAA
+	
+
+Donna + Freesia Version
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAIIAAAB9zbADDADNgCBsAKwAOAwA
+	
+
+Chitose (Mark DMG)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAkAAAAKAAAABrkAgrDDDNtgAABsGGCGAA
+	
+
+Freesia (Mark DMG)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAfQAAAKAAAABrMDAwHYBdhsAABsGGCGAC
+	
+
+________________
+
+
+Ignis
+Chaton (Dark Ray)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAcgAAAH4AAACeMAYJbAJsEBhhgMIBGAwG
+	  
+
+	AAAAcgAAAH4AAABrMAYJbAKsEBhhgGAGGGAG
+	  
+
+	AAAAcgAAAH4AAABsMAYJbAKsEBhhgMGBAB2A
+	Chaton (Hybrid) WIP
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	WIP
+	  
+
+	WIP
+	  
+
+	WIP
+	
+
+Snowish Laru (Cannon)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAfgAAAJ4AAACNwYbBAYDNgAMMBswQAGwA
+	  
+
+	AAAAfgAAAJ4AAABswYbBAYDNgAMMBsGBAA2A
+	
+
+Fuyuka (Ultimate)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAhgAAAH4AAACeMAELBDasEBhhgMIBGAwG
+	  
+
+	AAAAhgAAAH4AAACNMAELBDasEBhhgMwQAWwA
+	
+
+Fuyuka (Skill DMG)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAhgAAAH4AAACeMAbLIAbMshgggMIAGAwG
+	  
+
+	AAAAhgAAAH4AAACNMAbLEAbMshgggMwQAWwA
+	
+
+Fuyuka (Auto Attack)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAhgAAAH4AAACexbFDAAbNsggAAMIAGAwG
+	  
+
+	AAAAhgAAAH4AAACNxbFDAAbNsggAAMwQAWwA
+	
+
+________________
+
+
+Ventus
+Wraith (Melee)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjwAAAIUAAAB7xJAHDEAwAEtsAGGGwBwA
+	
+
+Wraith (Ranged)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjwAAAIUAAAB7MAbLLADMAAsMAKCGwAwA
+	
+
+Nazuna-Nazuka
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	 AAAAnAAAAIUAAAB7MYDEIYBiCNsMAKAGwBwA
+	
+
+Nazuka (Formation)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	 AAAAeAAAAIUAAAB7rAgAjAAwAtsMAKAGwAwA
+	
+
+Nazuka (Petals)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	 AAAAeAAAAIUAAAB7rAgAjADFsBgMAKAGwAwA
+	
+
+________________
+
+
+Terra
+Sparkla (Rapid Fire)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw
+	  
+
+	AAAAjAAAAJwAAABrzbAbAADBgBgMBmAGGGAG
+	  
+
+	AAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA
+	
+
+
+
+Sparkla (Bunny Jaws)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjAAAAJwAAACfMAbYYADAQBgNhs2IAGAw
+	  
+
+	AAAAjAAAAJwAAABrMAbYYADAQBgNhmAGGGAG
+	  
+
+	AAAAjAAAAJwAAAB0MAbYYADAQBgNhsGAAGwA
+	
+
+
+
+Sparkla (Terra Mark) WIP
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	WIP
+	
+
+S. Coronis (Rose Vial Speedrun) WIP
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	WIP
+	  
+
+	WIP
+	
+
+Original Terra Mark
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAnAAAAJUAAABrUYEDbAZgADsMAMGAAGAG
+	  
+
+	AAAAnAAAAJUAAACfwYADbAZgADsMAJGAAGww
+	
+
+________________
+
+
+Lux
+Firefly (Giant Sword)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAhAAAAHMAAABrrYY4gAAwBsMMAMw2AGAA 
+	
+
+Shia (Snow Rabbit)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAmwAAAIQAAABrzbADAgCQAMQMAK2OBGAB
+	  
+
+	AAAAmwAAAHMAAABrzbADEgAwDsBsAMw2AGAA 
+	  
+
+	AAAAmwAAAGsAAAB7zbADAgCtjghgAsGQAwBA
+	
+
+Shia (Night Rabbit)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAmwAAAIQAAABrNIbDYACQAMRsAKGICGAG
+	  
+
+	WIP
+	  
+
+	AAAAmwAAAGsAAAB7NIbDYAKhiBhgBsGQAwAA
+	
+
+Jinglin (Lux Mark)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAdQAAAGsAAACEoAADDY7NhgBgAJAAwGwA
+	                           AoE (Mobbing)
+	  
+
+	AAAAdQAAAGsAAABzoAADDY7BsABgBjAGwGwA
+	                           ST (Bossing)
+	  
+
+	AAAAdQAAAGsAAABzoAADDY7NsABgADAGwGwA
+	
+
+Laru (Laser)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAlgAAAGsAAACEMbbAYICthgBgApAAwAwA
+	
+
+________________
+
+
+Umbra
+Karin (Boss Shark)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAnQAAAI4AAACRzbADADBsgMAMMM2AGwAA
+	  
+
+	WIP
+	  
+
+	WIP
+	Karin (Hunter’s Mark)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAnQAAAI4AAACRMAbDYAZtgMAMADAGG2AA
+	  
+
+	WIP
+	  
+
+	WIP
+	Otoha (Weeping Sky)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjgAAAJEAAACHXBYAFDAwBtlkgMywwGAA
+	  
+
+	AAAAjgAAAJEAAAB2XBYAFDAwBtlkgMAAAOwA
+	Mistique Main Version
+	  
+
+	  
+
+	  
+
+	AAAAhwAAAJEAAACOzIEAIgAwBtlkgGwCwAww
+	
+
+Otoha (Laser)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjgAAAJEAAACHXBYAFDDNsBkEgMywwGAA
+	  
+
+	AAAAjgAAAJEAAAB2zBYAFDDNsBkEgMAAAOwA
+	
+
+Firenze (Main Skill)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	                           Otoha (Weeping Sky)
+	  
+
+	AAAAbgAAAI4AAACRzZAYAAZsgsgMMDAGW2QA
+	  
+
+	AAAAbgAAAI4AAACHzbAYAIZsAsgMEMyQwGAA
+	  
+
+	AAAAbgAAAI4AAAB2zbAYAAZsAsgMEDAAAOwA
+	                         Otoha (Laser)
+	  
+
+	AAAAbgAAAI4AAACRzbAYAAZsAsgMEM2QGwQA
+	
+
+Mistique (Minion)
+	Main Trekker
+	Support Trekker 1
+	Support Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjgAAAIcAAABvPAYAEjDNsMBgAMBAwAAG
+	Coronis Version
+	  
+
+	  
+
+	  
+
+	AAAAjgAAAIcAAAB2PAYAFDDNsMBgAMAAAOwA
+	
+
+________________
+
+
+Changelogs
+Aug. 20, 2026
+	* Updated Karin (Boss Shark) team (thanks ZiLenTz for the build)
+* Added Karin (Hunter’s Mark) team (thanks ZiLenTz for the build)
+	Aug. 18, 2026
+	* Added Karin (Boss Shark) early theorycrafted team
+	Jul. 27, 2026
+	* Implemented experimental table formatting for compactness
+* Added Freesia (Mark) team (thanks Morph for the preset code)
+	Jul. 25, 2026
+	* Added Chitose (Mark) team
+* Experimenting on better formatting of tables
+	Jul. 21, 2026
+	* Added an early theorycrafted Chitose (Main Skill) team featuring S. Willow
+	Jul. 7, 2026
+	* Integrated Morph’s Record Builder for priority viewing of preset codes
+	Jul. 2, 2026
+	* Updated Chaton (Dark Ray) teams
+	Jun. 30, 2026
+	* Added Chaton (Dark Ray) preliminary teams
+	Jun. 23, 2026
+	* Added Sparkla (Build 1) team (thanks ZiLenTz for the preset codes)
+* Added Sparkla (Build 2) team
+* Added S. Coronis (Rose Vial Speedrun) team
+* Slightly improved font formatting
+	June 3, 2026
+	* Added Donna + Freesia Version preset code for Chitose (Auto Attack) team
+* Added Firefly (Giant Sword) preset code (thanks ZiLenTz for the preset code)
+* Added Firefly Version preset code for Shia (Snow Rabbit) team
+* Added Firefly Version (AoE and ST) preset codes for Jinglin (Mark DMG) team (thanks Ahmadjak for the team setup)
+	May 20, 2026
+	* Fixed Jinglin (Mark DMG) preset code to use Holy Inscription instead of Renewed Spectrum on Tilia
+	May 14, 2026
+	* Fixed Shia (Snow Rabbit) preset code to use Holy Inscription instead of Renewed Spectrum on Tilia
+	May 1, 2026
+	* Fixed Nazuna-Donna preset code to not include Guardian’s Heart
+	Apr. 30, 2026
+	* Updated Otoha (Laser) and Otoha (Weeping Sky)’s Coronis Version codes
+	Apr. 25-29, 2026
+	* Initial Version
+	
+
+________________
+
+
+WIP Area
+Preset Codes used Anywhere
+
+
+Preset Codes used for Boss Blitz and Finale Echoing
+
+
+Preset Codes used for Menace Arena
