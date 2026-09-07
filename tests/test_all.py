@@ -17,6 +17,7 @@
   H 输出格式        —— LLM 输出原样直发（verbatim trust）+ infodoc 输出规则关键词
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
   J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
+  K 手动更新指令    —— @Command('st_update') 鉴权拦截、授权后台同步、缓存清空与异常降级
 """
 from __future__ import annotations
 
@@ -747,8 +748,9 @@ def run_tool_query_desc() -> None:
         func = getattr(plug.StellaSoraPlugin, name, None)
         info = getattr(func, attr, None) if func is not None else None
         if info is not None and getattr(info, "name", None):
+            params = getattr(info, "parameters", None) or []
             tool_infos[info.name] = {
-                param.name: param.description for param in (info.parameters or []) if hasattr(param, "name")
+                param.name: param.description for param in params if hasattr(param, "name")
             }
 
     how_params = tool_infos.get("stellasora_how", {})
@@ -759,6 +761,73 @@ def run_tool_query_desc() -> None:
           all(elem in desc for elem in ("水", "火", "风", "地", "光", "暗")))
     what_desc = tool_infos.get("stellasora_what", {}).get("query", "")
     check("J4 what.query 描述未受影响", "角色" in what_desc and "装备" in what_desc, what_desc)
+
+
+# ===== 节 K：手动更新指令（st_update） =====
+
+async def run_manual_update() -> None:
+    print("--- K 手动更新指令 ---")
+    p, ctx = make_plugin()
+    await p.on_load()
+
+    # 1. 验证 @Command 注册属性
+    func = getattr(plug.StellaSoraPlugin, "handle_update", None)
+    check("K1 handle_update 方法存在", func is not None)
+    attr = "__maibot_component_info__"
+    info = getattr(func, attr, None) if func is not None else None
+    check("K2 Command 装饰器元数据存在", info is not None)
+    if info is not None:
+        check("K3 指令名匹配 st_update", getattr(info, "name", "") == "st_update")
+        check("K4 正则 pattern 匹配 ^/st_update", getattr(info, "command_pattern", "") == r"^/st_update")
+
+    # 2. 鉴权失败拦截
+    p.config.access_control.mode = "whitelist"
+    p.config.access_control.whitelist = ["allowed_group", "allowed_user"]
+    denied_res = await p.handle_update(stream_id="s1", group_id="denied_group", user_id="denied_user")
+    check("K5 未授权调用被拦截（返回 False）", denied_res[0] is False)
+    check("K6 拦截返回码为 1 且包含权限提示", denied_res[2] == 1 and "权限" in denied_res[1])
+    check("K7 未授权不向聊天流发送消息", len(ctx.send.sent) == 0)
+
+    # 3. 授权通过调用全量同步并清空缓存
+    p.config.access_control.mode = "off"
+    orig_sync = plug.sync_offline_data
+    sync_called = []
+
+    def mock_sync_offline_data(**kwargs):
+        sync_called.append(kwargs)
+        return {"status": "ok"}
+
+    plug.sync_offline_data = mock_sync_offline_data
+    try:
+        # 准备缓存测试文件与内存数据
+        answers_dir = p._cache_dir_ready() / "answers"
+        answers_dir.mkdir(parents=True, exist_ok=True)
+        dummy_file = answers_dir / "test_answer.json"
+        dummy_file.write_text("{}", encoding="utf-8")
+        cache_mgr = p._get_answer_cache()
+        cache_mgr._memory_cache["test_key"] = "cached_val"
+
+        success, msg, code = await p.handle_update(stream_id="stream_k", group_id="any_group")
+        check("K8 授权调用返回成功 True", success is True)
+        check("K9 返回码为 2", code == 2)
+        check("K10 调用 sync_offline_data(sync_all=True)", len(sync_called) == 1 and sync_called[0].get("sync_all") is True)
+        check("K11 发送开始与完成两批提示消息", len(ctx.send.sent) >= 2 and any("正在后台同步" in t[1] for t in ctx.send.sent) and any("同步完成" in t[1] for t in ctx.send.sent))
+        check("K12 磁盘 answers 缓存被清空", not dummy_file.exists())
+        check("K13 内存 answers 缓存被清空", len(cache_mgr._memory_cache) == 0)
+    finally:
+        plug.sync_offline_data = orig_sync
+
+    # 4. 同步异常降级
+    def mock_sync_fail(**kwargs):
+        raise RuntimeError("network down")
+
+    plug.sync_offline_data = mock_sync_fail
+    try:
+        fail_res = await p.handle_update(stream_id="stream_fail", group_id="any_group")
+        check("K14 同步异常返回 False", fail_res[0] is False)
+        check("K15 异常返回码为 1 且包含错误信息", fail_res[2] == 1 and "network down" in fail_res[1])
+    finally:
+        plug.sync_offline_data = orig_sync
 
 
 # ===== 汇总入口 =====
@@ -774,11 +843,12 @@ SECTIONS = {
     "H": ("输出格式", run_output_format),
     "I": ("非阻塞探针", run_nonblocking),
     "J": ("工具参数描述", run_tool_query_desc),
+    "K": ("手动更新指令", run_manual_update),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J"]
-ASYNC_SECTIONS = {"G", "H", "I"}
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
+ASYNC_SECTIONS = {"G", "H", "I", "K"}
 
 
 async def run_async_sections(keys: list) -> None:

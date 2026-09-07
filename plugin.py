@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
 
 MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防多群场景内存线性增长（【双审 SH-4】）
@@ -38,6 +38,7 @@ from service import (  # noqa: E402
     query_how,
     query_what,
 )
+from sync_data import sync_offline_data  # noqa: E402
 
 _GAME_KNOWLEDGE_CACHE: Optional[str] = None
 
@@ -774,6 +775,49 @@ class StellaSoraPlugin(MaiBotPlugin):
             query=query,
             **kwargs,
         )
+
+    # ===== Command 指令 =====
+
+    @Command("st_update", description="手动触发星塔旅人全量攻略与预设码数据离线更新", pattern=r"^/st_update")
+    async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
+        """手动触发星塔旅人全量攻略与预设码数据离线更新。"""
+        if self._denied(**kwargs):
+            return False, "当前聊天无权限执行星塔旅人更新指令。", 1
+
+        effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
+        if effective_stream_id:
+            try:
+                await self.ctx.send.text("正在后台同步星塔旅人离线数据...", effective_stream_id)
+            except Exception as exc:
+                self.ctx.logger.warning("发送更新开始提示异常: %s", exc)
+
+        try:
+            sync_res = await asyncio.to_thread(sync_offline_data, sync_all=True)
+            self.ctx.logger.info("离线数据同步完成: %s", sync_res)
+        except Exception as exc:
+            self.ctx.logger.exception("星塔旅人离线数据同步异常: %s", exc)
+            return False, f"星塔旅人离线数据同步失败: {exc}", 1
+
+        # 清空直发成品缓存（磁盘文件与内存缓存）
+        answers_dir = self._cache_dir_ready() / "answers"
+        if answers_dir.exists():
+            for p in answers_dir.glob("*.json"):
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        try:
+            self._get_answer_cache()._memory_cache.clear()
+        except Exception:
+            pass
+
+        if effective_stream_id:
+            try:
+                await self.ctx.send.text("星塔旅人离线数据同步完成，缓存已刷新。", effective_stream_id)
+            except Exception as exc:
+                self.ctx.logger.warning("发送更新完成提示异常: %s", exc)
+
+        return True, "星塔旅人离线数据同步完成", 2
 
 
 def create_plugin() -> StellaSoraPlugin:
