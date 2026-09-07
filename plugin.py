@@ -735,11 +735,13 @@ class StellaSoraPlugin(MaiBotPlugin):
         return await self._send_or_relay(text, effective_question, presets, **kwargs)
 
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
-        """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。"""
+        """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。
+
+        直发判定沿用 count_character_names：多角色联合查询的资料已合并为单队
+        （find_teams_by_members 阶段处理），此处 ≥2 角色名时仍回传 replyer，
+        避免长资料直发刷屏。
+        """
         query = effective_question
-        # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer（approach A）
-        # 联合查询检测：用户原话命中 ≥2 个角色名时强制回传，planner 汇总后单条回复避免刷屏
-        # count_character_names 内含正则匹配，同样为同步 CPU 重活，放入线程池
         direct = self.config.query.direct_send and (
             await asyncio.to_thread(count_character_names, effective_question)
         ) < 2

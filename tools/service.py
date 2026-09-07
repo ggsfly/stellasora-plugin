@@ -827,6 +827,7 @@ def query_how(term: str, cache_dir: Path, with_presets: bool = False, max_length
         preset_lines.append("")
         lines += preset_lines
 
+
 def query_how(
     term: str,
     cache_dir: Path,
@@ -980,6 +981,11 @@ def query_how(
         lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
 
     return _fit_lines(lines, max_length)
+
+
+# 预设码文档行识别：20+ 位大写字母数字串 = 预设码；标签行含 Trekker/Preset Code/Slot
+_PRESET_CODE_RE = re.compile(r"[A-Za-z0-9]{20,}")
+_PRESET_LABEL_RE = re.compile(r"Trekker|Preset Code|Slot", re.IGNORECASE)
 
 
 def extract_preset_block(presets_text: str, character_en: str) -> str:
