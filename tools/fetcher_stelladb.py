@@ -1,20 +1,73 @@
-﻿import time
-import urllib.request
+﻿import json
+import tempfile
+import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 from cache import CacheManager
 from text_clean import extract_ssr_content
 
+_OFFLINE_DIR = Path(__file__).resolve().parent.parent / "data" / "offline"
+
+
+def _atomic_write(file_path: Path, content: str) -> None:
+    """原子写入文件：先写临时文件再 rename/replace 覆盖。"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = file_path.with_name(f".{file_path.name}.{time.time_ns()}.tmp")
+    try:
+        temp_file.write_text(content, encoding="utf-8")
+        temp_file.replace(file_path)
+    except Exception:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+        raise
+
+
+def _read_offline_file(file_path: Path) -> Optional[str]:
+    """读取离线持久化文件，若为 json 则提取 data 字段，若为纯文本则直接返回。"""
+    if not file_path.is_file():
+        return None
+    try:
+        text = file_path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        if file_path.suffix == ".json":
+            data = json.loads(text)
+            if isinstance(data, dict):
+                content = data.get("data")
+                return content if isinstance(content, str) and content else None
+            elif isinstance(data, str) and data:
+                return data
+        return text
+    except Exception:
+        return None
+
+
 class StelladbFetcher:
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, offline_dir: Optional[Path] = None):
         self.cache = CacheManager(cache_dir, ttl_seconds=3600)
         self.headers = {"User-Agent": "Mozilla/5.0"}
+        if offline_dir is not None:
+            self.offline_dir = Path(offline_dir)
+        elif (cache_dir / "offline").is_dir():
+            self.offline_dir = cache_dir / "offline"
+        elif (cache_dir.parent / "offline").is_dir():
+            self.offline_dir = cache_dir.parent / "offline"
+        elif cache_dir.name in ("webcache", ".cache", ".cache_test") or "stellasora" in str(cache_dir).lower():
+            self.offline_dir = _OFFLINE_DIR
+        else:
+            self.offline_dir = None
 
-    def fetch_url(self, url: str, retries: int = 1) -> Optional[str]:
+    def fetch_url(self, url: str, retries: int = 1, ignore_cache: bool = False) -> Optional[str]:
         """抓取 URL（带 1 次网络重试——stelladb 偶发 SSL 握手超时）。"""
-        cached = self.cache.get(url)
-        if cached: return cached
+        if not ignore_cache:
+            cached = self.cache.get(url)
+            if cached:
+                return cached
         for attempt in range(retries + 1):
             try:
                 req = urllib.request.Request(url, headers=self.headers)
@@ -29,28 +82,135 @@ class StelladbFetcher:
                     time.sleep(1.5)  # 重试前短暂等待
         return None
 
-    def fetch_trekker(self, numeric_id: str) -> str:
+    def fetch_trekker(self, numeric_id: str, force_update: bool = False) -> str:
+        """获取角色攻略数据，本地优先。"""
+        offline_file = self.offline_dir / "trekkers" / f"{numeric_id}.json" if self.offline_dir else None
+        if not force_update and offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+
         url = f"https://stelladb.pages.dev/trekker/{numeric_id}"
-        res = self.fetch_url(url)
-        return res if res else "Error fetching trekker."
+        res = self.fetch_url(url, ignore_cache=force_update)
+        if res:
+            if offline_file:
+                payload = {
+                    "url": url,
+                    "id": str(numeric_id),
+                    "timestamp": time.time(),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+            return res
 
-    def fetch_disc(self, numeric_id: str) -> str:
+        if offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+        return "Error fetching trekker."
+
+    def fetch_disc(self, numeric_id: str, force_update: bool = False) -> str:
+        """获取秘纹攻略数据，本地优先。"""
+        offline_file = self.offline_dir / "discs" / f"{numeric_id}.json" if self.offline_dir else None
+        if not force_update and offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+
         url = f"https://stelladb.pages.dev/disc/{numeric_id}"
-        res = self.fetch_url(url)
-        return res if res else "Error fetching disc."
+        res = self.fetch_url(url, ignore_cache=force_update)
+        if res:
+            if offline_file:
+                payload = {
+                    "url": url,
+                    "id": str(numeric_id),
+                    "timestamp": time.time(),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+            return res
 
-    def fetch_infodoc(self, element: str) -> str:
-        url = f"https://stelladb.pages.dev/infodoc/{element.lower()}"
-        res = self.fetch_url(url)
-        return res if res else "Error fetching infodoc."
+        if offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+        return "Error fetching disc."
 
-    def fetch_infodoc_index(self) -> str:
-        """抓取 infodoc 索引页（含各元素队 Rotation / Main Slot / Supp Slot 信息）。
+    def fetch_infodoc(self, element: str, force_update: bool = False) -> str:
+        """获取元素 infodoc 攻略，本地优先。"""
+        elem_key = element.lower()
+        offline_file = None
+        if self.offline_dir:
+            json_file = self.offline_dir / "infodocs" / f"{elem_key}.json"
+            txt_file = self.offline_dir / "infodocs" / f"{elem_key}.txt"
+            offline_file = json_file if json_file.exists() else txt_file
 
-        索引页是多元素并列的表格，extract_ssr_content 折叠空单元格后列结构丢失，
-        但行内各元素的队伍名/Rotation/槽位标注仍按元素顺序排列，
-        LLM 可根据角色名匹配定位。
-        """
+        if not force_update and offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+
+        url = f"https://stelladb.pages.dev/infodoc/{elem_key}"
+        res = self.fetch_url(url, ignore_cache=force_update)
+        if res:
+            target_file = self.offline_dir / "infodocs" / f"{elem_key}.json" if self.offline_dir else None
+            if target_file:
+                payload = {
+                    "url": url,
+                    "element": elem_key,
+                    "timestamp": time.time(),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(target_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+            return res
+
+        if offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+        return "Error fetching infodoc."
+
+    def fetch_infodoc_index(self, force_update: bool = False) -> str:
+        """抓取 infodoc 索引页（含各元素队 Rotation / Main Slot / Supp Slot 信息），本地优先。"""
+        offline_file = None
+        if self.offline_dir:
+            json_file = self.offline_dir / "infodocs" / "index.json"
+            txt_file = self.offline_dir / "infodocs" / "index.txt"
+            offline_file = json_file if json_file.exists() else txt_file
+
+        if not force_update and offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+
         url = "https://stelladb.pages.dev/infodoc"
-        res = self.fetch_url(url)
-        return res if res else ""
+        res = self.fetch_url(url, ignore_cache=force_update)
+        if res:
+            target_file = self.offline_dir / "infodocs" / "index.json" if self.offline_dir else None
+            if target_file:
+                payload = {
+                    "url": url,
+                    "element": "index",
+                    "timestamp": time.time(),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(target_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+            return res
+
+        if offline_file:
+            offline_data = _read_offline_file(offline_file)
+            if offline_data:
+                return offline_data
+        return ""
