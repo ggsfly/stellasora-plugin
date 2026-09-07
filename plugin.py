@@ -816,14 +816,11 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
         """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。
 
-        直发判定沿用 count_character_names：多角色联合查询的资料已合并为单队
-        （find_teams_by_members 阶段处理），此处 ≥2 角色名时仍回传 replyer，
-        避免长资料直发刷屏。
+        直发判定仅由配置 direct_send 决定（修复点3：移除多角色强制回传门槛，
+        联合查询资料已在 find_teams_by_members 阶段合并为单队，不存在刷屏问题）。
         """
         query = effective_question
-        direct = self.config.query.direct_send and (
-            await asyncio.to_thread(count_character_names, effective_question)
-        ) < 2
+        direct = self.config.query.direct_send
         # 去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）
         stream_id = self._resolve_stream_id(kwargs)
         now = time.time()

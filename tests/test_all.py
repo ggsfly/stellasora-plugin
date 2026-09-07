@@ -616,14 +616,27 @@ async def run_direct_send() -> None:
     await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g8b")
     check("G8 人格开关生效", no_persona and "你的名字是麦麦" in llm.calls[-1]["prompt"])
 
-    # G9 联合查询（≥2 角色名）强制回传：无人格、客观体、系统包装、不直发
+    # G9 修复点3：联合查询（≥2 角色名）不再强制回传——direct_send=true 时直发聊天
     n_sent = len(send.sent)
     ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9")
-    check("G9 联合查询回传（无人格+系统包装+不直发）",
-          "你的名字是麦麦" not in llm.calls[-1]["prompt"]
-          and "客观" in llm.calls[-1]["prompt"]
+    check("G9 联合查询（≥2 角色名）改直发（send 一次+已发送确认+联合问题入 prompt）",
+          len(send.sent) == n_sent + 1
+          and "已直接发送" in str(ret.get("content", ""))
+          and "wait 工具" in str(ret.get("content", ""))
+          and "你的名字是麦麦" in llm.calls[-1]["prompt"]
+          and "小禾" in llm.calls[-1]["prompt"])
+
+    # G9b alternative：direct_send=false → 回传行为正常（加工成品回传 planner，不直发聊天）
+    p._plugin_config_instance.query.direct_send = False
+    n_sent = len(send.sent)
+    ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9b")
+    check("G9b direct_send=false 联合查询回传（客观体+系统说明包装+不直发）",
+          "客观" in llm.calls[-1]["prompt"]
+          and "你的名字是麦麦" not in llm.calls[-1]["prompt"]
           and "系统说明" in str(ret.get("content", ""))
+          and "mock LLM 攻略成品" in str(ret.get("content", ""))
           and len(send.sent) == n_sent)
+    p._plugin_config_instance.query.direct_send = True
 
     # G10-G12 去重守卫：同流同 query 拦截 / 不同 query 放行 / 窗口过期放行
     # dedup_window=60：G10 的拦截断言依赖默认 60s 窗口生效
