@@ -56,18 +56,21 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 ### 数据初始化（必须）
 
-数据文件（离线攻略 `data/offline/`、字典 `data/dict.json` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成：
+数据文件（离线攻略 `data/offline/`、字典 `data/dict.json` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。
+
+**最简方式：双击插件目录下的 `update_dictionary.bat`**（自动使用 MaiBot 根目录 `.venv` 的 Python，
+自动检测本地 StellaSoraData 克隆：有则增量更新，无则 remote 模式直拉 GitHub，
+首次运行时自动从零构建字典，最后运行一致性测试）。
+
+命令行方式（在插件目录下，用 MaiBot 根目录 `.venv` 的 Python 执行）：
 
 ```bash
-# 1. 同步离线攻略与预设码（默认走代理 127.0.0.1:7890）
-python tools/sync_data.py --all
-
-# 2. 更新字典（remote 模式，同样默认走代理；需本机安装 Git）
-python tools/update_dict.py --mode remote
+# Windows（MaiBot 根目录的 .venv 含 maibot_sdk，系统 python 通常没有）
+..\..\.venv\Scripts\python.exe tools/sync_data.py --all
+..\..\.venv\Scripts\python.exe tools/update_dict.py --mode remote
 
 # 无法使用代理时加 --proxy "" 强制直连
-# python tools/sync_data.py --all --proxy ""
-# python tools/update_dict.py --mode remote --proxy ""
+# ..\..\.venv\Scripts\python.exe tools/update_dict.py --mode remote --proxy ""
 ```
 
 初始化完成后重启 MaiBot，插件即可离线运行。
@@ -238,7 +241,8 @@ python tools/sync_data.py --all --proxy ""                     # 强制直连
 游戏版本更新后（新角色/新技能），更新字典：
 
 - **一键更新**：双击插件目录下的 `update_dictionary.bat`
-  （自动检测本地 StellaSoraData 克隆：有则 `git pull` 增量更新 + 本地模式；无则 remote 模式直拉 GitHub，
+  （自动使用 MaiBot 根目录 `.venv` 的 Python；自动检测本地 StellaSoraData 克隆：有则 `git pull` 增量更新 + 本地模式，
+  无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
   最后运行字典一致性测试 `test_all.py` A-D 节。
   代理控制：默认走 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；也可通过 `HTTPS_PROXY` 环境变量指定其他代理）
 - **手动更新**：

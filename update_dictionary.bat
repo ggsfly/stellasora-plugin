@@ -3,7 +3,8 @@ rem ============================================================
 rem  Stella Sora dictionary updater (CN-EN)
 rem  - If a local StellaSoraData git clone exists: git pull + local mode
 rem  - Otherwise: sparse-clone language dirs from GitHub (remote mode)
-rem  Requires: python on PATH; git on PATH (remote mode only)
+rem  - Python: uses MaiBot root .venv (../../.venv, where maibot_sdk lives)
+rem  Requires: MaiBot root .venv; git on PATH (remote mode only)
 rem
 rem  Usage: update_dictionary.bat [path\to\StellaSoraData]
 rem         update_dictionary.bat --direct     (force direct connection)
@@ -19,6 +20,19 @@ cd /d %~dp0
 echo ==============================================
 echo  Stella Sora CN-EN dictionary update
 echo ==============================================
+echo.
+
+rem ---- resolve MaiBot venv python ------------------------------
+rem bat 位于 plugins\<plugin>\ 下，MaiBot 根目录即上两级；
+rem 插件必须用宿主 .venv 运行（maibot_sdk 等依赖只在其中）。
+set "PY=%~dp0..\..\.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    echo [error] MaiBot venv python not found: %PY%
+    echo         请确认插件位于 MaiBot\plugins\ 目录下，且已完成 MaiBot 安装
+    pause
+    exit /b 1
+)
+echo [info] using venv python: %PY%
 echo.
 
 rem ---- resolve proxy argument --------------------------------
@@ -49,18 +63,18 @@ if exist "%LOCAL_DATA%\EN\language\en_US" (
         if errorlevel 1 echo [warn] git pull failed, using local data as-is
         echo.
         echo [2/3] incremental dictionary update from local clone ...
-        python tools\update_dict.py --mode local --source "%LOCAL_DATA%"
+        "%PY%" tools\update_dict.py --mode local --source "%LOCAL_DATA%"
         goto runtest
     )
 )
 
 echo [1/2] local clone not found, fetching from GitHub (remote mode) ...
-python tools\update_dict.py --mode remote %PROXY_ARGS%
+"%PY%" tools\update_dict.py --mode remote %PROXY_ARGS%
 
 :runtest
 echo.
 echo [3/3] running dictionary consistency tests (sections A/B/C/D) ...
-python tests\test_all.py A B C D
+"%PY%" tests\test_all.py A B C D
 
 echo.
 echo Done.

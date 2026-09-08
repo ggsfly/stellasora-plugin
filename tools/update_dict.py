@@ -9,6 +9,7 @@
                  CN/language 两个目录，需要本机安装 Git 并加入 PATH）
 
 合并策略（保守）：
+  - 首次构建：dict.json 不存在时直接从零生成（首装/数据文件未随仓库分发场景）
   - 新数据覆盖旧条目（全字段：.1 名字 + .2/.3 描述/效果/剧情文本）
   - 旧条目独有 ID 保留（历史角色/物品不下线）
   - names.json 全量重建（仅索引 .1 名字字段）
@@ -66,10 +67,10 @@ def _resolve_proxy(proxy: Optional[str]) -> Optional[str]:
 
 
 def load_current(dict_path: Path) -> Dict[str, Dict[str, str]]:
-    """读取现有字典；不存在则报错退出（不静默重建）。"""
+    """读取现有字典；不存在时返回空表（支持首次构建，数据文件不再随仓库分发）。"""
     if not dict_path.is_file():
-        print(f"[error] 找不到现有 {dict_path}；请先运行 build_dict.py", file=sys.stderr)
-        sys.exit(1)
+        print(f"[info] {dict_path} 不存在，将执行首次构建（从零生成字典）")
+        return {}
     with dict_path.open("r", encoding="utf-8") as fp:
         return json.load(fp)
 

@@ -1,0 +1,2 @@
+# Windows 批处理必须 CRLF 行尾（LF 会被 cmd 逐 token 解析错乱）
+*.bat text eol=crlf
