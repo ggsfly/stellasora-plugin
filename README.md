@@ -116,7 +116,7 @@ inject_persona = true
 inject_knowledge = true
 
 [overrides]
-# 别名/俗称/上游笔误映射：将别名、俗称、变体写法映射到官方中文名、英文名或条目 ID
+# 别名/俗称映射：将别名、俗称、变体写法映射到官方中文名、英文名或条目 ID
 # 示例：aliases = { "土" = "地", "花玲" = "花铃" }
 aliases = { "土" = "地", "花玲" = "花铃" }
 
@@ -214,41 +214,6 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
 ```
 
 - 更新报告见 `data/_update_report.json`（新增/更新/保留条目统计）
-
-### 中文别名与人工修正
-
-插件支持两种维度的自定义覆盖：
-
-1. **运行时中文别名（推荐）**：在 `config.toml` 中配置 `[overrides.aliases]`（可在 WebUI 直接填写，热更新即时生效）。
-   用户在群里用简称或俗称提问时，插件自动映射到官方中文名再查攻略。每条别名为一个 `[[overrides.aliases]]` 条目：
-   ```toml
-   [overrides]
-   # 中文别名/俗称 → 官方中文名映射
-   # WebUI 会渲染为可增删的列表编辑器
-
-   [[overrides.aliases]]
-   alias = "春科"
-   official = "科洛妮丝（新春）"
-
-   [[overrides.aliases]]
-   alias = "土"
-   official = "地"
-   ```
-
-2. **底层数据修正（构建时）**：上游解包数据偶有笔误（如 `CharacterDes.157.1` 的「花玲」应为官方「花铃」）。
-   `data/overrides.json` 是人工维护的底层修正层，构建/更新字典时自动应用：
-
-   ```json
-   {
-     "entries": { "CharacterDes.157.1": { "cn": "花铃" } },
-     "aliases": { "花玲": "Character.157.1" }
-   }
-   ```
-
-   - `entries`：按 ID 覆盖条目字段（en/cn/cat），修正笔误
-   - `aliases`：向名字索引追加别名（俗称/变体写法 → 主表 ID），目标 ID 必须存在
-   - 另有查询侧兜底：查词命中非 Character 条目但存在同英文名的 Character 条目时，
-     自动改路由到角色条目，避免攻略抓取被静默跳过
 
 ### 提示词文档
 
