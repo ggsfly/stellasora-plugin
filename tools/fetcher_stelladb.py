@@ -1,13 +1,16 @@
-﻿import json
-import os
-import tempfile
-import time
-import urllib.error
-import urllib.request
-from pathlib import Path
+﻿from pathlib import Path
 from typing import Optional
-from cache import CacheManager
-from text_clean import extract_ssr_content
+import json
+import os
+import time
+import urllib.request
+
+if __package__:
+    from .cache import CacheManager
+    from .text_clean import extract_ssr_content
+else:
+    from cache import CacheManager
+    from text_clean import extract_ssr_content
 
 _OFFLINE_DIR = Path(__file__).resolve().parent.parent / "data" / "offline"
 

@@ -14,12 +14,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import json
 import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 # Google Docs 预设码文档 TXT 导出接口
 GOOGLE_DOC_URL = (

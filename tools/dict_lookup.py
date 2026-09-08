@@ -1,6 +1,6 @@
-import json
 from pathlib import Path
 from typing import Dict, Optional
+import json
 
 class DictLookup:
     def __init__(self, data_dir: Path, custom_aliases: Optional[Dict[str, str]] = None):

@@ -11,9 +11,9 @@
      被覆盖坐标以空段占位），保留纹章表的列位置信息
 """
 
+from typing import Dict, Tuple
 import html as html_module
 import re
-from typing import Dict, Tuple
 
 # 星塔旅人元素列表（用于从角色页文本中检测元素属性）
 ELEMENTS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
@@ -190,8 +190,3 @@ def detect_element(text: str) -> str | None:
         if element in text:
             return element
     return None
-
-
-def clean_stelladb_html(text: str) -> str:
-    """兼容旧接口：清理 HTML 标签。"""
-    return re.sub(r"<[^>]+>", "", text).strip()

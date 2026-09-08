@@ -19,10 +19,10 @@ import logging
 import sys
 import time
 
-from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
+from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import ToolParamType, ToolParameterInfo
 
-MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防多群场景内存线性增长（【双审 SH-4】）
+MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增长
 
 # 让插件可以导入 tools/ 下的模块
 _TOOLS_DIR = Path(__file__).resolve().parent / "tools"
@@ -36,7 +36,6 @@ from service import (  # noqa: E402
     count_character_names,
     find_character_names_ordered,
     find_team_rows,
-    load_team_table,
     lookup_term,
     query_how_rows,
     query_what,
@@ -147,7 +146,7 @@ class QueryConfig(PluginConfigBase):
     dedup_window: int = Field(
         default=60,
         description="同流同主题直发去重窗口（秒）：同一 stream_id + query 在此时间内重复调用直接拦截，"
-        "防止 what+how 双直发刷屏（Fix A，【Metis 修订 #7/#8】）",
+        "防止 what+how 双直发刷屏",
     )
 
     answer_cache_ttl: int = Field(
@@ -270,9 +269,9 @@ class StellaSoraPlugin(MaiBotPlugin):
                 try:
                     self.ctx.logger.info("开始执行每日 17:00 离线数据全量定时同步...")
                     await asyncio.to_thread(sync_offline_data, sync_all=True)
-                    # 表缓存失效接线（Task 3）：定时同步产出新统一表后立即失效表缓存
+                    # 表缓存失效接线：定时同步产出新统一表后立即失效表缓存
                     reload_team_table()
-                    # 清空直发成品缓存（self._get_answer_cache()._memory_cache.clear() 并清理 answers 磁盘缓存）
+                    # 清空直发成品缓存并清理 answers 磁盘缓存
                     answers_dir = self._cache_dir_ready() / "answers"
                     if answers_dir.exists():
                         for p in answers_dir.glob("*.json"):
@@ -345,9 +344,7 @@ class StellaSoraPlugin(MaiBotPlugin):
     def _get_answer_cache(self) -> CacheManager:
         """获取直发成品缓存管理器（懒创建并复用，同步当前 TTL 配置）。
 
-        线程说明：fetcher 的 CacheManager 在 Todo 4 之后被线程池并发共享，
-        GIL 下 dict 读写原子、最坏后果是重复抓取/损坏文件跳过重抓，良性；
-        答案缓存仅在事件循环侧访问，无此问题。
+        线程说明：答案缓存仅在事件循环侧访问。
         """
         ttl = int(self.config.query.answer_cache_ttl)
         expected_dir = self._cache_dir_ready() / "answers"
@@ -476,9 +473,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("直接发送模式缺少 stream_id，无法确定发送目标")
             return not_found
 
-        # 直发成品缓存查取（Fix B，【Metis 修订 #1/#12】）：
-        # 仅对 direct=True 生效（回传模式为中间产物，不缓存）；
-        # TTL <= 0 时显式跳过 get/set
+        # 直发成品缓存查取：仅对 direct=True 生效；TTL <= 0 时显式跳过
         cache_key = ""
         if direct and self.config.query.answer_cache_ttl > 0:
             inject_persona = self.config.query.inject_persona
@@ -496,7 +491,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 if not sent:
                     self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
                     return not_found
-                # 发送成功即登记去重守卫（【双审 SH-1】保证重复可拦截）
+                # 发送成功即登记去重守卫，保证重复可拦截
                 if query and stream_id:
                     self._recent_direct[(stream_id, query)] = time.time()
                     self.ctx.logger.info("直发去重登记: key=%s", (stream_id, query))
@@ -546,12 +541,11 @@ class StellaSoraPlugin(MaiBotPlugin):
         llm_model = (self.config.query.llm_model or "").strip()
 
         def _llm_failed(reason: str) -> dict:
-            """LLM 加工失败的统一降级出口（修复点2）。
+            """LLM 加工失败的统一降级出口。
 
             资料非空 → 失败回传：用系统说明前缀包装原始资料返回 planner，
-            不写直发成品缓存（在缓存写入点之前直接 return），不再谎报"未找到"；
+            不写直发成品缓存，不再谎报"未找到"；
             资料为空 → 无内容可回传，维持"未找到相关攻略。"。
-            direct=True/False 两路径在此汇合，降级语义天然统一。
             """
             if (material or "").strip():
                 self.ctx.logger.warning(
@@ -607,12 +601,12 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
             return not_found
 
-        # 去重登记：只有真正直发成功后才写入（Fix A，【Metis 修订 #7】）
+        # 去重登记：只有真正直发成功后才写入
         if query and stream_id:
             self._recent_direct[(stream_id, query)] = time.time()
             self.ctx.logger.info("直发去重登记: key=%s", (stream_id, query))
 
-        # 写入直发成品缓存（Fix B）
+        # 写入直发成品缓存
         if direct and self.config.query.answer_cache_ttl > 0 and cache_key:
             cache = self._get_answer_cache()
             cache.set(cache_key, answer)
@@ -699,17 +693,17 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._cache_dir_ready(),
             max_length=int(self.config.query.default_max_length),
         )
-        # 未找到时不走 LLM 加工，直接返回给 planner 自行处理（approach B）
+        # 未找到时不走 LLM 加工，直接返回
         if "未在字典中找到" in text:
             return {"name": "stellasora_what", "content": "未在星塔旅人游戏中找到该角色或装备。"}
-        # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer（approach A）
+        # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer
         # 联合查询检测：用户原话命中 ≥2 个角色名时强制回传，planner 汇总后单条回复避免刷屏
         # count_character_names 内含正则匹配，同样为同步 CPU 重活，放入线程池
         effective_question = (question or "").strip() or query
         direct = self.config.query.direct_send and (
             await asyncio.to_thread(count_character_names, effective_question)
         ) < 2
-        # 去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）
+        # 去重守卫：同流同主题在 dedup_window 内直接拦截
         dedup_resp = self._dedup_guard("stellasora_what", query, direct, **kwargs)
         if dedup_resp is not None:
             return dedup_resp
@@ -766,14 +760,12 @@ class StellaSoraPlugin(MaiBotPlugin):
             "how 查询: %s presets=%s (group=%s user=%s)",
             query, presets, kwargs.get("group_id", ""), kwargs.get("user_id", ""),
         )
-        # Fix D：同 handle_what，表查询/区块解析为同步重活，放入线程池执行
+        # 表查询/区块解析为同步重活，放入线程池执行
         effective_question = (question or "").strip() or query
-        # 统一表驱动链路（Task 3）：问句提取角色（含别名预处理，支持多角色）→
+        # 统一表驱动链路：问句提取角色（含别名预处理，支持多角色）→
         # 兜底归一 query 词 → char_id 集 → find_team_rows 交集查询。
-        # 单/多角色共用同一链路；表未命中直接"未找到相关攻略"——不回退整页、
-        # 不降级单角色、不调旧 query_how（用户裁定 4）。
-        # 问句保序提取（含别名预处理，支持多角色）——联合查询详略与
-        # "第一个角色"依赖问句出现顺序
+        # 单/多角色共用同一链路；表未命中直接"未找到相关攻略"。
+        # 问句保序提取——联合查询详略与首角色排序依赖问句出现顺序。
         found_names = await asyncio.to_thread(find_character_names_ordered, effective_question)
         if not found_names:
             # 问句未命中角色名：用 query 参数做兜底归一（支持空格分隔多名）
@@ -805,14 +797,13 @@ class StellaSoraPlugin(MaiBotPlugin):
     # ===== 去重守卫 =====
 
     def _dedup_guard(self, tool_name: str, query: str, direct: bool, **kwargs) -> Optional[dict]:
-        """直发去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）。
+        """直发去重守卫：同流同主题在 dedup_window 内直接拦截。
 
-        返回拦截响应 dict；放行时返回 None。同时清理过期键（含硬上界保护，
-        防多群内存增长，【双审 SH-4】）。
+        返回拦截响应 dict；放行时返回 None。同时清理过期键（含硬上界保护，防多群内存增长）。
         """
         stream_id = self._resolve_stream_id(kwargs)
         now = time.time()
-        # 清理过期键（含硬上界保护，防多群内存增长，【双审 SH-4】）
+        # 清理过期键（含硬上界保护，防多群内存增长）
         if len(self._recent_direct) > MAX_DEDUP_ENTRIES:
             self._recent_direct.clear()
         else:
@@ -844,12 +835,11 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
         """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。
 
-        直发判定仅由配置 direct_send 决定（修复点3：移除多角色强制回传门槛，
-        联合查询资料已在统一表交集阶段收敛为命中行列表，不存在刷屏问题）。
+        直发判定由配置 direct_send 决定。
         """
         query = effective_question
         direct = self.config.query.direct_send
-        # 去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）
+        # 去重守卫：同流同主题在 dedup_window 内直接拦截
         dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
         if dedup_resp is not None:
             return dedup_resp
@@ -885,7 +875,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.exception("星塔旅人离线数据同步异常: %s", exc)
             return False, f"星塔旅人离线数据同步失败: {exc}", 1
 
-        # 表缓存失效接线（Task 3）：同步产出新统一表后立即失效运行时表缓存，
+        # 表缓存失效接线：同步产出新统一表后立即失效运行时表缓存，
         # 后续 how 查询即时读取新表（在清空直发成品缓存之前执行）
         reload_team_table()
 

@@ -1,15 +1,16 @@
-﻿import hashlib
+﻿from pathlib import Path
+from typing import Any, Dict, Optional
+import hashlib
 import json
 import time
-from pathlib import Path
-from typing import Optional
+
 
 class CacheManager:
     def __init__(self, cache_dir: Path, ttl_seconds: int = 3600):
         self.cache_dir = cache_dir
         self.ttl_seconds = ttl_seconds
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._memory_cache = {}
+        self._memory_cache: Dict[str, Any] = {}
 
     def _get_path(self, key: str) -> Path:
         safe_key = hashlib.md5(key.encode("utf-8")).hexdigest()

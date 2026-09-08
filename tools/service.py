@@ -23,16 +23,16 @@ from cache import CacheManager
 from dict_lookup import DictLookup
 from fetcher_google_doc import GoogleDocFetcher
 from fetcher_stelladb import StelladbFetcher, _read_offline_file
-import term_replace as _term_replace_module
 from text_clean import detect_element, strip_game_markup
+import term_replace as _term_replace_module
 
 logger = logging.getLogger("stellasora.service")
 
 # 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
-# 离线 infodocs 目录常量：how 新链路（query_how_rows）按行读取
-# data/offline/infodocs/{element}.json 的唯一数据定位（不依赖缓存目录）
+# 离线 infodocs 目录常量：how 链路按行读取
+# data/offline/infodocs/{element}.json 的数据定位（不依赖缓存目录）
 _INFODOCS_DIR = Path(__file__).resolve().parents[1] / "data" / "offline" / "infodocs"
 
 # 统一队伍-槽位表缓存（data/offline/presets/team_table.json）
@@ -42,8 +42,7 @@ _team_table_cache: Optional[Dict[str, Any]] = None
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
 # cache_dir 变化时仅重建两个 fetcher，lookup 与 replacer 全进程复用
 _instances: Dict[str, tuple] = {}
-# check-then-init 竞态保护：Fix D 之后这些函数跑在线程池里，无锁并发首调
-# 会双份解析 8.8MB 字典（【Metis 修订 #11】）
+# 线程安全保护：跑在线程池中时，避免无锁并发首次调用重复解析字典
 _init_lock = threading.Lock()
 _pending_aliases: Dict[str, str] = {}
 _cached_overrides_aliases: Optional[Dict[str, str]] = None
@@ -751,36 +750,8 @@ _EMPTY_EMBLEM_RE = re.compile(r"^(?:Not needed|无需升级)。?$", re.IGNORECAS
 _EMBLEM_VALUE_RE = re.compile(r"^[\d.]+\s*%$|^[\d.]+$|^\+\d+\s*levels?$|^无需升级$", re.IGNORECASE)
 
 
-def _split_emblem_columns(cells: list) -> list:
-    """把 Affix 行（去标签后）的格子流切成列模板。
-
-    每列 = [词条, 数值] 两格，或 'Not needed/无需升级' 单格空列（None 占位）。
-    判定依据：数值形态的格子是值格；空标记格自成单格列。
-    """
-    columns: list = []
-    i = 0
-    n = len(cells)
-    while i < n:
-        c = cells[i]
-        if _EMPTY_EMBLEM_RE.match(c):
-            columns.append(None)  # 空列
-            i += 1
-        elif i + 1 < n and _EMBLEM_VALUE_RE.match(cells[i + 1]):
-            columns.append([f"{c} {cells[i + 1]}".strip()])
-            i += 2
-        else:
-            columns.append([c])  # 无值词条（罕见）
-            i += 1
-    return columns
-
-
 # ---------------------------------------------------------------------------
-# 输出装配层噪声过滤（移植自旧 strip_infodoc_noise，d701800~1:tools/service.py）
-#
-# 说明：解析层已采用网格列索引模型，不再依赖噪声占位校准发牌序，
-# _filter_noise_lines 与 _filter_emblem_entry 保留为输出层兜底。
-# 与旧实现的"Potentials 标签行不在此处删除——parse 需要它们触发模式切换"
-# 依赖意识同源：行标签判断仍完全由解析层消费，本层不触碰任何标签行。
+# 输出装配层噪声过滤
 # ---------------------------------------------------------------------------
 
 

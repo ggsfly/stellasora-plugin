@@ -18,10 +18,10 @@
     逐字一致时会整段命中译为官方中文（实测见 docs/ 与 CHANGELOG 1.2.0）
 """
 
-import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
+import json
+import re
 
 # 与 build_dict.CAT_PRIORITY 一致：同英文多条目时按类目优先级取 cn
 CAT_PRIORITY = [

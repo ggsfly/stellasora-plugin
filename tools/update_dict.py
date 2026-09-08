@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 import argparse
 import json
 import os
@@ -26,8 +28,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_dict import (  # noqa: E402

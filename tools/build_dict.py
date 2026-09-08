@@ -25,12 +25,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Dict, Iterable
 import argparse
 import json
 import re
 import sys
-from pathlib import Path
-from typing import Dict, Iterable
 
 # 游戏文本中的 UI 样式标签（<color=#xxx>...</color>）——纯文本输出无意义，
 # 且会让 term_replace 的 .2 整段模式与 stelladb 清洗后文本错位，构建时剥离
