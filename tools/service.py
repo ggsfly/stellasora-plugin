@@ -678,6 +678,66 @@ def _split_emblem_columns(cells: list) -> list:
     return columns
 
 
+# ---------------------------------------------------------------------------
+# 输出装配层噪声过滤（移植自旧 strip_infodoc_noise，d701800~1:tools/service.py）
+#
+# 警告：过滤**只允许**发生在 segments 已产出的字段值装配进输出文本时——
+# 解析层（_parse_block_body/_split_emblem_columns/_flush_emblem_into）禁止滤噪：
+# 发牌序按噪声占位校准，解析层滤噪会导致转置错位。
+# 与旧实现的"Potentials 标签行不在此处删除——parse 需要它们触发模式切换"
+# 依赖意识同源：行标签判断仍完全由解析层消费，本层不触碰任何标签行。
+# ---------------------------------------------------------------------------
+
+
+def _filter_noise_lines(lines: list[str]) -> list[str]:
+    """过滤字段行序列中的纯数字噪声行，并折叠连续多余空行（token 精简）。
+
+    移植语义（旧 strip_infodoc_noise）：
+    - 行过滤：详细页 HTML 表格的行号列折叠出的纯数字行（如 "19"、"297"），
+      对 LLM 无意义——旧实现为 _ROW_NUM_LINE_RE = ^\\d{1,3}$（整页场景下
+      限制 1-3 位以免误伤更长纯数字行），本层只处理字段行、无整页误伤面，
+      故用 .strip().isdigit() 表达"纯数字行"的完整语义（实测全部区块
+      行号均 ≤3 位，两形态在真实数据上零差异）；
+    - 空行折叠：旧 re.sub(r"\\n{3,}", "\\n\\n") 在列表语义下等价于
+      "连续 ≥2 个空行折叠为 1 个空行"（N 个空行 = N+1 个换行，
+      3+ 连续换行折叠为 2 个换行）。
+
+    仅作用于 description/discs 字段行；skill 为整体字符串不经此函数。
+    """
+    kept = [ln for ln in lines if not ln.strip().isdigit()]
+    folded: list[str] = []
+    blank_run = 0
+    for ln in kept:
+        if ln.strip() == "":
+            blank_run += 1
+            if blank_run <= 1:  # 连续空行只保留首个（≥2 折叠为 1）
+                folded.append(ln)
+        else:
+            blank_run = 0
+            folded.append(ln)
+    return folded
+
+
+def _filter_emblem_entry(entry: str) -> str:
+    """过滤纹章复合串中的纯数字噪声子条目（新增逻辑，旧实现无此结构）。
+
+    emblem 条目由 _flush_emblem_into 以 `70级：词条、词条、...` 形态拼接
+    （'、'.join(col)），整串 .isdigit() 恒为 False，须剥等级前缀后逐子条目判定。
+    处理规则：首个 `：` 前含 `级` → 剥前缀，余下按 `、` 拆子条目，
+    纯数字子条目（行号碎片）丢弃后重组接回前缀；无 `级` 前缀（含
+    `第N档` 兜底标签形态）→ 整串按子条目处理，标签随首个子条目保留。
+    """
+    if not entry:
+        return entry
+    sep_idx = entry.find("：")
+    if 0 < sep_idx and "级" in entry[:sep_idx]:
+        prefix = entry[: sep_idx + 1]  # 前缀含 "："
+        body = entry[sep_idx + 1 :]
+        return prefix + "、".join(s for s in body.split("、") if not s.strip().isdigit())
+    # 无等级前缀：整体按子条目处理（全部为纯数字时返回空串，由调用方丢弃）
+    return "、".join(s for s in entry.split("、") if not s.strip().isdigit())
+
+
 def query_how_rows(
     rows: list[dict],
     with_presets: bool = False,
@@ -785,26 +845,30 @@ def query_how_rows(
             # 资料层全量（B 路线）：所有成员的所有字段一律进资料，
             # 只过 replacer（字典译名）+ strip_game_markup；
             # 输出裁剪完全由 prompt 规则 4 指引 LLM 自行完成
+            # 噪声过滤在装配层进行（纯数字行号碎片），解析层保持原样——
+            # 发牌序按噪声占位校准，解析层滤噪会导致转置错位
             if seg["description"]:
                 lines.append("描述：")
                 lines.extend(
                     strip_game_markup(replacer.replace(d))
-                    for d in seg["description"]
+                    for d in _filter_noise_lines(seg["description"])
                 )
             if seg["skill"]:
+                # skill 整体保留不做子条目过滤：`1/10/1/10 (...)` 的 `/` 分隔
+                # 结构非行号噪声形态
                 lines.append(f"技能升级优先度：{strip_game_markup(replacer.replace(seg['skill']))}")
             if seg["discs"]:
                 lines.append("推荐主位秘纹：")
                 lines.extend(
                     strip_game_markup(replacer.replace(d))
-                    for d in seg["discs"]
+                    for d in _filter_noise_lines(seg["discs"])
                 )
             if seg["emblem"]:
                 lines.append("纹章推荐：")
-                lines.extend(
-                    strip_game_markup(replacer.replace(d))
-                    for d in seg["emblem"]
-                )
+                for entry in seg["emblem"]:
+                    cleaned = _filter_emblem_entry(entry)
+                    if cleaned:
+                        lines.append(strip_game_markup(replacer.replace(cleaned)))
             lines.append("")
 
         # 预设码行（用户明确要求时）：码原文保真（replacer 不改码），成员为官方中文名

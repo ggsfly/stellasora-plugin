@@ -1633,6 +1633,126 @@ def run_section_n() -> None:
             none_block is None and empty_block is None,
             f"none_block={none_block}, empty_block={empty_block}",
         )
+
+        # N13（噪声过滤验收，基线翻转断言）：真实 terra 页 Terra Mark Amplification
+        # 区块渲染输出——emblem 行无裸数字行号子条目（297/298/299/300/301/308/309/310
+        # 等全部滤除），真实词条保序保留（'充能效率（主位） 30%' / '自然之触 +3 等级' /
+        # '地系穿透 110'），emblem 行数仍为 3 成员 × 3 等级 = 9 行、等级前缀完好。
+        # 基线特征（未改代码时输出含 '297'）的 PASS 记录见 evidence
+        service.reload_team_table()
+        real_table_nb = service.load_team_table()
+        rows_tma = [
+            r for r in real_table_nb["rows"]
+            if r.get("guide_ref") and r["guide_ref"].get("block") == "Terra Mark Amplification"
+        ]
+        out_tma = service.query_how_rows(rows_tma, question="小禾攻略")
+        out_lines_tma = out_tma.split("\n")
+        # 收集渲染输出中的全部 emblem 行（"纹章推荐：" 之后至空行前的等级标签行）
+        emblem_rows_tma: list = []
+        for i, ln in enumerate(out_lines_tma):
+            if ln == "纹章推荐：":
+                j = i + 1
+                while j < len(out_lines_tma) and out_lines_tma[j]:
+                    emblem_rows_tma.append(out_lines_tma[j])
+                    j += 1
+        emblem_text_tma = "\n".join(emblem_rows_tma)
+        # 计划验收(3)的"80/90 级行各 4 个真实词条"与验收(1)（滤除 '300'）互斥：
+        # 实测 Terra Mark Amplification Nazuna 90级 = 3 真实词条 + '300'，按(1)裁定滤除，
+        # 此处断言 80 级 4 词条、90 级 3 词条（矛盾决策记录见 evidence 对照表）
+        check(
+            "N13 真实terra区块emblem无裸数字行号且真实词条保留（基线翻转）",
+            len(emblem_rows_tma) == 9
+            and all(ln.startswith(("70级：", "80级：", "90级：")) for ln in emblem_rows_tma)
+            and all(not s.strip().isdigit() for ln in emblem_rows_tma for s in ln.split("、"))
+            and not any(
+                d in emblem_text_tma
+                for d in ("297", "298", "299", "300", "301", "308", "309", "310", "321", "322", "323")
+            )
+            and emblem_rows_tma[0] == "70级：充能效率（主位） 30%"
+            and len(emblem_rows_tma[1].split("、")) == 4  # 80级：4 真实词条
+            and len(emblem_rows_tma[2].split("、")) == 3  # 90级：'300' 滤除后 3 词条
+            and "自然之触 +3 等级" in emblem_rows_tma[2]
+            and any("地系穿透 110" in ln for ln in emblem_rows_tma)
+            and any("印记伤害 80%" in ln and "暴击率 15%" in ln for ln in emblem_rows_tma),
+            f"emblem_rows={emblem_rows_tma}",
+        )
+
+        # N11: _filter_emblem_entry 混合串仅滤纯数字子条目 + 三边界（空串/全数字串/无前缀）
+        check(
+            "N11 emblem混合串仅滤纯数字子条目（'310'滤除,'30%'/'110'保留）",
+            service._filter_emblem_entry("70级：充能效率 30%、310、地系穿透 110、30%")
+            == "70级：充能效率 30%、地系穿透 110、30%",
+            f"got={service._filter_emblem_entry('70级：充能效率 30%、310、地系穿透 110、30%')!r}",
+        )
+        check(
+            "N11b emblem三边界：空串恒等/全数字串滤空/无前缀档标签保留在首非数字子条目",
+            service._filter_emblem_entry("") == ""
+            and service._filter_emblem_entry("297、298") == ""
+            and service._filter_emblem_entry("第4档：充能效率 30%、297") == "第4档：充能效率 30%"
+            and service._filter_emblem_entry("70级：无需升级") == "70级：无需升级",
+            f"空串={service._filter_emblem_entry('')!r}, "
+            f"全数字={service._filter_emblem_entry('297、298')!r}, "
+            f"第4档={service._filter_emblem_entry('第4档：充能效率 30%、297')!r}",
+        )
+
+        # N12: _filter_noise_lines 纯数字行丢弃 + 连续空行折叠
+        # （旧 re.sub(r"\n{3,}", "\n\n") 的列表等价语义：≥2 连续空行折叠为 1）
+        check(
+            "N12 行序列过滤：纯数字行丢弃且真实行保留,≥2连续空行折叠为1",
+            service._filter_noise_lines(["287", "段落一", "", "", "", "段落二", "291"])
+            == ["段落一", "", "段落二"]
+            and service._filter_noise_lines(["297", "298"]) == []
+            and service._filter_noise_lines([]) == []
+            and service._filter_noise_lines(["地系穿透 110", "+3 levels", "30%"])
+            == ["地系穿透 110", "+3 levels", "30%"],
+            f"got={service._filter_noise_lines(['287', '段落一', '', '', '', '段落二', '291'])!r}",
+        )
+
+        # N14: 渲染端到端——fixture infodoc 含 description/discs 行号噪声行，
+        # 经 query_how_rows 真实路径后滤除且真实行保留
+        fold_infodoc = (
+            "Fold Test Block | ⏏ Back to Top ⏏\n"
+            "Description | Skill Upgrade Priority\n"
+            "Nazuna (5★) | 1/10/1/10 (Main Skill only)\n"
+            "888\n"
+            "ZZFOLDDESC 段落一\n"
+            "Priority Potentials | Recommended Main Discs\n"
+            "777\n"
+            "ZZFOLDDISC (C1)\n"
+            "Optional Potentials | Emblem\n"
+            "Affix Priority | Terra PEN | 110\n"
+        )
+        fold_row = {
+            "main_key": "terra::FoldTest::X",
+            "preset_code": None,
+            "element": "terra",
+            "slots": [
+                {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                {"char_id": 130, "en": "Donna", "cn": "多娜"},
+                {"char_id": 125, "en": "Canglan", "cn": "苍兰"},
+            ],
+            "team_name_preset": "",
+            "team_name_infodoc": "Fold Test Block",
+            "guide_ref": {"element": "terra", "block": "Fold Test Block"},
+            "rotation": "",
+        }
+        with tempfile.TemporaryDirectory(prefix="stellasora_n14_") as tmp_fold:
+            fold_dir = Path(tmp_fold)
+            (fold_dir / "terra.json").write_text(
+                json.dumps({"data": fold_infodoc}, ensure_ascii=False), encoding="utf-8"
+            )
+            with unittest.mock.patch.object(service, "_INFODOCS_DIR", fold_dir):
+                out_fold = service.query_how_rows([fold_row], question="小禾攻略")
+        check(
+            "N14 渲染端到端：description/discs 纯数字行滤除,真实行与skill保留",
+            "888" not in out_fold
+            and "777" not in out_fold
+            and "ZZFOLDDESC 段落一" in out_fold
+            and "ZZFOLDDISC (共鸣1阶)" in out_fold
+            and "技能升级优先度：1/10/1/10 (主技能 only)" in out_fold
+            and "70级：地系穿透 110" in out_fold,
+            f"out_fold={out_fold!r}",
+        )
     finally:
         service.reload_team_table()
 
