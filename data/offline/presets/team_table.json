@@ -25,12 +25,9 @@
         }
       ],
       "team_name_preset": "Nazuna-Donna",
-      "team_name_infodoc": "Nazuna-Donna",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Nazuna-Donna"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA",
@@ -57,12 +54,9 @@
         }
       ],
       "team_name_preset": "Teresa-Donna",
-      "team_name_infodoc": "Post Haste Team",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Post Haste Team"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAKAAAACCMAYjZAAwBsBsBs2AIGwA",
@@ -89,12 +83,9 @@
         }
       ],
       "team_name_preset": "Chitose (Main Skill)",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAKAAAABvMAYjZAAwBsBsBsJ2wAAA",
@@ -121,12 +112,9 @@
         }
       ],
       "team_name_preset": "Chitose (Main Skill)",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAKAAAAB9MAYjZAAwBsBsBqwAOAAA",
@@ -153,12 +141,9 @@
         }
       ],
       "team_name_preset": "Chitose (Main Skill)",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAH8AAACCMAbDbACiQAgNkM2AGAwA",
@@ -185,12 +170,9 @@
         }
       ],
       "team_name_preset": "Teresa Version",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAH8AAABvMAbDbACiQAgNkMJ2wAAA",
@@ -217,12 +199,9 @@
         }
       ],
       "team_name_preset": "Teresa Version",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAKAAAAB9zbAjBAAwBsBkBqwAKAwA",
@@ -249,12 +228,9 @@
         }
       ],
       "team_name_preset": "Chitose (Auto Attack)",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAH8AAACCzbADDACkQABsgM2AIGwA",
@@ -281,12 +257,9 @@
         }
       ],
       "team_name_preset": "Teresa Version",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAH8AAABvzbADDACkQABsgMJ2wAAA",
@@ -313,12 +286,9 @@
         }
       ],
       "team_name_preset": "AAAAkAAAAH0AAAB/zbADDACsACgMAKxAAG2A",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAIIAAAB9zbADDADNgCBsAKwAOAwA",
@@ -345,12 +315,9 @@
         }
       ],
       "team_name_preset": "Donna + Freesia Version",
-      "team_name_infodoc": "Chitose (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAkAAAAKAAAABrkAgrDDDNtgAABsGGCGAA",
@@ -377,12 +344,9 @@
         }
       ],
       "team_name_preset": "Chitose (Mark DMG)",
-      "team_name_infodoc": "Chitose (Mark DMG) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Mark DMG) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAfQAAAKAAAABrMDAwHYBdhsAABsGGCGAC",
@@ -438,12 +402,9 @@
         }
       ],
       "team_name_preset": "Chaton (Dark Ray)",
-      "team_name_infodoc": "Chaton (Dark Ray)",
+      "team_name_infodoc": null,
       "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Dark Ray)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAcgAAAH4AAABrMAYJbAKsEBhhgGAGGGAG",
@@ -470,12 +431,9 @@
         }
       ],
       "team_name_preset": "Chaton (Dark Ray)",
-      "team_name_infodoc": "Chaton (Dark Ray)",
+      "team_name_infodoc": null,
       "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Dark Ray)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAcgAAAH4AAABsMAYJbAKsEBhhgMGBAB2A",
@@ -502,12 +460,9 @@
         }
       ],
       "team_name_preset": "Chaton (Dark Ray)",
-      "team_name_infodoc": "Chaton (Dark Ray)",
+      "team_name_infodoc": null,
       "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Dark Ray)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAfgAAAJ4AAACNwYbBAYDNgAMMBswQAGwA",
@@ -534,12 +489,9 @@
         }
       ],
       "team_name_preset": "Snowish Laru (Cannon)",
-      "team_name_infodoc": "Snowish Laru (Cannon)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Snowish Laru (Cannon)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAfgAAAJ4AAABswYbBAYDNgAMMBsGBAA2A",
@@ -566,12 +518,9 @@
         }
       ],
       "team_name_preset": "Snowish Laru (Cannon)",
-      "team_name_infodoc": "Snowish Laru (Cannon)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Snowish Laru (Cannon)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACeMAELBDasEBhhgMIBGAwG",
@@ -598,12 +547,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Ultimate)",
-      "team_name_infodoc": "Fuyuka (Ultimate)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Ultimate)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACNMAELBDasEBhhgMwQAWwA",
@@ -630,12 +576,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Ultimate)",
-      "team_name_infodoc": "Fuyuka (Ultimate)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Ultimate)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACeMAbLIAbMshgggMIAGAwG",
@@ -662,12 +605,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Skill DMG)",
-      "team_name_infodoc": "Fuyuka (Skill Damage) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Skill Damage) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACNMAbLEAbMshgggMwQAWwA",
@@ -694,12 +634,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Skill DMG)",
-      "team_name_infodoc": "Fuyuka (Skill Damage) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Skill Damage) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACexbFDAAbNsggAAMIAGAwG",
@@ -726,12 +663,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Auto Attack)",
-      "team_name_infodoc": "Fuyuka (Auto Attack) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Auto Attack) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhgAAAH4AAACNxbFDAAbNsggAAMwQAWwA",
@@ -758,12 +692,9 @@
         }
       ],
       "team_name_preset": "Fuyuka (Auto Attack)",
-      "team_name_infodoc": "Fuyuka (Auto Attack) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Fuyuka (Auto Attack) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjwAAAIUAAAB7xJAHDEAwAEtsAGGGwBwA",
@@ -790,12 +721,9 @@
         }
       ],
       "team_name_preset": "Wraith (Melee)",
-      "team_name_infodoc": "Wraith (Melee)",
-      "rotation": "Wraith comps are generally auto-friendly that can have optimizations to squeeze more damage.",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Wraith (Melee)"
-      }
+      "team_name_infodoc": null,
+      "rotation": "Wraith comps are generally auto-friendly that can have optimizations to squeeze more damage.General Rotation1.  Use both Support Skills2.  Use Wraith skills while weaving a few auto attacks between each skill activation to proc her tornadoesWhen to use Ultimate?• Wraith: Whenever there's a need to dodge big attacks from enemies (preferably also while waiting for her supports' skills cooldown to come back up).• Nazuka: Preferably when there's a break window and also when her Support Skill CD is around 7s+ to not delay its cast.• Ann: To block target attacks or disrupt disruptable enemies.Tips• Wraith: Use her Main Skill sparingly (keeping it at 2 stacks always) while waiting for Ann's Support Skill to snapshot her tornadoes with all of Ann's buffs.",
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjwAAAIUAAAB7MAbLLADMAAsMAKCGwAwA",
@@ -822,12 +750,9 @@
         }
       ],
       "team_name_preset": "Wraith (Ranged)",
-      "team_name_infodoc": "Wraith (Ranged) WIP",
-      "rotation": "Wraith comps are generally auto-friendly that can have optimizations to squeeze more damage.",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Wraith (Ranged) WIP"
-      }
+      "team_name_infodoc": null,
+      "rotation": "Wraith comps are generally auto-friendly that can have optimizations to squeeze more damage.General Rotation1.  Use both Support Skills2.  Use Wraith skills while weaving a few auto attacks between each skill activation to proc her tornadoesWhen to use Ultimate?• Wraith: Whenever there's a need to dodge big attacks from enemies (preferably also while waiting for her supports' skills cooldown to come back up).• Nazuka: Preferably when there's a break window and also when her Support Skill CD is around 7s+ to not delay its cast.• Ann: To block target attacks or disrupt disruptable enemies.Tips• Wraith: Use her Main Skill sparingly (keeping it at 2 stacks always) while waiting for Ann's Support Skill to snapshot her tornadoes with all of Ann's buffs.",
+      "guide_ref": null
     },
     {
       "main_key": "AAAAnAAAAIUAAAB7MYDEIYBiCNsMAKAGwBwA",
@@ -854,12 +779,9 @@
         }
       ],
       "team_name_preset": "Nazuna-Nazuka",
-      "team_name_infodoc": "NazuNazuka (Hybrid)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "NazuNazuka (Hybrid)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAeAAAAIUAAAB7rAgAjAAwAtsMAKAGwAwA",
@@ -886,12 +808,9 @@
         }
       ],
       "team_name_preset": "Nazuka (Formation)",
-      "team_name_infodoc": "Nazuka (Formation)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Nazuka (Formation)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAeAAAAIUAAAB7rAgAjADFsBgMAKAGwAwA",
@@ -918,12 +837,9 @@
         }
       ],
       "team_name_preset": "Nazuka (Petals)",
-      "team_name_infodoc": "Nazuka (Petals)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Nazuka (Petals)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw",
@@ -950,12 +866,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Rapid Fire)",
-      "team_name_infodoc": "Sparkla (Rapid Fire) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Rapid Fire) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAABrzbAbAADBgBgMBmAGGGAG",
@@ -982,12 +895,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Rapid Fire)",
-      "team_name_infodoc": "Sparkla (Rapid Fire) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Rapid Fire) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA",
@@ -1014,12 +924,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Rapid Fire)",
-      "team_name_infodoc": "Sparkla (Rapid Fire) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Rapid Fire) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAACfMAbYYADAQBgNhs2IAGAw",
@@ -1046,12 +953,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Bunny Jaws)",
-      "team_name_infodoc": "Sparkla (Bunny Jaws) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Bunny Jaws) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAABrMAbYYADAQBgNhmAGGGAG",
@@ -1078,12 +982,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Bunny Jaws)",
-      "team_name_infodoc": "Sparkla (Bunny Jaws) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Bunny Jaws) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjAAAAJwAAAB0MAbYYADAQBgNhsGAAGwA",
@@ -1110,12 +1011,9 @@
         }
       ],
       "team_name_preset": "Sparkla (Bunny Jaws)",
-      "team_name_infodoc": "Sparkla (Bunny Jaws) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Bunny Jaws) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAnAAAAJUAAABrUYEDbAZgADsMAMGAAGAG",
@@ -1142,12 +1040,9 @@
         }
       ],
       "team_name_preset": "Original Terra Mark",
-      "team_name_infodoc": "Terra Mark Amplification",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Terra Mark Amplification"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAnAAAAJUAAACfwYADbAZgADsMAJGAAGww",
@@ -1174,12 +1069,9 @@
         }
       ],
       "team_name_preset": "Original Terra Mark",
-      "team_name_infodoc": "Terra Mark (S. Coronis Ver.)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Terra Mark (S. Coronis Ver.)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhAAAAHMAAABrrYY4gAAwBsMMAMw2AGAA",
@@ -1206,12 +1098,9 @@
         }
       ],
       "team_name_preset": "Firefly (Giant Sword)",
-      "team_name_infodoc": "Firefly (Giant Sword) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Firefly (Giant Sword) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAmwAAAIQAAABrzbADAgCQAMQMAK2OBGAB",
@@ -1238,12 +1127,9 @@
         }
       ],
       "team_name_preset": "Shia (Snow Rabbit)",
-      "team_name_infodoc": "Shia (Snow Rabbit) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Shia (Snow Rabbit) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAmwAAAHMAAABrzbADEgAwDsBsAMw2AGAA",
@@ -1270,12 +1156,9 @@
         }
       ],
       "team_name_preset": "Shia (Snow Rabbit)",
-      "team_name_infodoc": "Shia (Snow Rabbit) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Shia (Snow Rabbit) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAmwAAAGsAAAB7zbADAgCtjghgAsGQAwBA",
@@ -1302,12 +1185,9 @@
         }
       ],
       "team_name_preset": "Shia (Snow Rabbit)",
-      "team_name_infodoc": "Shia (Snow Rabbit) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Shia (Snow Rabbit) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAmwAAAIQAAABrNIbDYACQAMRsAKGICGAG",
@@ -1334,12 +1214,9 @@
         }
       ],
       "team_name_preset": "Shia (Night Rabbit)",
-      "team_name_infodoc": "Shia (Night Rabbit)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Shia (Night Rabbit)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAmwAAAGsAAAB7NIbDYAKhiBhgBsGQAwAA",
@@ -1366,12 +1243,9 @@
         }
       ],
       "team_name_preset": "Shia (Night Rabbit)",
-      "team_name_infodoc": "Shia (Night Rabbit)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Shia (Night Rabbit)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAdQAAAGsAAACEoAADDY7NhgBgAJAAwGwA",
@@ -1398,12 +1272,9 @@
         }
       ],
       "team_name_preset": "Jinglin (Lux Mark)",
-      "team_name_infodoc": "Jinglin (Lux Mark)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Jinglin (Lux Mark)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAdQAAAGsAAABzoAADDY7BsABgBjAGwGwA",
@@ -1430,12 +1301,9 @@
         }
       ],
       "team_name_preset": "AoE (Mobbing)",
-      "team_name_infodoc": "Jinglin (Lux Mark)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Jinglin (Lux Mark)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAdQAAAGsAAABzoAADDY7NsABgADAGwGwA",
@@ -1462,12 +1330,9 @@
         }
       ],
       "team_name_preset": "ST (Bossing)",
-      "team_name_infodoc": "Jinglin (Lux Mark)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Jinglin (Lux Mark)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAlgAAAGsAAACEMbbAYICthgBgApAAwAwA",
@@ -1494,12 +1359,9 @@
         }
       ],
       "team_name_preset": "Laru (Laser)",
-      "team_name_infodoc": "Laru (Laser)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "lux",
-        "block": "Laru (Laser)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAnQAAAI4AAACRzbADADBsgMAMMM2AGwAA",
@@ -1526,12 +1388,9 @@
         }
       ],
       "team_name_preset": "Karin (Boss Shark)",
-      "team_name_infodoc": "Karin (Boss Shark) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Karin (Boss Shark) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAnQAAAI4AAACRMAbDYAZtgMAMADAGG2AA",
@@ -1558,12 +1417,9 @@
         }
       ],
       "team_name_preset": "Karin (Hunter’s Mark)",
-      "team_name_infodoc": "Karin (Hunter's Mark) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Karin (Hunter's Mark) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAJEAAACHXBYAFDAwBtlkgMywwGAA",
@@ -1590,12 +1446,9 @@
         }
       ],
       "team_name_preset": "Otoha (Weeping Sky)",
-      "team_name_infodoc": "Otoha (Weeping Sky)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Otoha (Weeping Sky)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAJEAAAB2XBYAFDAwBtlkgMAAAOwA",
@@ -1622,12 +1475,9 @@
         }
       ],
       "team_name_preset": "Otoha (Weeping Sky)",
-      "team_name_infodoc": "Otoha (Weeping Sky)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Otoha (Weeping Sky)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAhwAAAJEAAACOzIEAIgAwBtlkgGwCwAww",
@@ -1654,12 +1504,9 @@
         }
       ],
       "team_name_preset": "Mistique Main Version",
-      "team_name_infodoc": "Mistique-Otoha (Weeping Sky) WIP",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Mistique-Otoha (Weeping Sky) WIP"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAJEAAACHXBYAFDDNsBkEgMywwGAA",
@@ -1686,12 +1533,9 @@
         }
       ],
       "team_name_preset": "Otoha (Laser)",
-      "team_name_infodoc": "Otoha (Laser)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Otoha (Laser)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAJEAAAB2zBYAFDDNsBkEgMAAAOwA",
@@ -1718,12 +1562,9 @@
         }
       ],
       "team_name_preset": "Otoha (Laser)",
-      "team_name_infodoc": "Otoha (Laser)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Otoha (Laser)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAbgAAAI4AAACRzZAYAAZsgsgMMDAGW2QA",
@@ -1750,12 +1591,9 @@
         }
       ],
       "team_name_preset": "Otoha (Weeping Sky)",
-      "team_name_infodoc": "Firenze (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAbgAAAI4AAACHzbAYAIZsAsgMEMyQwGAA",
@@ -1782,12 +1620,9 @@
         }
       ],
       "team_name_preset": "Otoha (Weeping Sky)",
-      "team_name_infodoc": "Firenze (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAbgAAAI4AAAB2zbAYAAZsAsgMEDAAAOwA",
@@ -1814,12 +1649,9 @@
         }
       ],
       "team_name_preset": "Otoha (Weeping Sky)",
-      "team_name_infodoc": "Firenze (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAbgAAAI4AAACRzbAYAAZsAsgMEM2QGwQA",
@@ -1846,12 +1678,9 @@
         }
       ],
       "team_name_preset": "Otoha (Laser)",
-      "team_name_infodoc": "Firenze (Main Skill)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Main Skill)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAIcAAABvPAYAEjDNsMBgAMBAwAAG",
@@ -1878,12 +1707,9 @@
         }
       ],
       "team_name_preset": "Mistique (Minion)",
-      "team_name_infodoc": "Mistique (Minion)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Mistique (Minion)"
-      }
+      "guide_ref": null
     },
     {
       "main_key": "AAAAjgAAAIcAAAB2PAYAFDDNsMBgAMAAAOwA",
@@ -1910,696 +1736,298 @@
         }
       ],
       "team_name_preset": "Coronis Version",
-      "team_name_infodoc": "Mistique (Minion)",
+      "team_name_infodoc": null,
       "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Mistique (Minion)"
-      }
-    },
-    {
-      "main_key": "aqua::Chitose (Auto Attack) WIP::Donna",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 144,
-          "slot": "主控位",
-          "en": "Chitose",
-          "cn": "千都世"
-        },
-        {
-          "char_id": 127,
-          "slot": "支援位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 130,
-          "slot": "支援位",
-          "en": "Donna",
-          "cn": "多娜"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chitose (Auto Attack) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Auto Attack) WIP"
-      }
-    },
-    {
-      "main_key": "aqua::Chitose (Auto Attack) WIP::Freesia",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 144,
-          "slot": "主控位",
-          "en": "Chitose",
-          "cn": "千都世"
-        },
-        {
-          "char_id": 127,
-          "slot": "支援位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 125,
-          "slot": "支援位",
-          "en": "Freesia",
-          "cn": "苍兰"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chitose (Auto Attack) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Auto Attack) WIP"
-      }
-    },
-    {
-      "main_key": "aqua::Chitose (Auto Attack) WIP::Iris",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 144,
-          "slot": "主控位",
-          "en": "Chitose",
-          "cn": "千都世"
-        },
-        {
-          "char_id": 127,
-          "slot": "支援位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 111,
-          "slot": "支援位",
-          "en": "Iris",
-          "cn": "鸢尾"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chitose (Auto Attack) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Chitose (Auto Attack) WIP"
-      }
-    },
-    {
-      "main_key": "aqua::Nazuna-Freesia::Tilia",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 156,
-          "slot": "主控位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 125,
-          "slot": "支援位",
-          "en": "Freesia",
-          "cn": "苍兰"
-        },
-        {
-          "char_id": 107,
-          "slot": "支援位",
-          "en": "Tilia",
-          "cn": "缇莉娅"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Nazuna-Freesia",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Nazuna-Freesia"
-      }
-    },
-    {
-      "main_key": "aqua::Nazuna-Freesia::Iris",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 156,
-          "slot": "主控位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 125,
-          "slot": "支援位",
-          "en": "Freesia",
-          "cn": "苍兰"
-        },
-        {
-          "char_id": 111,
-          "slot": "支援位",
-          "en": "Iris",
-          "cn": "鸢尾"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Nazuna-Freesia",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Nazuna-Freesia"
-      }
-    },
-    {
-      "main_key": "aqua::Freesia (Supp. Slot) WIP::Tilia",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 127,
-          "slot": "主控位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 125,
-          "slot": "支援位",
-          "en": "Freesia",
-          "cn": "苍兰"
-        },
-        {
-          "char_id": 107,
-          "slot": "支援位",
-          "en": "Tilia",
-          "cn": "缇莉娅"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Freesia (Supp. Slot) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Freesia (Supp. Slot) WIP"
-      }
-    },
-    {
-      "main_key": "aqua::Freesia (Supp. Slot) WIP::Iris",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 127,
-          "slot": "主控位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 125,
-          "slot": "支援位",
-          "en": "Freesia",
-          "cn": "苍兰"
-        },
-        {
-          "char_id": 111,
-          "slot": "支援位",
-          "en": "Iris",
-          "cn": "鸢尾"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Freesia (Supp. Slot) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Freesia (Supp. Slot) WIP"
-      }
-    },
-    {
-      "main_key": "aqua::Freesia (Main Skill)::Iris",
-      "preset_code": null,
-      "element": "aqua",
-      "slots": [
-        {
-          "char_id": 127,
-          "slot": "主控位",
-          "en": "Teresa",
-          "cn": "特丽莎"
-        },
-        {
-          "char_id": 126,
-          "slot": "支援位",
-          "en": "Flora",
-          "cn": "紫槿"
-        },
-        {
-          "char_id": 111,
-          "slot": "支援位",
-          "en": "Iris",
-          "cn": "鸢尾"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Freesia (Main Skill)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "aqua",
-        "block": "Freesia (Main Skill)"
-      }
-    },
-    {
-      "main_key": "ignis::Chaton (Hybrid) WIP::Snowish Laru",
-      "preset_code": null,
-      "element": "ignis",
-      "slots": [
-        {
-          "char_id": 114,
-          "slot": "主控位",
-          "en": "Chaton",
-          "cn": "猫眼"
-        },
-        {
-          "char_id": 126,
-          "slot": "支援位",
-          "en": "Flora",
-          "cn": "紫槿"
-        },
-        {
-          "char_id": 158,
-          "slot": "支援位",
-          "en": "Snowish Laru",
-          "cn": "菈露（圣夜）"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chaton (Hybrid) WIP",
-      "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Hybrid) WIP"
-      }
-    },
-    {
-      "main_key": "ignis::Chaton (Hybrid) WIP::Tilia",
-      "preset_code": null,
-      "element": "ignis",
-      "slots": [
-        {
-          "char_id": 114,
-          "slot": "主控位",
-          "en": "Chaton",
-          "cn": "猫眼"
-        },
-        {
-          "char_id": 126,
-          "slot": "支援位",
-          "en": "Flora",
-          "cn": "紫槿"
-        },
-        {
-          "char_id": 107,
-          "slot": "支援位",
-          "en": "Tilia",
-          "cn": "缇莉娅"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chaton (Hybrid) WIP",
-      "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Hybrid) WIP"
-      }
-    },
-    {
-      "main_key": "ignis::Chaton (Hybrid) WIP::Kasimira",
-      "preset_code": null,
-      "element": "ignis",
-      "slots": [
-        {
-          "char_id": 114,
-          "slot": "主控位",
-          "en": "Chaton",
-          "cn": "猫眼"
-        },
-        {
-          "char_id": 126,
-          "slot": "支援位",
-          "en": "Flora",
-          "cn": "紫槿"
-        },
-        {
-          "char_id": 108,
-          "slot": "支援位",
-          "en": "Kasimira",
-          "cn": "卡西米拉"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Chaton (Hybrid) WIP",
-      "rotation": "Snapshot.",
-      "guide_ref": {
-        "element": "ignis",
-        "block": "Chaton (Hybrid) WIP"
-      }
-    },
-    {
-      "main_key": "ventus::Nanoha-Nazuka (Formation)::Nazuka",
-      "preset_code": null,
-      "element": "ventus",
-      "slots": [
-        {
-          "char_id": 119,
-          "slot": "主控位",
-          "en": "Nanoha",
-          "cn": "花原"
-        },
-        {
-          "char_id": 123,
-          "slot": "支援位",
-          "en": "Ann",
-          "cn": "杏子"
-        },
-        {
-          "char_id": 133,
-          "slot": "支援位",
-          "en": "Nazuka",
-          "cn": "夏花"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Nanoha-Nazuka (Formation)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Nanoha-Nazuka (Formation)"
-      }
-    },
-    {
-      "main_key": "ventus::Nanoha-Nazuka (Petals)::Nazuka",
-      "preset_code": null,
-      "element": "ventus",
-      "slots": [
-        {
-          "char_id": 119,
-          "slot": "主控位",
-          "en": "Nanoha",
-          "cn": "花原"
-        },
-        {
-          "char_id": 123,
-          "slot": "支援位",
-          "en": "Ann",
-          "cn": "杏子"
-        },
-        {
-          "char_id": 133,
-          "slot": "支援位",
-          "en": "Nazuka",
-          "cn": "夏花"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Nanoha-Nazuka (Petals)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "ventus",
-        "block": "Nanoha-Nazuka (Petals)"
-      }
-    },
-    {
-      "main_key": "terra::Sparkla (Terra Mark) WIP::Springseek Coronis",
-      "preset_code": null,
-      "element": "terra",
-      "slots": [
-        {
-          "char_id": 156,
-          "slot": "主控位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 140,
-          "slot": "支援位",
-          "en": "Sparkla",
-          "cn": "斯帕克拉"
-        },
-        {
-          "char_id": 159,
-          "slot": "支援位",
-          "en": "Springseek Coronis",
-          "cn": "科洛妮丝（新春）"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Sparkla (Terra Mark) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Sparkla (Terra Mark) WIP"
-      }
-    },
-    {
-      "main_key": "terra::S. Coronis (Rose Vial Speedrun)::Tilia",
-      "preset_code": null,
-      "element": "terra",
-      "slots": [
-        {
-          "char_id": 156,
-          "slot": "主控位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 159,
-          "slot": "支援位",
-          "en": "Springseek Coronis",
-          "cn": "科洛妮丝（新春）"
-        },
-        {
-          "char_id": 107,
-          "slot": "支援位",
-          "en": "Tilia",
-          "cn": "缇莉娅"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "S. Coronis (Rose Vial Speedrun)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "S. Coronis (Rose Vial Speedrun)"
-      }
-    },
-    {
-      "main_key": "terra::S. Coronis (Rose Vial Speedrun)::Ridge",
-      "preset_code": null,
-      "element": "terra",
-      "slots": [
-        {
-          "char_id": 156,
-          "slot": "主控位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 159,
-          "slot": "支援位",
-          "en": "Springseek Coronis",
-          "cn": "科洛妮丝（新春）"
-        },
-        {
-          "char_id": 116,
-          "slot": "支援位",
-          "en": "Ridge",
-          "cn": "岭川"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "S. Coronis (Rose Vial Speedrun)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "S. Coronis (Rose Vial Speedrun)"
-      }
-    },
-    {
-      "main_key": "terra::Gerie (Auto Attack) WIP::Springseek Coronis",
-      "preset_code": null,
-      "element": "terra",
-      "slots": [
-        {
-          "char_id": 149,
-          "slot": "主控位",
-          "en": "Gerie",
-          "cn": "格芮"
-        },
-        {
-          "char_id": 156,
-          "slot": "支援位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 159,
-          "slot": "支援位",
-          "en": "Springseek Coronis",
-          "cn": "科洛妮丝（新春）"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Gerie (Auto Attack) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Gerie (Auto Attack) WIP"
-      }
-    },
-    {
-      "main_key": "terra::Gerie (Auto Attack) WIP::Ridge",
-      "preset_code": null,
-      "element": "terra",
-      "slots": [
-        {
-          "char_id": 149,
-          "slot": "主控位",
-          "en": "Gerie",
-          "cn": "格芮"
-        },
-        {
-          "char_id": 156,
-          "slot": "支援位",
-          "en": "Nazuna",
-          "cn": "小禾"
-        },
-        {
-          "char_id": 116,
-          "slot": "支援位",
-          "en": "Ridge",
-          "cn": "岭川"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Gerie (Auto Attack) WIP",
-      "rotation": "",
-      "guide_ref": {
-        "element": "terra",
-        "block": "Gerie (Auto Attack) WIP"
-      }
-    },
-    {
-      "main_key": "umbra::Firenze (Minion)::Otoha",
-      "preset_code": null,
-      "element": "umbra",
-      "slots": [
-        {
-          "char_id": 110,
-          "slot": "主控位",
-          "en": "Firenze",
-          "cn": "翡冷翠"
-        },
-        {
-          "char_id": 142,
-          "slot": "支援位",
-          "en": "Cosette",
-          "cn": "珂赛特"
-        },
-        {
-          "char_id": 145,
-          "slot": "支援位",
-          "en": "Otoha",
-          "cn": "乙叶"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Firenze (Minion)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Minion)"
-      }
-    },
-    {
-      "main_key": "umbra::Firenze (Minion)::Mistique",
-      "preset_code": null,
-      "element": "umbra",
-      "slots": [
-        {
-          "char_id": 110,
-          "slot": "主控位",
-          "en": "Firenze",
-          "cn": "翡冷翠"
-        },
-        {
-          "char_id": 142,
-          "slot": "支援位",
-          "en": "Cosette",
-          "cn": "珂赛特"
-        },
-        {
-          "char_id": 135,
-          "slot": "支援位",
-          "en": "Mistique",
-          "cn": "雾语"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Firenze (Minion)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Minion)"
-      }
-    },
-    {
-      "main_key": "umbra::Firenze (Minion)::Coronis",
-      "preset_code": null,
-      "element": "umbra",
-      "slots": [
-        {
-          "char_id": 110,
-          "slot": "主控位",
-          "en": "Firenze",
-          "cn": "翡冷翠"
-        },
-        {
-          "char_id": 142,
-          "slot": "支援位",
-          "en": "Cosette",
-          "cn": "珂赛特"
-        },
-        {
-          "char_id": 118,
-          "slot": "支援位",
-          "en": "Coronis",
-          "cn": "科洛妮丝"
-        }
-      ],
-      "team_name_preset": null,
-      "team_name_infodoc": "Firenze (Minion)",
-      "rotation": "",
-      "guide_ref": {
-        "element": "umbra",
-        "block": "Firenze (Minion)"
-      }
+      "guide_ref": null
     }
   ],
   "report": {
-    "generated_at": 1788820126.2703078,
+    "generated_at": 1788874532.1516929,
     "stats": {
-      "total_rows": 81,
+      "total_rows": 60,
       "preset_rows": 60,
-      "codeless_rows": 21,
-      "correlated_blocks": 30,
+      "codeless_rows": 0,
+      "correlated_blocks": 0,
       "total_blocks": 41,
-      "invalid_rows_count": 0
+      "invalid_rows_count": 44
     },
-    "invalid_rows": []
+    "invalid_rows": [
+      {
+        "code": "AAAAoAAAAIkAAACFMAbHYDDMMANsADAA22wA",
+        "reason": "成员未知（非Character类目或不存在）",
+        "detail": {
+          "element": "ventus",
+          "team_name_raw": "Eleanor (Skill DMG)",
+          "code": "AAAAoAAAAIkAAACFMAbHYDDMMANsADAA22wA",
+          "wip": false
+        }
+      },
+      {
+        "code": "AAAAjwAAAIkAAAB7xtgDDAAwBsNsAKGGwAwA",
+        "reason": "成员未知（非Character类目或不存在）",
+        "detail": {
+          "element": "ventus",
+          "team_name_raw": "Wraith (Melee)",
+          "code": "AAAAjwAAAIkAAAB7xtgDDAAwBsNsAKGGwAwA",
+          "wip": false
+        }
+      },
+      {
+        "code": "AAAAjwAAAIkAAAB7MAZjbADNsAMMAKGGwAwA",
+        "reason": "成员未知（非Character类目或不存在）",
+        "detail": {
+          "element": "ventus",
+          "team_name_raw": "Wraith (Ranged)",
+          "code": "AAAAjwAAAIkAAAB7MAZjbADNsAMMAKGGwAwA",
+          "wip": false
+        }
+      },
+      {
+        "block": "Nazuna-Donna",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Post Haste Team",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Chitose (Main Skill)",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Chitose (Mark DMG) WIP",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Chitose (Auto Attack) WIP",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Nazuna-Freesia",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Freesia (Supp. Slot) WIP",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Freesia (Main Skill)",
+        "element": "aqua",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Chaton (Dark Ray)",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Chaton (Hybrid) WIP",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Snowish Laru (Cannon)",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Fuyuka (Ultimate)",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Fuyuka (Skill Damage) WIP",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Fuyuka (Auto Attack) WIP",
+        "element": "ignis",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Wraith (Melee)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Wraith (Ranged) WIP",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "NazuNazuka (Hybrid)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Nazuka (Formation)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Nazuka (Petals)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Nanoha-Nazuka (Formation)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Nanoha-Nazuka (Petals)",
+        "element": "ventus",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Sparkla (Rapid Fire) WIP",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Sparkla (Bunny Jaws) WIP",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Sparkla (Terra Mark) WIP",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "S. Coronis (Rose Vial Speedrun)",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Terra Mark (S. Coronis Ver.)",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Terra Mark Amplification",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Gerie (Auto Attack) WIP",
+        "element": "terra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Firefly (Giant Sword) WIP",
+        "element": "lux",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Shia (Snow Rabbit) WIP",
+        "element": "lux",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Shia (Night Rabbit)",
+        "element": "lux",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Laru (Laser)",
+        "element": "lux",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Jinglin (Lux Mark)",
+        "element": "lux",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Karin (Boss Shark) WIP",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Karin (Hunter's Mark) WIP",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Otoha (Laser)",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Otoha (Weeping Sky)",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Mistique-Otoha (Weeping Sky) WIP",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Firenze (Main Skill)",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Firenze (Minion)",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      },
+      {
+        "block": "Mistique (Minion)",
+        "element": "umbra",
+        "reason": "缺槽位（段数少于3无法构成3槽位）",
+        "detail": []
+      }
+    ]
   }
 }

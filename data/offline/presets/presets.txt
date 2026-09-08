@@ -264,7 +264,7 @@ ________________
 
 
 Ventus
-Wraith (Melee)
+Eleanor (Skill DMG)
 	Main Trekker
 	Support Trekker 1
 	Support Trekker 2
@@ -273,6 +273,23 @@ Wraith (Melee)
 
 	  
 
+	  
+
+	AAAAoAAAAIkAAACFMAbHYDDMMANsADAA22wA 
+	
+
+Wraith (Melee)
+	Main Trekker
+	Support Trekker 1
+	S. Trekker 2
+	Preset Code
+	  
+
+	  
+
+	  
+
+	AAAAjwAAAIkAAAB7xtgDDAAwBsNsAKGGwAwA
 	  
 
 	AAAAjwAAAIUAAAB7xJAHDEAwAEtsAGGGwBwA
@@ -281,12 +298,15 @@ Wraith (Melee)
 Wraith (Ranged)
 	Main Trekker
 	Support Trekker 1
-	Support Trekker 2
+	S. Trekker 2
 	Preset Code
 	  
 
 	  
 
+	  
+
+	AAAAjwAAAIkAAAB7MAZjbADNsAMMAKGGwAwA 
 	  
 
 	AAAAjwAAAIUAAAB7MAbLLADMAAsMAKCGwAwA
@@ -657,7 +677,10 @@ ________________
 
 
 Changelogs
-Aug. 20, 2026
+Sep. 8, 2026
+	* Added Eleanor (Skill) team (thanks ZiLenTz for the early build)
+* Added Eleanor in both Wraith teams. Take note that this is currently an early theorycrafted team.
+	Aug. 20, 2026
 	* Updated Karin (Boss Shark) team (thanks ZiLenTz for the build)
 * Added Karin (Hunter’s Mark) team (thanks ZiLenTz for the build)
 	Aug. 18, 2026
