@@ -66,16 +66,6 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 初始化完成后重启 MaiBot，插件即可离线运行。
 
-### 数据源说明
-
-| 数据 | 来源 | 本地存储路径 |
-|------|------|-------------|
-| 攻略与索引 | [stelladb](https://stelladb.pages.dev/) | `data/offline/infodocs/` |
-| 队伍预设码 | 公开 Google Docs 文档 | `data/offline/presets/` |
-| 游戏字典 | [StellaSoraData](https://github.com/AutumnVN/StellaSoraData) | `data/dict.json`, `data/names.json` |
-
-> 数据文件不随仓库分发，需在安装后运行数据初始化脚本生成。日常查询优先读取本地离线文件。
-
 ## 配置
 
 插件配置位于 `config.toml`（也可在 WebUI 插件配置页修改，热更新即时生效）：
@@ -204,22 +194,8 @@ python tools/sync_data.py --all --proxy http://127.0.0.1:7890  # 指定代理
 python tools/sync_data.py --all --proxy ""                     # 强制直连
 ```
 
-## 预设码与统一队伍-槽位表
-
-预设码（Preset Code）是社区用于分享队伍配置的字符串，解码后即为"1 名主控+2 名援护"的角色 ID 组合。插件将预设码与 stelladb 攻略页队伍区块整合为统一队伍-槽位表 `data/offline/presets/team_table.json`，作为 `stellasora_how` 的数据底座：
-
-- **统一表结构**：每行包含 3 个槽位（1 主控 + 2 援护，全部可解析为官方角色）+ 队名并集 + 所属元素 + 攻略区块引用 + Rotation 数据。槽位不满或无法解析的行不入表。
-- **预设码解码**：预设码按 base64 解码出 3×32bit 大端角色 ID，直接得到主控与援护槽位。
-- **固化关联**：预设码与攻略页队伍区块在表构建期按主控一致与成员包含关系固化关联。
-- **无码队伍覆盖**：未关联预设码的队伍区块按共享前缀拆行入表，确保攻略可查。
-- **码原文保真**：表中保存码原文，仅当用户明确要求"预设码"时附带，替换引擎不修改码本身。
-- **按需抽取**：how 查询按命中行的 `guide_ref` 只提取对应攻略页区块，大幅降低上下文消耗。
-- **自动同步重载**：统一表由数据同步流程（每日 17:00 定时 / `/st_update` / CLI）产出，同步完成后运行时缓存自动重载。
-
 ## 字典更新
 
-> ⚠️ **流量提醒**：字典更新需要从 GitHub 拉取 [StellaSoraData](https://github.com/AutumnVN/StellaSoraData) 仓库数据。
-> 该仓库包含完整的游戏解包数据（含 `_Lua` 脚本等大目录，完整克隆可达数百 MB）：
 > - **本地仓库模式**（`update_dictionary.bat` / `--mode local`）：要求本机已有 StellaSoraData 克隆，每次更新只拉取**增量**变更（通常仅几 MB）；但若你还没有本地克隆，首次 `git clone` 会拉取**完整仓库**，请留意流量。
 > - **remote 模式**（`--mode remote`）：不会克隆完整仓库，仅下载 `EN/language` 与 `CN/language` 两个语言目录（约 10 MB）。
 
@@ -238,20 +214,6 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
 ```
 
 - 更新报告见 `data/_update_report.json`（新增/更新/保留条目统计）
-
-### 字典构成（全字段）
-
-`dict.json` 为**全字段字典**（47,504 条，8.8 MB）：
-
-| 字段 | 内容 | 消费方 |
-|------|------|--------|
-| `.1`（29,158 条） | 角色/技能/物品等**名字** | names.json 查词索引 + term_replace（名字字段优先） |
-| `.2/.3/...`（18,346 条） | 技能/潜能**描述**、剧情、语音、UI 文本 | term_replace 增量替换（与攻略站文本逐字一致时整段译为官方中文） |
-
-- `names.json`（27,173 键）仅索引 `.1` 名字字段，描述长文本不入索引
-- term_replace 译名决胜规则：`.1` 名字字段优先于 `.2+` 描述字段，同为 `.1` 按 CAT_PRIORITY——
-  名字译名稳定，`.2+` 仅做增量贡献
-- `DictLookup.get_full(id)` / `service.lookup_full(id)` 按 ID 查询完整文本（现即主字典）
 
 ### 中文别名与人工修正
 
@@ -287,16 +249,6 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
    - `aliases`：向名字索引追加别名（俗称/变体写法 → 主表 ID），目标 ID 必须存在
    - 另有查询侧兜底：查词命中非 Character 条目但存在同英文名的 Character 条目时，
      自动改路由到角色条目，避免攻略抓取被静默跳过
-
-## 开发
-
-```bash
-# 全量回归测试（单文件，支持按节运行：python tests/test_all.py B G J）
-python tests/test_all.py
-
-# 网络连通性自检
-python tools/probe_google_doc.py
-```
 
 ### 提示词文档
 
