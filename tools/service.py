@@ -744,19 +744,20 @@ def query_how_rows(
     max_length: Optional[int] = None,
     question: str = "",
 ) -> str:
-    """how 桶（表驱动新链路）：按命中行逐行抓取 guide_ref 指向的 infodoc 区块输出。
+    """how 桶（表驱动新链路）：命中行按 guide_ref 区块归组，逐组抓取 infodoc 区块输出。
 
-    资料层采用全量提供策略（B 路线）：每个命中行只读取其 guide_ref 指向的
-    区块（同区块跨行复用），四类字段（描述、技能、秘纹、纹章）完整载入资料，
-    输出裁剪与格式控制交由上层 LLM Prompt 完成——不读整页、不做元素判定、
-    不做全元素扫描，token 消耗随命中队伍规模线性增长。
+    资料层采用全量提供策略（B 路线）：同区块命中行并为一组（组序 = 首次出现序），
+    每组只读取其 guide_ref 指向的区块一次，四类字段（描述、技能、秘纹、纹章）完整
+    载入资料；缺段成员与后续行新增成员由组内队友并集 rescue，输出裁剪与格式控制
+    交由上层 LLM Prompt 完成——不读整页、不做元素判定、不做全元素扫描，
+    token 消耗随命中队伍规模线性增长。
 
     Args:
         rows: find_team_rows 命中的统一队伍-槽位表行列表
            （含 slots/team_name_*/guide_ref/rotation/preset_code 字段）
-        with_presets: 是否在每行尾附加预设码行（码原文保真）
+        with_presets: 是否在每组尾附加预设码行（码原文保真）
         max_length: 输出文本最大字符数限制（None 表示不限制）
-        question: 用户原话——用于推导"本角色"标签（问句命中角色排成员首位）
+        question: 用户原话——用于推导问询角色（问句命中角色排成员首位）
 
     Returns:
         包含攻略文本（与可选预设码行）的格式化字符串；无可用行时返回空串
@@ -803,18 +804,33 @@ def query_how_rows(
         lines.extend(strip_game_markup(replacer.replace(r)) for r in rotations)
         lines.append("")
 
-    team_idx = 0
+    # 行 → 组归并（Design X）：同 guide_ref 区块（或同预设码的未关联行）跨行并为一组，
+    # 组序 = 行序中首次出现序；归组键 = (element, block)，未关联行 = ("", 码/main_key)
+    groups: list = []  # [(key, [row, ...]), ...] 保序
+    group_index: Dict[tuple, int] = {}
     for row in rows:
-        slots = [s for s in row.get("slots", []) if isinstance(s, dict) and s.get("en")]
+        ref = row.get("guide_ref")
+        if ref:
+            key = (str(ref.get("element", "")), str(ref.get("block", "")))
+        else:
+            key = ("", str(row.get("preset_code") or row.get("main_key") or ""))
+        if key in group_index:
+            groups[group_index[key]][1].append(row)
+        else:
+            group_index[key] = len(groups)
+            groups.append((key, [row]))
+
+    for group_no, (_key, group_rows) in enumerate(groups, 1):
+        first_row = group_rows[0]
+        slots = [s for s in first_row.get("slots", []) if isinstance(s, dict) and s.get("en")]
         if not slots:
             continue
-        team_idx += 1
 
-        # 队名：infodoc 区块名优先，缺则回退预设表队名（过字典替换保留流派信息）
-        team_name = row.get("team_name_infodoc") or row.get("team_name_preset") or ""
-        lines.append(f"配队{team_idx}（{strip_game_markup(replacer.replace(team_name))}）")
+        # 组头：编号 + 队名（infodoc 区块名优先，缺则回退预设表队名，过字典替换保留流派信息）
+        team_name = first_row.get("team_name_infodoc") or first_row.get("team_name_preset") or ""
+        lines.append(f"{group_no}. {strip_game_markup(replacer.replace(team_name))}")
 
-        # 角色定位取行内槽位：首位=主控位，其余=支援位
+        # 角色定位取首行槽位：首位=主控位，其余=支援位
         role_by_en = {
             s["en"]: "主控位" if si == 0 else "支援位" for si, s in enumerate(slots)
         }
@@ -822,23 +838,25 @@ def query_how_rows(
         ordered = [s for s in slots if s["en"] in asker_ens]
         ordered += [s for s in slots if s["en"] not in asker_ens]
 
-        guide_ref = row.get("guide_ref")
+        guide_ref = first_row.get("guide_ref")
         block = (
             _get_block(guide_ref.get("element", ""), guide_ref.get("block", ""))
             if guide_ref
             else None
         )
 
+        detailed_ids: set = set()
         for slot in ordered:
             en = slot["en"]
             seg = block.get("segments", {}).get(en) if block else None
             if block is not None and seg is None:
                 # 区块已解析但缺该成员段（关联规则保证 slots ⊆ 区块成员，
-                # 此处仅防御数据漂移）：与旧链路一致跳过该成员行
+                # 此处仅防御数据漂移）：不输出名字行，由下方队友并集扫描 rescue
                 continue
-            tag = "本角色" if en in asker_ens else "队友"
             member_cn = slot.get("cn") or en
-            lines.append(f"{tag}{member_cn}（{role_by_en.get(en, '支援位')}）")
+            lines.append(f"{member_cn}（{role_by_en.get(en, '支援位')}）")
+            if slot.get("char_id") is not None:
+                detailed_ids.add(slot["char_id"])
             if seg is None:
                 continue
 
@@ -871,15 +889,38 @@ def query_how_rows(
                         lines.append(strip_game_markup(replacer.replace(cleaned)))
             lines.append("")
 
-        # 预设码行（用户明确要求时）：码原文保真（replacer 不改码），成员为官方中文名
-        if with_presets and row.get("preset_code"):
-            code = row["preset_code"]
-            members_desc = "、".join(
-                [f"主控{slots[0].get('cn') or slots[0]['en']}", f"援护{slots[1].get('cn') or slots[1]['en']}"]
-                + [s.get("cn") or s["en"] for s in slots[2:]]
-            )
-            lines.append(f"预设码：{strip_game_markup(replacer.replace(code))}（{members_desc}）")
-            lines.append("")
+        # 队友并集：扫描组内全部行（含首行——缺段成员 rescue），char_id 不在 detailed_ids 的成员
+        teammate_seen: set = set()
+        teammate_entries: list = []
+        for row in group_rows:
+            row_slots = [s for s in row.get("slots", []) if isinstance(s, dict) and s.get("en")]
+            for si, s in enumerate(row_slots):
+                cid = s.get("char_id")
+                ident = cid if cid is not None else f"en:{s['en']}"
+                if ident in detailed_ids or ident in teammate_seen:
+                    continue
+                teammate_seen.add(ident)
+                pos = "主控位" if si == 0 else "支援位"
+                teammate_entries.append(f"{s.get('cn') or s['en']}（{pos}）")
+        if teammate_entries:
+            lines.append(f"队友：{'、'.join(teammate_entries)}")
+
+        # 组尾预设码行（用户明确要求时）：组内按行序收集去重码，
+        # 成员描述用该码首次出现行的 slots（码原文保真，replacer 不改码）
+        if with_presets:
+            seen_codes: set = set()
+            for row in group_rows:
+                code = row.get("preset_code")
+                if not code or code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                r_slots = [s for s in row.get("slots", []) if isinstance(s, dict) and s.get("en")]
+                members_desc = "、".join(
+                    [f"主控{r_slots[0].get('cn') or r_slots[0]['en']}", f"援护{r_slots[1].get('cn') or r_slots[1]['en']}"]
+                    + [s.get("cn") or s["en"] for s in r_slots[2:]]
+                )
+                lines.append(f"预设码：{strip_game_markup(replacer.replace(code))}（{members_desc}）")
+                lines.append("")
 
     return _fit_lines(lines, max_length)
 

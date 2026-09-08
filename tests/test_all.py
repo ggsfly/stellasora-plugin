@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sys
 import tempfile
@@ -455,6 +456,85 @@ Other Team | ⏏ Back to Top ⏏
 ZZOTHERTEAM 其他队伍内容不应出现
 """
 
+# F10 fixture umbra infodoc：两个同角色不同玩法区块（翡冷翠 Main Skill / Minion），
+# 模板抄 F_FIXTURE_INFODOC 真实结构（锚点行/段头/角色行/秘纹/纹章转置）改名字与标记；
+# Mistique/Coronis 段无描述标记——模拟"区块内缺段成员由队友并集 rescue"的关联形态
+F10_UMBRA_INFODOC = """Firenze (Main Skill) | ⏏ Back to Top ⏏
+Description | Skill Upgrade Priority
+Firenze (5★) | 10/10/1/10 (Main Skill only)
+ZZMS-F-DESC 翡冷翠主控描述内容
+Description | Skill Upgrade Priority
+Cosette (4★) | 1/1/10/1 (Support Skill only)
+ZZMS-COS-DESC 珂赛特支援描述内容
+Description | Skill Upgrade Priority
+Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
+ZZMS-OTO-DESC 乙叶支援描述内容
+Description | Skill Upgrade Priority
+Mistique (4★) | 1/1/10/1 (Support Skill only)
+Description | Skill Upgrade Priority
+Coronis (5★) | 1/1/10/1 (Support Skill only)
+Firenze (Minion) | ⏏ Back to Top ⏏
+Description | Skill Upgrade Priority
+Firenze (5★) | 10/10/1/10 (Main Skill only)
+ZZMI-F-DESC 翡冷翠仆从主控描述内容
+Description | Skill Upgrade Priority
+Cosette (4★) | 1/1/10/1 (Support Skill only)
+ZZMI-COS-DESC 珂赛特支援描述内容
+Description | Skill Upgrade Priority
+Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
+ZZMI-OTO-DESC 乙叶支援描述内容
+Description | Skill Upgrade Priority
+Mistique (4★) | 1/1/10/1 (Support Skill only)
+Description | Skill Upgrade Priority
+Coronis (5★) | 1/1/10/1 (Support Skill only)
+"""
+
+# F10 fixture 行：同 guide_ref 区块多行并组（Main Skill×4 行各不同码 / Minion×3 行无码）
+_F10_MS_REF = {"element": "umbra", "block": "Firenze (Main Skill)"}
+_F10_MI_REF = {"element": "umbra", "block": "Firenze (Minion)"}
+
+
+def _f10_row(
+    slots: list,
+    ref: dict,
+    team_name: str,
+    code: str | None,
+    main_key: str,
+) -> dict:
+    """构造 F10 fixture 表行（行结构 = team_table.json 行契约）。"""
+    return {
+        "main_key": main_key,
+        "preset_code": code,
+        "element": "umbra",
+        "slots": slots,
+        "team_name_preset": "Otoha (Weeping Sky)",
+        "team_name_infodoc": team_name,
+        "guide_ref": ref,
+        "rotation": "",
+    }
+
+
+_S_MS = [
+    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
+     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
+     {"char_id": 145, "en": "Otoha", "cn": "乙叶"}],
+    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
+     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
+     {"char_id": 135, "en": "Mistique", "cn": "雾语"}],
+    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
+     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
+     {"char_id": 118, "en": "Coronis", "cn": "科洛妮丝"}],
+]
+F10_FIXTURE_ROWS = [
+    _f10_row(_S_MS[0], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0xAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::1"),
+    _f10_row(_S_MS[1], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0yAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::2"),
+    _f10_row(_S_MS[2], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0zAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::3"),
+    _f10_row(_S_MS[0], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS00AAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::4"),
+    _f10_row(_S_MS[0], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::1"),
+    _f10_row(_S_MS[1], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::2"),
+    _f10_row(_S_MS[2], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::3"),
+]
+
 
 def run_query_how_section() -> None:
     print("--- F how 表驱动查询 ---")
@@ -468,12 +548,12 @@ def run_query_how_section() -> None:
             json.dumps({"data": F_FIXTURE_INFODOC}, ensure_ascii=False), encoding="utf-8"
         )
         with unittest.mock.patch.object(service, "_INFODOCS_DIR", infodocs_dir):
-            # F1 主控问询：配队头+槽位定位标签（本角色主控/队友支援），只抓命中区块
+            # F1 组头+成员行：编号队名头+槽位定位标签（主控/支援），只抓命中区块
             mat_a = service.query_how_rows([row_a], with_presets=False, question="小禾攻略")
-            check("F1 配队头+槽位定位标签，不含未命中区块内容",
-                  "配队1（" in mat_a
-                  and "本角色小禾（主控位）" in mat_a
-                  and "队友格芮（支援位）" in mat_a
+            check("F1 组头+槽位定位标签，不含未命中区块内容",
+                  "1. 地系印记 (S. 科洛妮丝 Ver.)" in mat_a
+                  and "小禾（主控位）" in mat_a
+                  and "格芮（支援位）" in mat_a
                   and "ZZOTHERTEAM" not in mat_a)
 
             # F2 四类字段齐全（描述/技能/秘纹/纹章）+ 纹章转置分档（70级/80级）
@@ -486,11 +566,11 @@ def run_query_how_section() -> None:
                   and "70级：" in mat_a and "80级：" in mat_a
                   and "110" in mat_a and "15%" in mat_a)
 
-            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 本角色，主控珂赛特为队友
+            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 问询角色排首位，主控珂赛特为队友
             mat_b = service.query_how_rows([row_b], with_presets=False, question="乙叶攻略")
             check("F3 支援位问询定位正确（锚名≠主控）",
-                  "本角色乙叶（支援位）" in mat_b
-                  and "队友珂赛特（主控位）" in mat_b
+                  "乙叶（支援位）" in mat_b
+                  and "珂赛特（主控位）" in mat_b
                   and "ZZSUPPNOTE" in mat_b and "ZZMAINNOTE" in mat_b)
 
             # F4 rotation 直读行内字段；空 rotation 行不产生输出手法块
@@ -498,20 +578,20 @@ def run_query_how_section() -> None:
                   "ZZROTMARK" in mat_a and "循环手法" in mat_a
                   and "输出手法" not in mat_b)
 
-            # F5 预设码行：码原文保真+主控/援护标注，位于配队头之后；关闭时不出现
+            # F5 预设码行：码原文保真+主控/援护标注，位于组头之后；关闭时不出现
             mat_p = service.query_how_rows([row_a], with_presets=True, question="小禾攻略")
-            idx_t, idx_c = mat_p.find("配队1（"), mat_p.find("预设码：")
+            idx_t, idx_c = mat_p.find("1. 地系印记 (S. 科洛妮丝 Ver.)"), mat_p.find("预设码：")
             check("F5 预设码行格式与保序",
                   idx_t > -1 and idx_c > idx_t
                   and f"预设码：{F_FIXTURE_CODE}（主控小禾、援护格芮、科洛妮丝（新春））" in mat_p
                   and "预设码" not in mat_a)
 
-            # F6 guide_ref=None 行优雅降级：队名+成员+预设码，无区块四类字段
+            # F6 guide_ref=None 行优雅降级：组头+成员+预设码，无区块四类字段
             mat_c = service.query_how_rows([row_c], with_presets=True, question="格芮攻略")
-            check("F6 未关联行优雅降级（队名+成员+预设码，无四类字段）",
-                  "配队1（" in mat_c
-                  and "本角色格芮（主控位）" in mat_c
-                  and "队友紫槿（支援位）" in mat_c
+            check("F6 未关联行优雅降级（组头+成员+预设码，无四类字段）",
+                  "1. 格芮 普攻 预设" in mat_c
+                  and "格芮（主控位）" in mat_c
+                  and "紫槿（支援位）" in mat_c
                   and "预设码：" in mat_c
                   and "描述：" not in mat_c and "纹章推荐：" not in mat_c)
 
@@ -523,9 +603,9 @@ def run_query_how_section() -> None:
                       "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
                       f"提取结果: {extracted}")
                 mat_d = service.query_how_rows([row_d], with_presets=False, question="春科和猫眼")
-                check("F8 别名问句双本角色标签（原F15-4迁移）",
-                      "本角色猫眼（主控位）" in mat_d
-                      and "本角色科洛妮丝（新春）" in mat_d
+                check("F8 别名问句双问询角色成员行（原F15-4迁移）",
+                      "猫眼（主控位）" in mat_d
+                      and "科洛妮丝（新春）（支援位）" in mat_d
                       and "ZZCHATDESC" in mat_d and "ZZCORONISDESC" in mat_d)
             finally:
                 service.configure_overrides(aliases={})
@@ -541,6 +621,93 @@ def run_query_how_section() -> None:
                   len(hit_single) == 1 and len(hit_multi) == 1
                   and hit_multi[0]["main_key"] == F_FIXTURE_CODE
                   and miss_single == [] and miss_multi == [])
+
+            # F10 分组渲染（Design X）：mock umbra.json 写入同一 tmp 目录，
+            # 同 guide_ref 区块跨行并组——组头编号、区块字段去重、队友并集 rescue、组尾预设码
+            (infodocs_dir / "umbra.json").write_text(
+                json.dumps({"data": F10_UMBRA_INFODOC}, ensure_ascii=False), encoding="utf-8"
+            )
+            mat_f = service.query_how_rows(F10_FIXTURE_ROWS, with_presets=True)
+            group_heads_f = re.findall(r"^\d+\. ", mat_f, flags=re.M)
+            ms_cnt = {m: mat_f.count(m) for m in ("ZZMS-F-DESC", "ZZMS-COS-DESC", "ZZMS-OTO-DESC")}
+            mi_cnt = {m: mat_f.count(m) for m in ("ZZMI-F-DESC", "ZZMI-COS-DESC", "ZZMI-OTO-DESC")}
+            check("F10 同区块分组：组头恰2且区块名+字段去重各恰1次+缺段标记不泄漏",
+                  len(group_heads_f) == 2
+                  and "1. 翡冷翠 (主技能)" in mat_f
+                  and "2. 翡冷翠 (仆从)" in mat_f
+                  and all(v == 1 for v in ms_cnt.values()) and all(v == 1 for v in mi_cnt.values())
+                  and mat_f.count("ZZMS-MIS-DESC") == 0 and mat_f.count("ZZMS-COR-DESC") == 0,
+                  f"group_heads={group_heads_f}, ms={ms_cnt}, mi={mi_cnt}")
+            check("F10 队友并集：两组各一并集行+四支援成员齐全",
+                  mat_f.count("队友：雾语（支援位）、科洛妮丝（支援位）") == 2
+                  and "珂赛特" in mat_f and "乙叶" in mat_f
+                  and "雾语（支援位）" in mat_f and "科洛妮丝（支援位）" in mat_f)
+            check("F10 组尾预设码：组1四码各一行+旧'配队'头不出现",
+                  len(re.findall(r"^预设码：", mat_f, flags=re.M)) == 4
+                  and "预设码：AAAAMS0xAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in mat_f
+                  and "预设码：AAAAMS00AAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in mat_f
+                  and "配队" not in mat_f)
+
+        # F11 真实表翡冷翠（不在 patch context 内——读真实离线数据）：
+        # 7 行（Main Skill×4 + Minion×3）按区块并成 2 组，组头为区块名
+        service.reload_team_table()
+        rows_firenze = service.find_team_rows([110])
+        mat_real_f = service.query_how_rows(rows_firenze, question="翡冷翠攻略")
+        check("F11 真实表翡冷翠分组渲染：组头恰2且旧'配队'头消失+并集行恰2",
+              len(re.findall(r"^\d+\. ", mat_real_f, flags=re.M)) == 2
+              and "翡冷翠 (主技能)" in mat_real_f and "翡冷翠 (仆从)" in mat_real_f
+              and "配队" not in mat_real_f
+              and len(re.findall(r"^队友：", mat_real_f, flags=re.M)) == 2,
+              f"rows={len(rows_firenze)}")
+
+        # F12 真实表小禾+格芮：4 行（TMA 1 + S.Coronis 1 + WIP 2）并成 3 组，
+        # 第三组（WIP，2 行）队友并集含岭川（第二行第三槽成员）
+        rows_sg = service.find_team_rows([156, 149])
+        mat_sg = service.query_how_rows(rows_sg, question="小禾 格芮攻略")
+        check("F12 真实表小禾+格芮：3 组头按行序+第三组队友并集含岭川",
+              len(re.findall(r"^\d+\. ", mat_sg, flags=re.M)) == 3
+              and "地系印记 Amplification" in mat_sg
+              and "地系印记 (S. 科洛妮丝 Ver.)" in mat_sg
+              and "格芮 (普攻) 施工中" in mat_sg
+              and "岭川" in mat_sg,
+              f"rows={len(rows_sg)}")
+
+        # F13 None 行独立成组+防御：不同 preset_code 各自成组（首行首槽无 char_id
+        # 测并集 ident 回退），空行列表返回空串
+        rows_none = [
+            {
+                "main_key": "terra::Alpha::1",
+                "preset_code": "Preset Alpha",
+                "element": "terra",
+                "slots": [
+                    {"en": "Gerie", "cn": "格芮"},
+                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                ],
+                "team_name_preset": "Preset Alpha",
+                "team_name_infodoc": "",
+                "guide_ref": None,
+                "rotation": "",
+            },
+            {
+                "main_key": "terra::Beta::1",
+                "preset_code": "Preset Beta",
+                "element": "terra",
+                "slots": [
+                    {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                ],
+                "team_name_preset": "Preset Beta",
+                "team_name_infodoc": "",
+                "guide_ref": None,
+                "rotation": "",
+            },
+        ]
+        mat_none = service.query_how_rows(rows_none)
+        check("F13 None行独立成组：组头恰2（预设Alpha/Beta）+缺char_id不崩",
+              len(re.findall(r"^\d+\. ", mat_none, flags=re.M)) == 2
+              and "1. 预设 Alpha" in mat_none and "2. 预设 Beta" in mat_none
+              and "格芮（主控位）" in mat_none
+              and service.query_how_rows([]) == "")
 
 
 # ===== 节 G：直发端到端（核心用例精简版） =====
@@ -1750,7 +1917,9 @@ def run_section_n() -> None:
             and "ZZFOLDDESC 段落一" in out_fold
             and "ZZFOLDDISC (共鸣1阶)" in out_fold
             and "技能升级优先度：1/10/1/10 (主技能 only)" in out_fold
-            and "70级：地系穿透 110" in out_fold,
+            and "70级：地系穿透 110" in out_fold
+            # fold 区块只有 Nazuna 段——多娜/苍兰缺段成员由队友并集 rescue（不丢弃任何成员）
+            and "队友：多娜（支援位）、苍兰（支援位）" in out_fold,
             f"out_fold={out_fold!r}",
         )
     finally:
