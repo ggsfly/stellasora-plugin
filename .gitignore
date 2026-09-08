@@ -15,3 +15,19 @@ __pycache__/
 data/_archive/
 data/.cache_sim/
 data/.cache_diag/
+
+# -------------------------------------------------------
+# 用户自行维护的数据文件（不随仓库分发，由更新脚本在本地生成）
+# 游戏版本更新后运行 tools/update_dict.py 或 tools/sync_data.py 更新
+# -------------------------------------------------------
+
+# 全字段字典与名字索引（StellaSoraData 解包生成，8-10 MB）
+data/dict.json
+data/names.json
+
+# 离线攻略与预设码持久化目录（sync_data.py / /st_update 生成）
+data/offline/
+
+# 更新与对齐报告（每次更新覆盖，无需版本控制）
+data/_update_report.json
+data/_alignment_report.json

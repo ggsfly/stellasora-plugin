@@ -50,6 +50,7 @@ def sync_offline_data(
     sync_all: bool = False,
     cache_dir: Optional[Path] = None,
     offline_dir: Optional[Path] = None,
+    proxy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """核心同步函数：抓取离线数据并持久化到本地。
 
@@ -58,6 +59,9 @@ def sync_offline_data(
         sync_all: 是否执行全量同步（六大元素 + index + presets）
         cache_dir: 网络缓存目录（默认 data/.cache）
         offline_dir: 离线数据存储目录（默认 data/offline）
+        proxy: 代理地址，如 "http://127.0.0.1:7890"。
+               传入空字符串 "" 表示强制直连；
+               传入 None 则自动读取环境变量 HTTPS_PROXY/HTTP_PROXY，否则使用默认代理。
 
     Returns:
         包含更新统计与各条目明细的字典：
@@ -97,8 +101,8 @@ def sync_offline_data(
             "items": {},
         }
 
-    st_fetcher = StelladbFetcher(cache_dir=target_cache_dir, offline_dir=target_offline_dir)
-    gd_fetcher = GoogleDocFetcher(cache_dir=target_cache_dir, offline_dir=target_offline_dir)
+    st_fetcher = StelladbFetcher(cache_dir=target_cache_dir, offline_dir=target_offline_dir, proxy=proxy)
+    gd_fetcher = GoogleDocFetcher(cache_dir=target_cache_dir, offline_dir=target_offline_dir, proxy=proxy)
 
     results: Dict[str, Dict[str, Any]] = {}
     success_count = 0
@@ -257,6 +261,16 @@ def main() -> int:
         help="全量同步六大元素 infodoc、索引页 index 及 Google Docs 预设码",
     )
     parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        help=(
+            "HTTP 代理地址，如 http://127.0.0.1:7890（默认使用该地址）。"
+            "传入空字符串 \"\" 表示强制直连；"
+            "不传则自动读取环境变量 HTTPS_PROXY/HTTP_PROXY，否则使用默认代理。"
+        ),
+    )
+    parser.add_argument(
         "--offline-dir",
         type=str,
         default=None,
@@ -281,6 +295,7 @@ def main() -> int:
         sync_all=args.sync_all,
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         offline_dir=Path(args.offline_dir) if args.offline_dir else None,
+        proxy=args.proxy,
     )
     _print_report(report)
     return 0 if report["failed"] == 0 else 1

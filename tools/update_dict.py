@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_dict import (  # noqa: E402
@@ -41,6 +42,27 @@ from build_dict import (  # noqa: E402
 )
 
 REPO_URL = "https://github.com/AutumnVN/StellaSoraData.git"
+
+# 默认代理地址
+_DEFAULT_PROXY = "http://127.0.0.1:7890"
+
+
+def _resolve_proxy(proxy: Optional[str]) -> Optional[str]:
+    """解析最终代理地址。
+
+    优先级（高→低）：
+      1. 显式传入的 proxy 参数
+      2. 环境变量 HTTPS_PROXY / HTTP_PROXY
+      3. 默认值 http://127.0.0.1:7890
+
+    传入空字符串 "" 表示强制直连（跳过代理）。
+    """
+    if proxy is not None:
+        return proxy.strip() or None
+    env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if env_proxy:
+        return env_proxy.strip()
+    return _DEFAULT_PROXY
 
 
 def load_current(dict_path: Path) -> Dict[str, Dict[str, str]]:
@@ -66,24 +88,48 @@ def fetch_from_root(data_root: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     return en_data, cn_data
 
 
-def fetch_remote(tmp_root: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """git sparse clone 仓库的语言目录到临时目录，再按本地源加载。"""
+def fetch_remote(tmp_root: Path, proxy: Optional[str] = None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """git sparse clone 仓库的语言目录到临时目录，再按本地源加载。
+
+    Args:
+        tmp_root: 临时目录根路径。
+        proxy: HTTP 代理地址，如 "http://127.0.0.1:7890"。
+               传入空字符串 "" 表示强制直连；
+               传入 None 则自动读取环境变量 HTTPS_PROXY/HTTP_PROXY，否则使用默认代理 127.0.0.1:7890。
+    """
     git = shutil.which("git")
     if not git:
         print("[error] remote 模式需要安装 Git 并加入 PATH；"
               "或改用 local 模式配合本地仓库", file=sys.stderr)
         sys.exit(1)
+
+    # 解析代理地址，注入为 git 环境变量
+    resolved_proxy = _resolve_proxy(proxy)
+    git_env = os.environ.copy()
+    if resolved_proxy:
+        print(f"[info] 使用代理: {resolved_proxy}")
+        # git 通过 https.proxy / http.proxy 环境变量识别代理
+        git_env["HTTPS_PROXY"] = resolved_proxy
+        git_env["HTTP_PROXY"] = resolved_proxy
+    else:
+        print("[info] 直连模式（不使用代理）")
+        # 清除可能残留的系统代理环境变量
+        git_env.pop("HTTPS_PROXY", None)
+        git_env.pop("HTTP_PROXY", None)
+
     repo_dir = tmp_root / "StellaSoraData"
     print(f"[info] sparse clone {REPO_URL}")
     subprocess.run(
         [git, "clone", "--depth", "1", "--filter=blob:none", "--sparse",
          REPO_URL, str(repo_dir)],
         check=True,
+        env=git_env,
     )
     subprocess.run(
         [git, "sparse-checkout", "set", "EN/language", "CN/language"],
         cwd=repo_dir,
         check=True,
+        env=git_env,
     )
     return fetch_from_root(repo_dir)
 
@@ -112,6 +158,17 @@ def main() -> int:
     parser.add_argument("--output",
                         default=str(Path(__file__).resolve().parents[1] / "data"),
                         help="字典输出目录（含 dict.json / names.json）")
+    parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        help=(
+            "HTTP 代理地址，如 http://127.0.0.1:7890（默认使用该地址）。"
+            "传入空字符串 \"\" 表示强制直连；"
+            "不传则自动读取环境变量 HTTPS_PROXY/HTTP_PROXY，否则使用默认代理。"
+            "仅 remote 模式（git clone）时生效。"
+        ),
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output)
@@ -132,7 +189,7 @@ def main() -> int:
     else:
         tmp_root = Path(tempfile.mkdtemp(prefix="stellasora_dict_"))
         try:
-            en_data, cn_data = fetch_remote(tmp_root)
+            en_data, cn_data = fetch_remote(tmp_root, proxy=args.proxy)
         finally:
             # 数据已载入内存，临时目录可立即清理
             shutil.rmtree(tmp_root, ignore_errors=True)

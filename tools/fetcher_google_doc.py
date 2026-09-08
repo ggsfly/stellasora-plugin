@@ -1,4 +1,5 @@
 ﻿import json
+import os
 import tempfile
 import time
 import urllib.error
@@ -8,6 +9,9 @@ from typing import Optional
 from cache import CacheManager
 
 _OFFLINE_DIR = Path(__file__).resolve().parent.parent / "data" / "offline"
+
+# 默认代理地址；可通过环境变量 HTTPS_PROXY / HTTP_PROXY 或构造函数 proxy 参数覆盖
+_DEFAULT_PROXY = "http://127.0.0.1:7890"
 
 
 def _atomic_write(file_path: Path, content: str) -> None:
@@ -46,10 +50,54 @@ def _read_offline_file(file_path: Path) -> Optional[str]:
         return None
 
 
+def _resolve_proxy(proxy: Optional[str]) -> Optional[str]:
+    """解析最终代理地址。
+
+    优先级（高→低）：
+      1. 显式传入的 proxy 参数
+      2. 环境变量 HTTPS_PROXY / HTTP_PROXY
+      3. 默认值 http://127.0.0.1:7890
+
+    传入空字符串 "" 表示强制直连（跳过代理）。
+    """
+    if proxy is not None:
+        return proxy.strip() or None
+    env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if env_proxy:
+        return env_proxy.strip()
+    return _DEFAULT_PROXY
+
+
+def _build_opener(proxy_url: Optional[str]) -> urllib.request.OpenerDirector:
+    """根据代理地址创建 urllib opener。代理为 None 时透明直连。"""
+    if proxy_url:
+        proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    else:
+        # 显式禁用系统代理，保证直连
+        proxy_handler = urllib.request.ProxyHandler({})
+    return urllib.request.build_opener(proxy_handler)
+
+
 class GoogleDocFetcher:
-    def __init__(self, cache_dir: Path, offline_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        cache_dir: Path,
+        offline_dir: Optional[Path] = None,
+        proxy: Optional[str] = None,
+    ):
+        """
+        Args:
+            cache_dir: 网络缓存目录。
+            offline_dir: 离线数据存储目录（可选）。
+            proxy: 代理地址，如 "http://127.0.0.1:7890"。
+                   传入空字符串 "" 表示强制直连；
+                   传入 None 则自动读取环境变量，否则使用默认代理 127.0.0.1:7890。
+        """
         self.cache = CacheManager(cache_dir, ttl_seconds=86400)
         self.url = "https://docs.google.com/document/d/1FtGfPUNSJe8Psx4F3ZIcA5m8eBwoiTu8e504-Uw6ZmQ/export?format=txt"
+        self._proxy_url = _resolve_proxy(proxy)
+        self._opener = _build_opener(self._proxy_url)
+
         if offline_dir is not None:
             self.offline_dir = Path(offline_dir)
         elif (cache_dir / "offline").is_dir():
@@ -81,7 +129,7 @@ class GoogleDocFetcher:
 
         try:
             req = urllib.request.Request(self.url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as response:
+            with self._opener.open(req, timeout=15) as response:
                 if response.getcode() == 200:
                     text = response.read().decode("utf-8")
                     self.cache.set(self.url, text)

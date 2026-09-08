@@ -33,7 +33,6 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.request
 from io import BytesIO
 from pathlib import Path
 
@@ -327,35 +326,45 @@ class _FakeHTTPResponse:
         pass
 
 
+class _FakeOpener:
+    """模拟 fetcher._opener（_build_opener 产物），在 fetcher 级网络边界拦截请求。
+
+    fetcher 使用实例级 opener（支持按实例配置代理），测试同样在实例上注入
+    _FakeOpener，而非全局 patch urllib.request.urlopen（那会波及进程内其它代码）。
+    """
+
+    def __init__(self, handler):
+        self._handler = handler
+        self.calls: list = []
+
+    def open(self, req, timeout=10):
+        self.calls.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return self._handler(req, timeout=timeout)
+
+
 def run_fetcher_index() -> None:
     print("--- E 索引页抓取 ---")
     with tempfile.TemporaryDirectory() as tmpdir:
         fetcher = StelladbFetcher(Path(tmpdir))
-        calls: list = []
         html = "<html><body><div>Team Rotation: Aqua Team</div></body></html>".encode("utf-8")
 
-        def fake_urlopen(req, timeout=10):
-            calls.append(req.full_url if hasattr(req, "full_url") else str(req))
-            return _FakeHTTPResponse(html)
+        fake_opener = _FakeOpener(lambda req, timeout=10: _FakeHTTPResponse(html))
+        fetcher._opener = fake_opener
 
-        original = urllib.request.urlopen
-        try:
-            urllib.request.urlopen = fake_urlopen
-            res1 = fetcher.fetch_infodoc_index()
-            check("E1 首抓返回非空且 URL 正确",
-                  bool(res1) and "Team Rotation: Aqua Team" in res1
-                  and calls == ["https://stelladb.pages.dev/infodoc"], str(calls))
-            res2 = fetcher.fetch_infodoc_index()
-            check("E2 二次命中缓存（仅 1 次请求）", res2 == res1 and len(calls) == 1)
+        res1 = fetcher.fetch_infodoc_index()
+        check("E1 首抓返回非空且 URL 正确",
+              bool(res1) and "Team Rotation: Aqua Team" in res1
+              and fake_opener.calls == ["https://stelladb.pages.dev/infodoc"], str(fake_opener.calls))
+        res2 = fetcher.fetch_infodoc_index()
+        check("E2 二次命中缓存（仅 1 次请求）", res2 == res1 and len(fake_opener.calls) == 1)
 
-            def error_urlopen(req, timeout=10):
-                raise urllib.error.URLError("Network unreachable")
+        def error_open(req, timeout=10):
+            raise urllib.error.URLError("Network unreachable")
 
-            urllib.request.urlopen = error_urlopen
-            with tempfile.TemporaryDirectory() as err_tmp:
-                check("E3 网络异常降级空串不崩溃", StelladbFetcher(Path(err_tmp)).fetch_infodoc_index() == "")
-        finally:
-            urllib.request.urlopen = original
+        with tempfile.TemporaryDirectory() as err_tmp:
+            err_fetcher = StelladbFetcher(Path(err_tmp))
+            err_fetcher._opener = _FakeOpener(error_open)
+            check("E3 网络异常降级空串不崩溃", err_fetcher.fetch_infodoc_index() == "")
 
 
 # ===== 节 F：how 表驱动查询（query_how_rows 按区块抓取 + 预设码 + Rotation 字段） =====
@@ -1428,38 +1437,37 @@ async def run_manual_update() -> None:
 
         network_calls: list = []
 
-        def mock_urlopen(req, timeout=10):
+        def mock_open(req, timeout=10):
             url = req.full_url if hasattr(req, "full_url") else str(req)
             network_calls.append(url)
             return _FakeHTTPResponse(b"Online Fresh Content")
 
-        orig_urlopen = urllib.request.urlopen
-        try:
-            urllib.request.urlopen = mock_urlopen
+        # 在 fetcher 级网络边界注入 Mock（实例级 opener，支持代理配置），
+        # 不全局 patch urllib.request.urlopen
+        st_fetcher._opener = _FakeOpener(mock_open)
+        gd_fetcher._opener = _FakeOpener(mock_open)
 
-            # 5.1 force_update=False 时直接读取 offline 本地文件，不发生网络请求
-            res_idx = st_fetcher.fetch_infodoc_index(force_update=False)
-            res_elem = st_fetcher.fetch_infodoc("ignis", force_update=False)
-            res_pre = gd_fetcher.fetch_presets(force_update=False)
+        # 5.1 force_update=False 时直接读取 offline 本地文件，不发生网络请求
+        res_idx = st_fetcher.fetch_infodoc_index(force_update=False)
+        res_elem = st_fetcher.fetch_infodoc("ignis", force_update=False)
+        res_pre = gd_fetcher.fetch_presets(force_update=False)
 
-            check("K16 force_update=False 优先读取离线文件",
-                  res_idx == "Offline Infodoc Index Content"
-                  and res_elem == "Offline Ignis Detailed Content"
-                  and "Offline Presets TSV Content" in res_pre)
-            check("K17 离线命中时不产生网络调用", len(network_calls) == 0, str(network_calls))
+        check("K16 force_update=False 优先读取离线文件",
+              res_idx == "Offline Infodoc Index Content"
+              and res_elem == "Offline Ignis Detailed Content"
+              and "Offline Presets TSV Content" in res_pre)
+        check("K17 离线命中时不产生网络调用", len(network_calls) == 0, str(network_calls))
 
-            # 5.2 force_update=True 时绕过离线文件发起网络请求
-            res_idx_force = st_fetcher.fetch_infodoc_index(force_update=True)
-            res_elem_force = st_fetcher.fetch_infodoc("ignis", force_update=True)
-            res_pre_force = gd_fetcher.fetch_presets(force_update=True)
+        # 5.2 force_update=True 时绕过离线文件发起网络请求
+        res_idx_force = st_fetcher.fetch_infodoc_index(force_update=True)
+        res_elem_force = st_fetcher.fetch_infodoc("ignis", force_update=True)
+        res_pre_force = gd_fetcher.fetch_presets(force_update=True)
 
-            check("K18 force_update=True 强制抓取在线新数据",
-                  res_idx_force == "Online Fresh Content"
-                  and res_elem_force == "Online Fresh Content"
-                  and "Online Fresh Content" in res_pre_force)
-            check("K19 force_update=True 发起 3 次网络请求", len(network_calls) == 3, str(network_calls))
-        finally:
-            urllib.request.urlopen = orig_urlopen
+        check("K18 force_update=True 强制抓取在线新数据",
+              res_idx_force == "Online Fresh Content"
+              and res_elem_force == "Online Fresh Content"
+              and "Online Fresh Content" in res_pre_force)
+        check("K19 force_update=True 发起 3 次网络请求", len(network_calls) == 3, str(network_calls))
 
 
 # ===== 节 L：定时自动同步与生命周期注销 =====
