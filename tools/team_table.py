@@ -98,12 +98,14 @@ def iter_infodoc_blocks(infodoc_text: str, en_names: List[str]) -> List[Dict[str
             curr_name, curr_members = (parts[0] if parts else None), []
             continue
         if curr_name and "★" in line:
-            first_cell = line.split("|")[0].strip()
-            for en in sorted_en:
-                if re.match(r"^" + re.escape(en) + r"(\s|\(|$)", first_cell):
-                    if en not in curr_members:
-                        curr_members.append(en)
-                    break
+            cells = [c.strip() for c in line.split("|") if c.strip()]
+            if cells:
+                first_cell = cells[0]
+                for en in sorted_en:
+                    if re.match(r"^" + re.escape(en) + r"(\s|\(|$)", first_cell):
+                        if en not in curr_members:
+                            curr_members.append(en)
+                        break
 
     if curr_name and curr_name.upper() != "BACK TO TOP":
         blocks.append({"name": curr_name, "members_ordered": curr_members})

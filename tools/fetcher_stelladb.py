@@ -45,7 +45,7 @@ def _read_offline_file(file_path: Path) -> Optional[str]:
         if file_path.suffix == ".json":
             data = json.loads(text)
             if isinstance(data, dict):
-                content = data.get("data")
+                content = data.get("data") or data.get("content")
                 return content if isinstance(content, str) and content else None
             elif isinstance(data, str) and data:
                 return data
