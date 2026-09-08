@@ -324,11 +324,17 @@ _NAV_CELLS = {"<< Prev", "Next >>"}
 
 
 def _split_cells(line: str) -> list:
-    return [c.strip() for c in line.split(" | ") if c.strip()]
+    if line.startswith("| "):
+        line = " " + line
+    elif line.startswith("|"):
+        line = line.lstrip("|").lstrip()
+    return [c.strip() for c in line.split(" | ") if c.strip() and c.strip() != "|"]
 
 
 def _split_cells_keep_empty(line: str) -> list[str]:
     """按 ' | ' 切分，对每个 segment 执行 strip，保留中间与首部空字符串（emblem 分支专用）。"""
+    if line.startswith("| "):
+        line = " " + line
     return [c.strip() for c in line.split(" | ")]
 
 
@@ -658,7 +664,7 @@ def extract_block_by_name(
     anchors: list[Tuple[int, str]] = []
     for li, line in enumerate(lines):
         if "⏏" in line or "Back to Top" in line:
-            cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
+            cleaned = _TOP_ANCHOR_RE.sub("", line).strip(" |").strip()
             cells = _split_cells(cleaned)
             if not cells:
                 continue

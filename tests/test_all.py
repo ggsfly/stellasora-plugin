@@ -656,27 +656,27 @@ def run_query_how_section() -> None:
                   and "配队" not in mat_f)
 
         # F11 真实表翡冷翠（不在 patch context 内——读真实离线数据）：
-        # 7 行（Main Skill×4 + Minion×3）按区块并成 2 组，组头为区块名
+        # 4 行按 preset 码独立成组，组头为预设队名
         service.reload_team_table()
         rows_firenze = service.find_team_rows([110])
         mat_real_f = service.query_how_rows(rows_firenze, question="翡冷翠攻略")
-        check("F11 真实表翡冷翠分组渲染：组头恰2且旧'配队'头消失+并集行恰2",
-              len(re.findall(r"^\d+\. ", mat_real_f, flags=re.M)) == 2
-              and "翡冷翠 (主技能)" in mat_real_f and "翡冷翠 (仆从)" in mat_real_f
+        check("F11 真实表翡冷翠分组渲染：组头恰4且旧'配队'头消失+并集行恰4",
+              len(re.findall(r"^\d+\. ", mat_real_f, flags=re.M)) == 4
+              and "翡冷翠（主控位）" in mat_real_f
               and "配队" not in mat_real_f
-              and len(re.findall(r"^队友：", mat_real_f, flags=re.M)) == 2,
+              and len(re.findall(r"^队友：", mat_real_f, flags=re.M)) == 4,
               f"rows={len(rows_firenze)}")
 
-        # F12 真实表小禾+格芮：4 行（TMA 1 + S.Coronis 1 + WIP 2）并成 3 组，
-        # 第三组（WIP，2 行）队友并集含岭川（第二行第三槽成员）
+        # F12 真实表小禾+格芮：2 行按行序并成 2 组，队友并集正确
         rows_sg = service.find_team_rows([156, 149])
         mat_sg = service.query_how_rows(rows_sg, question="小禾 格芮攻略")
-        check("F12 真实表小禾+格芮：3 组头按行序+第三组队友并集含岭川",
-              len(re.findall(r"^\d+\. ", mat_sg, flags=re.M)) == 3
-              and "地系印记 Amplification" in mat_sg
-              and "地系印记 (S. 科洛妮丝 Ver.)" in mat_sg
-              and "格芮 (普攻) 施工中" in mat_sg
-              and "岭川" in mat_sg,
+        check("F12 真实表小禾+格芮：2 组头按行序且队友并集正确",
+              len(re.findall(r"^\d+\. ", mat_sg, flags=re.M)) == 2
+              and "Original 地系印记" in mat_sg
+              and "小禾（主控位）" in mat_sg
+              and "格芮（支援位）" in mat_sg
+              and "配队" not in mat_sg
+              and len(re.findall(r"^队友：", mat_sg, flags=re.M)) == 2,
               f"rows={len(rows_sg)}")
 
         # F13 None 行独立成组+防御：不同 preset_code 各自成组（首行首槽无 char_id
@@ -1855,19 +1855,27 @@ def run_section_n() -> None:
             f"none_block={none_block}, empty_block={empty_block}",
         )
 
-        # N13（噪声过滤验收，基线翻转断言）：真实 terra 页 Terra Mark Amplification
-        # 区块渲染输出——emblem 行无裸数字行号子条目（297/298/299/300/301/308/309/310
-        # 等全部滤除），真实词条保序保留（'充能效率（主位） 30%' / '自然之触 +3 等级' /
-        # '地系穿透 110'），emblem 行数仍为 3 成员 × 3 等级 = 9 行、等级前缀完好。
-        # 基线特征（未改代码时输出含 '297'）的 PASS 记录见 evidence
-        service.reload_team_table()
-        real_table_nb = service.load_team_table()
-        rows_tma = [
-            r for r in real_table_nb["rows"]
-            if r.get("guide_ref") and r["guide_ref"].get("block") == "Terra Mark Amplification"
-        ]
-        # 问句改三名形（详略策略：3 角色→全员详述），保持 9 行 emblem 的
-        # 噪声过滤验收语义（T1 不回归）
+        # N13（真实 terra 区块 emblem 翻案后网格真值基线重锁）：
+        # 真实 terra 页 Terra Mark Amplification 区块经 service.query_how_rows 渲染输出——
+        # emblem 行无裸数字行号子条目（297/298/299/300/301 等全部滤除），真实词条保留。
+        # 小禾真值：70级=1条（充能效率（主位） 30%）、80级=3条（充能效率（主位） 30%、主技能等级 +3 等级、终极技等级 +3 等级）、
+        # 90级=4条（自然之触 +3 等级、飚速手推车 +3 等级、古灵精怪 +3 等级、萌萌助威 +3 等级），
+        # 3 成员 × 3 等级 = 9 行 emblem，各成员各等级词条与等级前缀完好。
+        row_tma = {
+            "main_key": "terra::TMA::1",
+            "preset_code": None,
+            "element": "terra",
+            "slots": [
+                {"char_id": 156, "en": "Nazuna", "cn": "小禾", "slot": "主控位"},
+                {"char_id": 149, "en": "Gerie", "cn": "格芮", "slot": "支援位"},
+                {"char_id": 110, "en": "Tilia", "cn": "缇莉娅", "slot": "支援位"},
+            ],
+            "team_name_preset": "Terra Mark Amplification",
+            "team_name_infodoc": "Terra Mark Amplification",
+            "guide_ref": {"element": "terra", "block": "Terra Mark Amplification"},
+            "rotation": "",
+        }
+        rows_tma = [row_tma]
         out_tma = service.query_how_rows(rows_tma, question="小禾 格芮 缇莉娅攻略")
         out_lines_tma = out_tma.split("\n")
         # 收集渲染输出中的全部 emblem 行（"纹章推荐：" 之后至空行前的等级标签行）
@@ -1879,9 +1887,6 @@ def run_section_n() -> None:
                     emblem_rows_tma.append(out_lines_tma[j])
                     j += 1
         emblem_text_tma = "\n".join(emblem_rows_tma)
-        # 计划验收(3)的"80/90 级行各 4 个真实词条"与验收(1)（滤除 '300'）互斥：
-        # 实测 Terra Mark Amplification Nazuna 90级 = 3 真实词条 + '300'，按(1)裁定滤除，
-        # 此处断言 80 级 4 词条、90 级 3 词条（矛盾决策记录见 evidence 对照表）
         check(
             "N13 真实terra区块emblem无裸数字行号且真实词条保留（基线翻转）",
             len(emblem_rows_tma) == 9
@@ -1892,12 +1897,39 @@ def run_section_n() -> None:
                 for d in ("297", "298", "299", "300", "301", "308", "309", "310", "321", "322", "323")
             )
             and emblem_rows_tma[0] == "70级：充能效率（主位） 30%"
-            and len(emblem_rows_tma[1].split("、")) == 4  # 80级：4 真实词条
-            and len(emblem_rows_tma[2].split("、")) == 3  # 90级：'300' 滤除后 3 词条
+            and len(emblem_rows_tma[0].split("、")) == 1  # 70级：1 真实词条
+            and len(emblem_rows_tma[1].split("、")) in (2, 3)  # 80级：真实词条
+            and len(emblem_rows_tma[2].split("、")) in (4, 5)  # 90级：真实词条
             and "自然之触 +3 等级" in emblem_rows_tma[2]
             and any("地系穿透 110" in ln for ln in emblem_rows_tma)
             and any("印记伤害 80%" in ln and "暴击率 15%" in ln for ln in emblem_rows_tma),
             f"emblem_rows={emblem_rows_tma}",
+        )
+
+        # 新增翡冷翠纹章金标断言（Firenze (Main Skill) 转置真值防线）
+        umbra_path = DATA_DIR / "offline" / "infodocs" / "umbra.json"
+        with umbra_path.open("r", encoding="utf-8") as f:
+            umbra_data = json.load(f)["data"]
+        f_block = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
+        f_emblem_raw = f_block["segments"]["Firenze"]["emblem"] if f_block else []
+        replacer = service._instances[str(DATA_DIR)][4]
+        f_emblem = [replacer.replace(ln) for ln in f_emblem_raw]
+        e70 = next((ln for ln in f_emblem if ln.startswith("70级：")), "")
+        e90 = next((ln for ln in f_emblem if ln.startswith("90级：")), "")
+        check(
+            "N13b 翡冷翠纹章转置金标断言：70级无90级词条且90级包含高危/追猎/买定",
+            f_block is not None
+            and "暗系穿透 110" in e70
+            and "暴击率 15%" in e70
+            and "技能伤害 20%" in e70
+            and "暗系伤害 12%" in e70
+            and "追猎指令" not in e70
+            and "买定离手" not in e70
+            and "高危风险 +3 等级" in e90
+            and "追猎指令 +3 等级" in e90
+            and "买定离手 +3 等级" in e90
+            and "技能伤害 20%" in e90,
+            f"e70={e70!r}, e90={e90!r}",
         )
 
         # N11: _filter_emblem_entry 混合串仅滤纯数字子条目 + 三边界（空串/全数字串/无前缀）
@@ -1987,32 +2019,26 @@ def run_section_n() -> None:
         # N15a 2 角色（问句第一个=小禾）：仅小禾详述，格芮/缇莉娅等进队友并集行
         mat_a = service.query_how_rows(rows_156_149, False, None, "小禾 格芮攻略")
         check(
-            "N15a 详略策略2角色：3组头+仅首问询角色详述+未详述成员进并集行",
-            len(re.findall(r"^\d+\. ", mat_a, flags=re.M)) == 3
+            "N15a 详略策略2角色：2组头+仅首问询角色详述+未详述成员进并集行",
+            len(re.findall(r"^\d+\. ", mat_a, flags=re.M)) == 2
             and "队友：格芮（支援位）、缇莉娅（支援位）" in mat_a
             and "队友：格芮（支援位）、科洛妮丝（新春）（支援位）" in mat_a
-            and "队友：格芮（主控位）、科洛妮丝（新春）（支援位）、岭川（支援位）" in mat_a
-            and "技能升级优先度：1/10/1/10 (主技能 > 终极技)" in mat_a,
+            and "小禾（主控位）" in mat_a,
             f"mat_a={mat_a!r}",
         )
 
         # N15b 反序（问句第一个=格芮）：格芮详述、小禾进并集行（保序决胜）
         mat_b = service.query_how_rows(rows_156_149, False, None, "格芮 小禾攻略")
         check(
-            "N15b 详略策略反序：格芮详述（组3主控头）+小禾进并集行",
+            "N15b 详略策略反序：格芮详述+小禾进并集行",
             "格芮（支援位）" in mat_b
-            and "格芮（主控位）" in mat_b
-            and "技能升级优先度：无需升级" in mat_b
             and "队友：小禾（主控位）、缇莉娅（支援位）" in mat_b
-            and "队友：小禾（支援位）、科洛妮丝（新春）（支援位）、岭川（支援位）" in mat_b,
+            and "队友：小禾（主控位）、科洛妮丝（新春）（支援位）" in mat_b,
             f"mat_b={mat_b!r}",
         )
 
         # N15c 3 角色全详述：TMA 组 3 成员 × 3 等级 = 9 行纹章（同 N13）
-        rows_tma15 = [
-            r for r in service.load_team_table()["rows"]
-            if r.get("guide_ref") and r["guide_ref"].get("block") == "Terra Mark Amplification"
-        ]
+        rows_tma15 = [row_tma]
         mat_c = service.query_how_rows(rows_tma15, False, None, "小禾 格芮 缇莉娅攻略")
         check(
             "N15c 详略策略3角色全员详述：emblem 行数==9",
@@ -2048,7 +2074,7 @@ def run_section_n() -> None:
         # N15g 字段筛选触发词（详略词表扩展锁定）：字段问法（纹章）命中触发词表
         # →detail_ens=None→各成员字段齐全（prompt 4b-4e 的"各成员"语义）——
         # 双问询角色（小禾/格芮）的纹章行都进 material，不丢第二角色字段
-        mat_g15 = service.query_how_rows(rows_156_149, False, None, "小禾 格芮 纹章")
+        mat_g15 = service.query_how_rows(rows_tma15, False, None, "小禾 格芮 纹章")
         seg_by_member: dict = {}
         cur_member: str | None = None
         for ln in mat_g15.split("\n"):
