@@ -62,19 +62,24 @@ if exist "%LOCAL_DATA%\EN\language\en_US" (
         git -C "%LOCAL_DATA%" pull --ff-only
         if errorlevel 1 echo [warn] git pull failed, using local data as-is
         echo.
-        echo [2/3] incremental dictionary update from local clone ...
+        echo [2/4] incremental dictionary update from local clone ...
         "%PY%" tools\update_dict.py --mode local --source "%LOCAL_DATA%"
-        goto runtest
+        goto sync_offline
     )
 )
 
-echo [1/2] local clone not found, fetching from GitHub (remote mode) ...
+echo [1/3] local clone not found, fetching from GitHub (remote mode) ...
 "%PY%" tools\update_dict.py --mode remote %PROXY_ARGS%
+
+:sync_offline
+echo.
+echo syncing offline guides and team presets (data\offline\) ...
+"%PY%" tools\sync_data.py --all %PROXY_ARGS%
 
 :runtest
 echo.
-echo [3/3] running dictionary consistency tests (sections A/B/C/D) ...
-"%PY%" tests\test_all.py A B C D
+echo running dictionary & offline data consistency tests ...
+"%PY%" tests\test_all.py A B C D M N
 
 echo.
 echo Done.
