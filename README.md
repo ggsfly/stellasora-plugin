@@ -16,7 +16,7 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 
 ### 特性
 
-- **永久本地持久化（离线优先）**：内置 `data/offline/` 全量预置离线数据（六大元素详细页、索引与预设码），日常查询优先且直接读取本地文件，完全脱离外部网络实时依赖，毫秒级响应
+- **永久本地持久化（离线优先）**：日常查询优先且直接读取本地文件（`data/offline/` 六大元素详细页、索引与预设码），完全脱离外部网络实时依赖，毫秒级响应；数据文件由更新脚本在本地生成，不随仓库分发
 - **双通道数据更新**：支持每日 17:00 自动后台定时更新，同时支持管理员在聊天端发送 `/st_update` 手动触发更新并即刻刷新直发缓存；同步流程同时产出统一队伍-槽位表 `data/offline/presets/team_table.json`（how 查询的数据底座），更新后自动重载
 - **直接发送模式**（默认开启）：攻略正文由插件内部 LLM 加工成中文成品后**直接发送到聊天**，
   不经过 MaiBot 的 reply 生成器——避免回复者看不到工具数据导致的答非所问；
@@ -25,7 +25,7 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
   只在用户明确要求「全部/所有/完整」时才全量列举
 - **全程无英文输出**：直发 LLM 提示词强制不留英文——资料残余的英文单词/句子（地名、
   专有名词、描述句）一律意译为自然简体中文；预设码与参数占位符（&Param1&、##术语#ID#）除外
-- **官方中文输出**：内置 47,504 条全字段中英对照字典（来自游戏解包数据），技能/潜能/秘纹/素材名
+- **官方中文输出**：47,504+ 条全字段中英对照字典（来自游戏解包数据，由更新脚本本地生成），技能/潜能/秘纹/素材名
   全部替换为官方中文译名，如 泷闪（Torrent Flash）、花海·侵蚀（Flower Formation: Erosion）；
   与攻略站逐字一致的技能/潜能**描述文本**也整段译为官方中文
 - **多步智能路由**：planner 自动查词→路由工具→组织回答；未收录的俗称自动拆词重试
@@ -54,12 +54,30 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 重启 MaiBot 后插件自动加载。
 
+### 数据初始化（必须）
+
+数据文件（离线攻略 `data/offline/`、字典 `data/dict.json` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成：
+
+```bash
+# 1. 同步离线攻略与预设码（默认走代理 127.0.0.1:7890）
+python tools/sync_data.py --all
+
+# 2. 更新字典（remote 模式，同样默认走代理；需本机安装 Git）
+python tools/update_dict.py --mode remote
+
+# 无法使用代理时加 --proxy "" 强制直连
+# python tools/sync_data.py --all --proxy ""
+# python tools/update_dict.py --mode remote --proxy ""
+```
+
+初始化完成后重启 MaiBot，插件即可离线运行。
+
 ### 数据源与离线持久化说明
 
-- **离线持久化机制**：插件内置全量攻略与预设码持久化数据（位于 `data/offline/` 目录），日常查询 100% 优先读取本地持久化文件，彻底摆脱网络波动与站点不可用影响；
+- **离线持久化机制**：日常查询 100% 优先读取本地持久化文件（位于 `data/offline/` 目录），彻底摆脱网络波动与站点不可用影响。**该目录与字典数据不随仓库分发**，安装/拉取后需运行一次更新脚本生成（见下方「数据更新」），首次运行前请完成数据初始化；
 - 攻略数据源：[stelladb](https://stelladb.pages.dev/)（社区维护的英文攻略站）；
 - 预设码数据源：社区维护的公开 Google Docs 文档；
-- 字典数据：[StellaSoraData](https://github.com/AutumnVN/StellaSoraData)（游戏解包中英文数据，内置 47,504 条官方译名映射，随插件打包，查词完全离线）。
+- 字典数据：[StellaSoraData](https://github.com/AutumnVN/StellaSoraData)（游戏解包中英文数据，47,504+ 条官方译名映射，由更新脚本本地生成，查词完全离线）。
 
 ## 配置
 
@@ -182,6 +200,11 @@ python tools/sync_data.py --all
 
 # 仅同步指定元素（如火队 ignis / 水队 aqua / 地队 terra 等）
 python tools/sync_data.py --element ignis
+
+# 代理控制：默认使用 http://127.0.0.1:7890；
+# 优先级：--proxy 参数 > 环境变量 HTTPS_PROXY/HTTP_PROXY > 默认代理
+python tools/sync_data.py --all --proxy http://127.0.0.1:7890  # 指定代理
+python tools/sync_data.py --all --proxy ""                     # 强制直连
 ```
 
 ## 预设码与统一队伍-槽位表
@@ -209,13 +232,15 @@ python tools/sync_data.py --element ignis
 
 > ⚠️ **流量提醒**：字典更新需要从 GitHub 拉取 [StellaSoraData](https://github.com/AutumnVN/StellaSoraData) 仓库数据。
 > 该仓库包含完整的游戏解包数据（含 `_Lua` 脚本等大目录，完整克隆可达数百 MB）：
-> - **本地仓库模式**（`update_dict.bat` / `--mode local`）：要求本机已有 StellaSoraData 克隆，每次更新只拉取**增量**变更（通常仅几 MB）；但若你还没有本地克隆，首次 `git clone` 会拉取**完整仓库**，请留意流量。
-> - **remote 模式**（`--mode remote`）：不会克隆完整仓库，仅下载 `EN/language` 与 `CN/language` 两个语言目录（约 10 MB），但需要可直连 GitHub 的网络。
+> - **本地仓库模式**（`update_dictionary.bat` / `--mode local`）：要求本机已有 StellaSoraData 克隆，每次更新只拉取**增量**变更（通常仅几 MB）；但若你还没有本地克隆，首次 `git clone` 会拉取**完整仓库**，请留意流量。
+> - **remote 模式**（`--mode remote`）：不会克隆完整仓库，仅下载 `EN/language` 与 `CN/language` 两个语言目录（约 10 MB）。
 
-游戏版本更新后（新角色/新技能），更新内置字典：
+游戏版本更新后（新角色/新技能），更新字典：
 
-- **一键更新**：双击插件目录下的 `update_dict.bat`
-  （自动 `git pull` 本地 StellaSoraData 仓库 → 增量更新 → 一致性校验）
+- **一键更新**：双击插件目录下的 `update_dictionary.bat`
+  （自动检测本地 StellaSoraData 克隆：有则 `git pull` 增量更新 + 本地模式；无则 remote 模式直拉 GitHub，
+  最后运行字典一致性测试 `test_all.py` A-D 节。
+  代理控制：默认走 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；也可通过 `HTTPS_PROXY` 环境变量指定其他代理）
 - **手动更新**：
 
 ```bash

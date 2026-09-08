@@ -1,0 +1,67 @@
+@echo off
+rem ============================================================
+rem  Stella Sora dictionary updater (CN-EN)
+rem  - If a local StellaSoraData git clone exists: git pull + local mode
+rem  - Otherwise: sparse-clone language dirs from GitHub (remote mode)
+rem  Requires: python on PATH; git on PATH (remote mode only)
+rem
+rem  Usage: update_dictionary.bat [path\to\StellaSoraData]
+rem         update_dictionary.bat --direct     (force direct connection)
+rem
+rem  Proxy: uses http://127.0.0.1:7890 by default; override with the
+rem  HTTPS_PROXY environment variable, or pass --direct to bypass proxy.
+rem ============================================================
+
+chcp 65001 >nul
+setlocal enabledelayedexpansion
+cd /d %~dp0
+
+echo ==============================================
+echo  Stella Sora CN-EN dictionary update
+echo ==============================================
+echo.
+
+rem ---- resolve proxy argument --------------------------------
+rem PROXY_ARGS is empty by default: update_dict.py auto-detects
+rem HTTPS_PROXY env var, else falls back to 127.0.0.1:7890.
+set "PROXY_ARGS="
+if "%~1"=="--direct" (
+    set "PROXY_ARGS=--proxy="
+    echo [info] direct connection mode (proxy disabled)
+    echo.
+    shift
+)
+
+rem ---- locate local StellaSoraData clone ---------------------
+rem first positional arg after optional --direct
+set "LOCAL_DATA=%~1"
+if not defined LOCAL_DATA set LOCAL_DATA=..\StellaSoraData
+
+if exist "%LOCAL_DATA%\EN\language\en_US" (
+    if exist "%LOCAL_DATA%\.git" (
+        echo [1/3] git pull latest game data ...
+        rem local pull honors system proxy env vars; add HTTPS_PROXY hint if unset
+        if not defined HTTPS_PROXY if not defined HTTP_PROXY (
+            set "HTTPS_PROXY=http://127.0.0.1:7890"
+            set "HTTP_PROXY=http://127.0.0.1:7890"
+        )
+        git -C "%LOCAL_DATA%" pull --ff-only
+        if errorlevel 1 echo [warn] git pull failed, using local data as-is
+        echo.
+        echo [2/3] incremental dictionary update from local clone ...
+        python tools\update_dict.py --mode local --source "%LOCAL_DATA%"
+        goto runtest
+    )
+)
+
+echo [1/2] local clone not found, fetching from GitHub (remote mode) ...
+python tools\update_dict.py --mode remote %PROXY_ARGS%
+
+:runtest
+echo.
+echo [3/3] running dictionary consistency tests (sections A/B/C/D) ...
+python tests\test_all.py A B C D
+
+echo.
+echo Done.
+pause
