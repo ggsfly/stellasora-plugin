@@ -2,16 +2,6 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
-
-### 变更
-
-- **数据文件移出远程仓库**：`data/dict.json`、`data/names.json`、`data/offline/` 全目录与更新/对齐报告不再纳入 git 追踪（已加入 `.gitignore`），远程仓库不再维护更新类数据文件，由用户安装后运行更新脚本在本地生成；仅 `data/overrides.json`（人工修正层）继续随仓库分发
-- **更新脚本代理入口**：`sync_data.py` 与 `update_dict.py` 新增 `--proxy` 参数，优先级为 `--proxy` > 环境变量 `HTTPS_PROXY`/`HTTP_PROXY` > 默认 `http://127.0.0.1:7890`；传空字符串 `""` 强制直连
-- **一键更新脚本更名重写**：`update_dict.bat` 更名为 `update_dictionary.bat`——自动检测本地 StellaSoraData 克隆（有则 `git pull` 增量 + local 模式，无则 remote 模式直拉），追加 `--direct` 参数强制直连，末尾一致性测试修正为 `test_all.py` A-D 节（旧脚本引用的 `test_dict.py` 已不存在）
-- **一键脚本改用宿主 .venv 解释器**：`update_dictionary.bat` 自动定位 MaiBot 根目录 `.venv\Scripts\python.exe`（插件目录上两级）并在其中执行字典更新与测试，不再依赖 PATH 上的系统 python（无 `maibot_sdk`）；`.gitattributes` 强制 `*.bat` 以 CRLF 落盘（LF 行尾会被 cmd 解析错乱）
-- **字典支持首次构建**：`update_dict.py` 在 `dict.json` 不存在时不再报错退出，直接从零生成全量字典与名字索引（首装/数据文件未随仓库分发场景）
-
 ## [1.1.0] - 2026-09-07
 
 ### 主要功能
