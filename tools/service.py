@@ -22,20 +22,20 @@ import threading
 from cache import CacheManager
 from dict_lookup import DictLookup
 from fetcher_google_doc import GoogleDocFetcher
-from fetcher_stelladb import StelladbFetcher
+from fetcher_stelladb import StelladbFetcher, _read_offline_file
 import term_replace as _term_replace_module
 from text_clean import detect_element, strip_game_markup
 
 logger = logging.getLogger("stellasora.service")
 
 ELEMENT_SECTIONS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
-ELEMENT_CN = {
-    "Aqua": "水", "Ignis": "火", "Ventus": "风",
-    "Terra": "地", "Lux": "光", "Umbra": "暗",
-}
 
 # 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+# 离线 infodocs 目录常量：how 新链路（query_how_rows）按行读取
+# data/offline/infodocs/{element}.json 的唯一数据定位（不依赖缓存目录）
+_INFODOCS_DIR = Path(__file__).resolve().parents[1] / "data" / "offline" / "infodocs"
 
 # 统一队伍-槽位表缓存（data/offline/presets/team_table.json）
 _team_table_cache: Optional[Dict[str, Any]] = None
@@ -297,44 +297,19 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     return _fit_lines(lines, max_length)
 
 
-# 详细页 HTML 表格的行号列折叠出的纯数字行（如 "19"、"125"），对 LLM 无意义
-_ROW_NUM_LINE_RE = re.compile(r"^\d{1,3}$")
-
 # 区块锚点行内的导航片段：'⏏ Back to Top ⏏'（含前后空格），行内队名保留
 _TOP_ANCHOR_RE = re.compile(r"\s*⏏\s*Back to Top\s*⏏\s*", re.IGNORECASE)
 
 # 索引页行内导航段（队名行中夹带的翻页按钮，不属于任何元素队伍）
 _NAV_CELLS = {"<< Prev", "Next >>"}
 
-# Potentials 标签行：'Priority Potentials ...' / 'Optional Potentials ...' 开头的行。
-def strip_infodoc_noise(text: str) -> str:
-    """清理 infodoc 文本中的表格行号碎片与多余空行（token 精简）。
-
-    注意：Potentials 标签行**不在此处删除**——parse_infodoc_teams 需要它们
-    触发 disc/emblem/pot 模式切换。
-    """
-    if not text:
-        return text
-    kept = [line for line in text.split("\n") if not _ROW_NUM_LINE_RE.match(line.strip())]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
-
 
 def _split_cells(line: str) -> list:
     return [c.strip() for c in line.split(" | ") if c.strip()]
 
 
-def _collect_members(lines_slice: list, name_res: list, seen: set, members: list) -> None:
-    """从若干行中按出现顺序收集未收录的已知角色名（就地追加到 members）。"""
-    for line in lines_slice:
-        for c in _split_cells(line):
-            for name, name_re in name_res:
-                if name not in seen and name_re.match(c):
-                    seen.add(name)
-                    members.append(name)
-
-
-def _parse_team_body(block_lines: list, name_res: list) -> tuple:
-    """解析单支队伍区块体 → (members, roles, segments)。
+def _parse_block_body(block_lines: list, name_res: list) -> tuple:
+    """解析单支队伍区块体 → (members, roles, segments)（单区块版结构化解析引擎）。
 
     状态机（实测结构）：
         Description | Skill Upgrade Priority   ← 角色段头
@@ -497,85 +472,6 @@ def _parse_team_body(block_lines: list, name_res: list) -> tuple:
     return members, roles, segments
 
 
-def extract_team_blocks(infodoc_text: str, character_en: str, all_character_names: list) -> list:
-    """从详细页收集**所有包含问询角色的队伍区块**（结构化段级解析）。
-
-    详细页为单元素纵向布局，每个队伍区块结构（实测）：
-        <队伍名角色> (<build>) | ⏏ Back to Top ⏏   ← 区块锚点行（队名 ≠ 主控！）
-        Description | Skill Upgrade Priority         ← 角色段头
-        <主控角色> (<星级>) | <技能升级优先度>        ← 区块体首个角色详情段 = 主控位
-        <描述文本 / ★ Key Notes>
-        Priority Potentials | Recommended Main Discs ← 秘纹锚（数据入 discs）
-        <秘纹数据>
-        Optional Potentials | Emblem                 ← 纹章锚（数据行转置）
-        Affix Priority | <词条|数值...>               ← 纹章列模板首行
-        <下一角色段头> / <下一队伍锚点行>
-
-    槽位判定规则：**区块体（锚点行之后）内第一个角色详情段 = 主控位，后续角色均为
-    支援位**；锚点行队名角色不参与成员提取（队伍命名可 ≠ 主控，如暗队
-    Otoha (Laser) 的主控是 Cosette）。
-
-    问询角色可能出现在**多个队伍**（如珂赛特既是 Otoha (Laser) 队主控，又是
-    花铃/翡冷翠等队的支援）：她作为锚点行队名 → 该区块收集（asker_role=main）；
-    她作为区块体成员 → 其所属区块也收集（asker_role=support）。
-
-    Returns:
-        区块信息列表 [{name, members, roles, segments, asker_role}...]，
-        按页面出现顺序排列；未命中时返回 []。segments[en] = {"skill": str,
-        "description": [行], "discs": [行], "emblem": [行]}。
-    """
-    if not infodoc_text:
-        return []
-
-    char_re = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
-    en_names = [n for n in all_character_names if isinstance(n, str) and n.isascii() and len(n) >= 2]
-    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
-
-    lines = infodoc_text.split("\n")
-
-    # 1. 收集全部锚点行及其队名（剥离 ⏏ 后的首个非空单元格）
-    anchors: list = []  # (行号, 队名)
-    for li, line in enumerate(lines):
-        if "⏏" in line or "Back to Top" in line:
-            cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
-            cells = _split_cells(cleaned)
-            if not cells:
-                continue  # 页尾 "⏏ BACK TO TOP ⏏" 等纯导航行
-            anchors.append((li, cells[0]))
-    if not anchors:
-        return []
-
-    # 2. 逐区块解析；收集包含问询角色的区块
-    results: list = []
-    for idx, (start, team_name) in enumerate(anchors):
-        end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(lines)
-
-        # 区块体 = 锚点行之后到下一锚点行之前（排除其他锚点行）
-        body_lines = [
-            _TOP_ANCHOR_RE.sub("", lines[li]).rstrip(" |").strip()
-            for li in range(start + 1, end)
-            if not ("⏏" in lines[li] or "Back to Top" in lines[li])
-        ]
-        block_lines = [team_name] + [bl for bl in body_lines if bl]
-
-        members, roles, segments = _parse_team_body(block_lines, name_res)
-
-        # 收集条件：问询角色是队名角色 或 区块体成员
-        asker_hit = char_re.match(team_name) or character_en in members
-        if asker_hit:
-            # asker_role：区块体首个角色详情段 = 主控位；问询角色排首位则主控
-            asker_role = "main" if members and members[0] == character_en else "support"
-            results.append({
-                "name": team_name,
-                "members": list(members),
-                "roles": dict(roles),
-                "segments": dict(segments),
-                "asker_role": asker_role,
-            })
-
-    return results
-
-
 def load_team_table() -> Dict[str, Any]:
     """加载统一队伍-槽位表（data/offline/presets/team_table.json）。
 
@@ -653,7 +549,7 @@ def extract_block_by_name(
 ) -> Optional[dict]:
     """从详细页按锚点队名精确提取单个队伍区块体并结构化解析。
 
-    复用 _TOP_ANCHOR_RE 锚点拆分与 _parse_team_body 解析逻辑。
+    复用 _TOP_ANCHOR_RE 锚点拆分与 _parse_block_body 单区块解析逻辑。
 
     Returns:
         匹配时返回 dict {"name": block_name, "members": members, "roles": roles, "segments": segments}，
@@ -691,7 +587,7 @@ def extract_block_by_name(
             if not ("⏏" in lines[li] or "Back to Top" in lines[li])
         ]
         block_lines = [team_name] + [bl for bl in body_lines if _split_cells(bl)]
-        members, roles, segments = _parse_team_body(block_lines, name_res)
+        members, roles, segments = _parse_block_body(block_lines, name_res)
         return {
             "name": block_name,
             "members": list(members),
@@ -781,372 +677,147 @@ def _split_emblem_columns(cells: list) -> list:
             i += 1
     return columns
 
-def find_teams_by_members(terms: list, cache_dir: Path) -> Optional[dict]:
-    """联合查询：判定 2-3 个角色是否共属同一配队。
 
-    流程（用户约定）：把现有队伍做成"仅成员集合"字典 → 全部角色命中同一队伍
-    才放行；否则返回 None（由调用方回"未找到"）。
-
-    **队伍可以跨元素混编**（如小禾-多娜-苍兰队），因此候选页为全部六元素
-    详情页逐一扫描，不做"首角色元素"捷径。
-
-    Args:
-        terms: 问句中命中的角色名列表（中英文均可，内部 lookup_term 归一为
-            英文名；归一后去重，不足 2 个或超过 3 个视为不命中）
-        cache_dir: 缓存目录（fetcher 参数）
-
-    Returns:
-        命中时 {"team_name": 完整队名, "members": [英文名按序],
-        "element": 队伍元素, "page_text": 剥离噪声后的元素页全文}；
-        任一角色未命中或无共同队伍时 None。
-    """
-    if not terms:
-        return None
-    lookup, _last, st_fetcher, _gd, _replacer = _get_services(cache_dir)
-    en_names: list = []
-    for term in terms:
-        res = lookup.lookup_term(term)
-        if not res or res.get("cat") != "Character":
-            return None  # 非角色词条直接判不命中
-        if res["en"] not in en_names:
-            en_names.append(res["en"])
-    if len(en_names) < 2 or len(en_names) > 3:
-        return None  # 归一后不是 2-3 个角色
-
-    name_res = [(n, re.compile(r"^" + re.escape(n) + r"(\s|\(|$)")) for n in en_names]
-    wanted = set(en_names)
-
-    # 全元素页逐一扫描（抓取缓存 1h TTL，重复查询零成本）
-    for element in ELEMENT_SECTIONS:
-        infodoc_text = st_fetcher.fetch_infodoc(element.lower())
-        if not infodoc_text or "Error" in infodoc_text:
-            continue
-        clean = strip_infodoc_noise(infodoc_text)
-        lines = clean.split("\n")
-
-        # 队伍字典：{队名: 成员英文名列表}，单页扫描一次
-        current_name = ""
-        current_members: list = []
-        teams: dict = {}
-        order: list = []
-        for line in lines:
-            if "⏏" in line or "Back to Top" in line:
-                cleaned = _TOP_ANCHOR_RE.sub("", line).rstrip(" |").strip()
-                cells = _split_cells(cleaned)
-                if cells:
-                    if current_name:
-                        teams[current_name] = current_members
-                    current_name = cells[0]
-                    current_members = []
-                    if current_name not in teams:
-                        order.append(current_name)
-                continue
-            if not current_name:
-                continue
-            for c in _split_cells(line):
-                for n, r in name_res:
-                    if n not in current_members and r.match(c):
-                        current_members.append(n)
-        if current_name:
-            teams[current_name] = current_members
-
-        # 匹配：所有角色都在同一队伍里
-        for name in order:
-            if wanted.issubset(set(teams.get(name, []))):
-                return {
-                    "team_name": name,
-                    "members": teams[name],
-                    "element": element,
-                    "page_text": clean,
-                }
-    return None
-
-
-def query_how(
-    term: str,
-    cache_dir: Path,
+def query_how_rows(
+    rows: list[dict],
     with_presets: bool = False,
     max_length: Optional[int] = None,
     question: str = "",
-    members: Optional[list] = None,
-    element_override: Optional[str] = None,
 ) -> str:
-    """how 桶：配队/纹章/秘纹/技能优先度（--presets 时附加预设码）。
+    """how 桶（表驱动新链路）：按命中行逐行抓取 guide_ref 指向的 infodoc 区块输出。
 
-    资料层采用全量提供策略（B 路线）：所有匹配队伍及角色四类字段（描述、技能、
-    秘纹、纹章）均完整载入资料，输出裁剪与格式控制交由上层 LLM Prompt 完成。
+    资料层采用全量提供策略（B 路线）：每个命中行只读取其 guide_ref 指向的
+    区块（同区块跨行复用），四类字段（描述、技能、秘纹、纹章）完整载入资料，
+    输出裁剪与格式控制交由上层 LLM Prompt 完成——不读整页、不做元素判定、
+    不做全元素扫描，token 消耗随命中队伍规模线性增长。
 
     Args:
-        term: 查询词（角色名/元素名，经 lookup_term 归一）
-        cache_dir: 本地缓存目录路径
-        with_presets: 是否在输出前附加预设码推荐内容
+        rows: find_team_rows 命中的统一队伍-槽位表行列表
+           （含 slots/team_name_*/guide_ref/rotation/preset_code 字段）
+        with_presets: 是否在每行尾附加预设码行（码原文保真）
         max_length: 输出文本最大字符数限制（None 表示不限制）
-        question: 用户原话（上层透传参数，本函数全量提供资料，输出裁剪交由 Prompt 控制）
-        members: 多角色联合查询的角色英文名列表（2-3 个）；非空时仅输出
-            同时包含全部成员的队伍，"本角色"标签覆盖所有问询角色
-        element_override: 多角色联合查询时由 find_teams_by_members 确定的队伍
-            元素页（问询角色可能各自属于多个元素页，队伍所在页以匹配结果为准）
+        question: 用户原话——用于推导"本角色"标签（问句命中角色排成员首位）
 
     Returns:
-        包含攻略文本（与可选预设码）的格式化字符串，未找到时返回提示信息
+        包含攻略文本（与可选预设码行）的格式化字符串；无可用行时返回空串
     """
-    lookup, _last, st_fetcher, gd_fetcher, replacer = _get_services(cache_dir)
-    res = lookup.lookup_term(term)
-    if not res:
-        return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
+    lookup = _get_lookup()  # 确保共享查词服务已初始化
+    # replacer 与 lookup 同源：_get_lookup 初始化时构建的共享实例（元组第 5 位）
+    replacer = _instances[str(_DATA_DIR)][4]
 
-    element: Optional[str] = None
-    character_en = res["en"]
-    is_character = res["cat"] == "Character"
+    # 问句 → "本角色" EN 名集合（find_character_names 含别名预处理，多角色一次提取）
+    asker_ens: set = set()
+    for cn_name in find_character_names(question):
+        res = lookup.lookup_term(cn_name)
+        if res and res.get("cat") == "Character":
+            asker_ens.add(res["en"])
 
-    # 查询侧兜底：非角色条目命中但存在 cn 前缀匹配的唯一 Character 条目时，
-    # 自动改路由到该角色（如 "薇洛" 命中 Item，但 "薇洛（盛夏）" 是 Character）
-    if not is_character:
-        candidates = [
-            c_name for c_name in lookup.get_character_names()
-            if c_name.startswith(res["cn"]) or res["en"] in c_name
-        ]
-        char_hits = []
-        for c_name in candidates:
-            char_res = lookup.lookup_term(c_name)
-            if char_res and char_res.get("cat") == "Character":
-                char_hits.append(char_res)
-        uniq = {r["en"] for r in char_hits}
-        if len(uniq) == 1:
-            res = char_hits[0]
-            term = res["cn"]  # 后续提示用角色本名
-            character_en = res["en"]
-            is_character = True
+    # 同元素页文本与同区块结构化结果在本次调用内复用（省 IO/CPU）
+    page_cache: Dict[str, str] = {}
+    block_cache: Dict[Tuple[str, str], Optional[dict]] = {}
 
-    if element_override:
-        element = element_override
-    elif is_character:
-        num_id = res["id"].split(".")[1]
-        trekker_text = st_fetcher.fetch_trekker(num_id)
-        element = detect_element(trekker_text)
-
-        # trekker 页的 detect_element 是全文关键词搜索，可能被页面里其他元素
-        # 关键词误判（如薇洛（盛夏）trekker 页含 Lux 关联字但实际是 Aqua 队）。
-        # 权威判定：全元素页扫描找角色真实所在队伍页；扫描确认后才采信
-        # trekker 的判定结果，扫描发现不一致时以扫描为准。
-        scanned = None
-        for elem in ELEMENT_SECTIONS:
-            page = st_fetcher.fetch_infodoc(elem.lower())
-            if not page or "Error" in page:
-                continue
-            char_re_probe = re.compile(r"^" + re.escape(character_en) + r"(\s|\(|$)")
-            for probe_line in strip_infodoc_noise(page).split("\n"):
-                probe_cells = _split_cells(probe_line)
-                if any(char_re_probe.match(c) for c in probe_cells):
-                    scanned = elem
-                    break
-            if scanned:
-                break
-        if scanned and element and scanned != element:
-            logger.info(
-                "element 修正: %s trekker=%s → 扫描=%s", character_en, element, scanned
+    def _get_block(element: str, block_name: str) -> Optional[dict]:
+        """按行 guide_ref 精准读取对应元素页并提取该区块（同区块缓存复用）。"""
+        cache_key = (element, block_name)
+        if cache_key not in block_cache:
+            if element not in page_cache:
+                page_cache[element] = _read_offline_file(_INFODOCS_DIR / f"{element}.json") or ""
+            page_text = page_cache[element]
+            block_cache[cache_key] = (
+                extract_block_by_name(page_text, block_name) if page_text else None
             )
-            element = scanned
-        elif scanned:
-            element = scanned
+        return block_cache[cache_key]
 
-    if not element:
-        if res["en"] in ELEMENT_SECTIONS:
-            element = res["en"]
-        elif term in ELEMENT_SECTIONS:
-            element = term
+    # Rotation 块：构建时已固化进行内 rotation 字段，运行时零索引页解析；
+    # 多行主控相同时按出现顺序去重（知识库规则约定默认不转述，用户明确
+    # 询问输出手法时由 LLM 取用）
+    rotations: list[str] = []
+    for row in rows:
+        rot = str(row.get("rotation") or "").strip()
+        if rot and rot not in rotations:
+            rotations.append(rot)
 
     lines: list[str] = []
-
-    # 预设码区块放在攻略正文之前：它是用户明确要求的内容（--presets），
-    # 且输出可能因长度上限被截断——放在前面保证不被截掉
-    if with_presets:
-        preset_lines: list[str] = ["=== 预设码推荐 (Google Docs) ==="]
-        presets = gd_fetcher.fetch_presets()
-        if "Error" in presets:
-            preset_lines.append("  [预设码抓取失败]")
-        elif is_character:
-            block = extract_preset_block(presets, character_en)
-            if block:
-                preset_lines.append(strip_game_markup(replacer.replace(block)))
-            elif element:
-                section = extract_element_preset_section(presets, element)
-                preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {character_en} 相关内容。")
-            else:
-                preset_lines.append(f"  预设码文档中未找到 {character_en} 相关内容。")
-        elif element:
-            section = extract_element_preset_section(presets, element)
-            preset_lines.append(strip_game_markup(replacer.replace(section)) if section else f"  预设码文档中未找到 {element} 相关内容。")
-        preset_lines.append("")
-        lines += preset_lines
-
-    if element:
-        # 索引页唯一作用：提取输出手法（Rotation）——仅角色查询需要；
-        # 槽位不回查（详细页区块体首个角色详情段即主控位，后续均为支援位）
-        index_text = st_fetcher.fetch_infodoc_index() if is_character else ""
-
-        lines.append(f"=== {ELEMENT_CN[element]}队文字攻略 (stelladb /infodoc/{element.lower()}) ===")
-        infodoc_text = st_fetcher.fetch_infodoc(element.lower())
-        if infodoc_text and "Error" not in infodoc_text:
-            infodoc_text = strip_infodoc_noise(infodoc_text)
-            if is_character:
-                also = [m for m in (members or []) if m != character_en]
-                teams = extract_team_blocks(infodoc_text, character_en, lookup.get_character_names())
-                # 多角色联合查询：只保留同时包含全部成员的队伍
-                if also:
-                    wanted = set(also) | {character_en}
-                    teams = [t for t in teams if wanted.issubset(set(t["members"]))]
-                if teams:
-                    # 输出顺序：问询角色（们）排区块首位的队伍在前——保持页序即可，
-                    # 槽位与定位已在各成员标签中体现
-                    # Rotation 块：仅索引页提供；知识库规则约定默认不转述，
-                    # 用户明确询问输出手法时由 LLM 取用
-                    rotation = extract_rotation(index_text, character_en)
-                    if rotation:
-                        lines.append("=== 输出手法（Rotation，索引页） ===")
-                        lines.append(strip_game_markup(replacer.replace(rotation)))
-                        lines.append("")
-
-                    asker_set = set(members) if members else {character_en}
-
-                    for team_idx, team in enumerate(teams):
-                        # 队名行（过字典替换，保留 build 流派信息）
-                        lines.append(f"配队{team_idx + 1}（{strip_game_markup(replacer.replace(team['name']))}）")
-
-                        # 成员顺序：问询角色优先，其余按区块内出现顺序
-                        ordered = [m for m in team["members"] if m in asker_set]
-                        ordered += [m for m in team["members"] if m not in asker_set]
-
-                        for m in ordered:
-                            seg = team["segments"].get(m)
-                            if not seg:
-                                continue
-                            role = team["roles"].get(m, "支援位")
-                            is_asker = m in asker_set
-                            tag = "本角色" if is_asker else "队友"
-                            member_res = lookup.lookup_term(m)
-                            member_cn = member_res["cn"] if member_res else m
-                            lines.append(f"{tag}{member_cn}（{role}）")
-
-                            # 资料层全量（B 路线）：所有成员的所有字段一律进资料，
-                            # 只过 replacer（字典译名）+ strip_game_markup；
-                            # 输出裁剪完全由 prompt 规则 4 指引 LLM 自行完成
-                            if seg["description"]:
-                                lines.append("描述：")
-                                lines.extend(
-                                    strip_game_markup(replacer.replace(d))
-                                    for d in seg["description"]
-                                )
-                            if seg["skill"]:
-                                lines.append(f"技能升级优先度：{strip_game_markup(replacer.replace(seg['skill']))}")
-                            if seg["discs"]:
-                                lines.append("推荐主位秘纹：")
-                                lines.extend(
-                                    strip_game_markup(replacer.replace(d))
-                                    for d in seg["discs"]
-                                )
-                            if seg["emblem"]:
-                                lines.append("纹章推荐：")
-                                lines.extend(
-                                    strip_game_markup(replacer.replace(d))
-                                    for d in seg["emblem"]
-                                )
-                            lines.append("")
-                else:
-                    # 区块未命中（如问询角色不在本元素页）：回退整页
-                    lines.append(strip_game_markup(replacer.replace(infodoc_text)))
-            else:
-                lines.append(strip_game_markup(replacer.replace(infodoc_text)))
-        else:
-            lines.append("  [抓取失败]")
+    if rotations:
+        lines.append("=== 输出手法（Rotation，索引页） ===")
+        lines.extend(strip_game_markup(replacer.replace(r)) for r in rotations)
         lines.append("")
 
-    if not lines:
-        lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
+    team_idx = 0
+    for row in rows:
+        slots = [s for s in row.get("slots", []) if isinstance(s, dict) and s.get("en")]
+        if not slots:
+            continue
+        team_idx += 1
+
+        # 队名：infodoc 区块名优先，缺则回退预设表队名（过字典替换保留流派信息）
+        team_name = row.get("team_name_infodoc") or row.get("team_name_preset") or ""
+        lines.append(f"配队{team_idx}（{strip_game_markup(replacer.replace(team_name))}）")
+
+        # 角色定位取行内槽位：首位=主控位，其余=支援位
+        role_by_en = {
+            s["en"]: "主控位" if si == 0 else "支援位" for si, s in enumerate(slots)
+        }
+        # 成员顺序：问询角色优先，其余按槽位序
+        ordered = [s for s in slots if s["en"] in asker_ens]
+        ordered += [s for s in slots if s["en"] not in asker_ens]
+
+        guide_ref = row.get("guide_ref")
+        block = (
+            _get_block(guide_ref.get("element", ""), guide_ref.get("block", ""))
+            if guide_ref
+            else None
+        )
+
+        for slot in ordered:
+            en = slot["en"]
+            seg = block.get("segments", {}).get(en) if block else None
+            if block is not None and seg is None:
+                # 区块已解析但缺该成员段（关联规则保证 slots ⊆ 区块成员，
+                # 此处仅防御数据漂移）：与旧链路一致跳过该成员行
+                continue
+            tag = "本角色" if en in asker_ens else "队友"
+            member_cn = slot.get("cn") or en
+            lines.append(f"{tag}{member_cn}（{role_by_en.get(en, '支援位')}）")
+            if seg is None:
+                continue
+
+            # 资料层全量（B 路线）：所有成员的所有字段一律进资料，
+            # 只过 replacer（字典译名）+ strip_game_markup；
+            # 输出裁剪完全由 prompt 规则 4 指引 LLM 自行完成
+            if seg["description"]:
+                lines.append("描述：")
+                lines.extend(
+                    strip_game_markup(replacer.replace(d))
+                    for d in seg["description"]
+                )
+            if seg["skill"]:
+                lines.append(f"技能升级优先度：{strip_game_markup(replacer.replace(seg['skill']))}")
+            if seg["discs"]:
+                lines.append("推荐主位秘纹：")
+                lines.extend(
+                    strip_game_markup(replacer.replace(d))
+                    for d in seg["discs"]
+                )
+            if seg["emblem"]:
+                lines.append("纹章推荐：")
+                lines.extend(
+                    strip_game_markup(replacer.replace(d))
+                    for d in seg["emblem"]
+                )
+            lines.append("")
+
+        # 预设码行（用户明确要求时）：码原文保真（replacer 不改码），成员为官方中文名
+        if with_presets and row.get("preset_code"):
+            code = row["preset_code"]
+            members_desc = "、".join(
+                [f"主控{slots[0].get('cn') or slots[0]['en']}", f"援护{slots[1].get('cn') or slots[1]['en']}"]
+                + [s.get("cn") or s["en"] for s in slots[2:]]
+            )
+            lines.append(f"预设码：{strip_game_markup(replacer.replace(code))}（{members_desc}）")
+            lines.append("")
 
     return _fit_lines(lines, max_length)
-
-
-# 预设码文档行识别：20+ 位大写字母数字串 = 预设码；标签行含 Trekker/Preset Code/Slot
-_PRESET_CODE_RE = re.compile(r"[A-Za-z0-9]{20,}")
-_PRESET_LABEL_RE = re.compile(r"Trekker|Preset Code|Slot", re.IGNORECASE)
-
-
-def extract_preset_block(presets_text: str, character_en: str) -> str:
-    """按角色名提取预设码区块。
-
-    预设码文档的实际结构（Google Sheet 空单元格压缩后）：
-        角色名行（如 "Wraith (Melee)"）
-        标签行（Main Trekker / ... / Preset Code）
-        （空行——原表格占位格）
-        预设码行（AAAA...）
-        （空行）
-        下一个角色名行 …
-
-    旧实现按空行分块，导致"角色名+标签"与"预设码"被空行切成不同块，
-    命中的块只有占位标签没有码（LLM 报"资料里只有占位栏位"）。
-    现改为按角色名行分节：从角色名行收集到下一个角色名行/文档尾，
-    跨越空行；整节不含真实预设码的占位节丢弃。
-    """
-    lines = presets_text.split("\n")
-    element_titles = set(ELEMENT_SECTIONS)
-
-    def _is_code_line(line: str) -> bool:
-        return bool(_PRESET_CODE_RE.fullmatch(line.strip()))
-
-    def _is_label_line(line: str) -> bool:
-        return bool(_PRESET_LABEL_RE.search(line))
-
-    def _is_name_line(line: str) -> bool:
-        stripped = line.strip()
-        if not stripped or _is_code_line(stripped) or _is_label_line(stripped):
-            return False
-        return bool(re.search(r"[A-Za-z]", stripped))
-
-    name_idxs = [
-        i for i, line in enumerate(lines)
-        if character_en in line and _is_name_line(line)
-    ]
-    if not name_idxs:
-        return ""
-
-    segs: list = []
-    for start in name_idxs:
-        seg = [lines[start]]
-        has_code = False
-        for j in range(start + 1, len(lines)):
-            line = lines[j]
-            if _is_name_line(line):
-                break  # 下一个角色名行 = 本节结束
-            seg.append(line)
-            if _is_code_line(line):
-                has_code = True
-        # 元素标题行归入本节末尾即可终止（下一节从它开始也无妨，这里简化：
-        # 元素标题行本身也是"名字行"，上面的 _is_name_line 已终止本节）
-        if has_code:
-            segs.append("\n".join(seg).strip())
-
-    return "\n\n---\n\n".join(segs)
-
-
-def extract_element_preset_section(presets_text: str, element: str) -> str:
-    """按元素区块标题定位，返回该元素下的全部预设队伍。"""
-    in_section = False
-    section_lines: list[str] = []
-    for line in presets_text.split("\n"):
-        stripped = line.strip()
-        if stripped in ELEMENT_SECTIONS:
-            if in_section and section_lines:
-                return "\n".join(section_lines)
-            in_section = (stripped == element)
-            if in_section:
-                section_lines = [stripped]
-            continue
-        if in_section:
-            section_lines.append(line)
-    if in_section and section_lines:
-        return "\n".join(section_lines)
-    return ""
 
 
 def check_permission(

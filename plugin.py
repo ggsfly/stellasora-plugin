@@ -35,10 +35,12 @@ from service import (  # noqa: E402
     configure_overrides,
     count_character_names,
     find_character_names,
-    find_teams_by_members,
+    find_team_rows,
+    load_team_table,
     lookup_term,
-    query_how,
+    query_how_rows,
     query_what,
+    reload_team_table,
 )
 from sync_data import sync_offline_data  # noqa: E402
 
@@ -268,6 +270,8 @@ class StellaSoraPlugin(MaiBotPlugin):
                 try:
                     self.ctx.logger.info("开始执行每日 17:00 离线数据全量定时同步...")
                     await asyncio.to_thread(sync_offline_data, sync_all=True)
+                    # 表缓存失效接线（Task 3）：定时同步产出新统一表后立即失效表缓存
+                    reload_team_table()
                     # 清空直发成品缓存（self._get_answer_cache()._memory_cache.clear() 并清理 answers 磁盘缓存）
                     answers_dir = self._cache_dir_ready() / "answers"
                     if answers_dir.exists():
@@ -772,52 +776,57 @@ class StellaSoraPlugin(MaiBotPlugin):
             "how 查询: %s presets=%s (group=%s user=%s)",
             query, presets, kwargs.get("group_id", ""), kwargs.get("user_id", ""),
         )
-        # Fix D：同 handle_what，query_how 为同步重活（抓取+替换），放入线程池执行
+        # Fix D：同 handle_what，表查询/区块解析为同步重活，放入线程池执行
         effective_question = (question or "").strip() or query
-        # 多角色联合查询：问句命中 2-3 个角色 → 队伍字典匹配（跨元素混编支持，
-        # 全元素页扫描）；命中 → 单队输出；≥4 个或未命中 → 统一"未找到"
-        found_members = await asyncio.to_thread(find_character_names, effective_question)
-        if len(found_members) >= 2:
-            if len(found_members) > 3:
-                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
-            match = await asyncio.to_thread(find_teams_by_members, found_members, self._cache_dir_ready())
-            if not match:
-                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
-            # 命中：把主问角色设为队名首角色（其元素页已由 find_teams_by_members 确定），
-            # 其余角色作为 members 传入，query_how 按单队全量输出
-            text = await asyncio.to_thread(
-                query_how,
-                match["members"][0],
-                self._cache_dir_ready(),
-                with_presets=bool(presets),
-                max_length=int(self.config.query.default_max_length),
-                question=effective_question,
-                members=match["members"],
-                element_override=match["element"],
+        # 统一表驱动链路（Task 3）：问句提取角色（含别名预处理，支持多角色）→
+        # 兜底归一 query 词 → char_id 集 → find_team_rows 交集查询。
+        # 单/多角色共用同一链路；表未命中直接"未找到相关攻略"——不回退整页、
+        # 不降级单角色、不调旧 query_how（用户裁定 4）。
+        found_names = await asyncio.to_thread(find_character_names, effective_question)
+        if not found_names:
+            # 问句未命中角色名：用 query 参数做兜底归一（planner 只传名字本身）
+            res = lookup_term(query)
+            if res and not res.get("not_found") and res.get("cat") == "Character":
+                found_names = [res["cn"]]
+        if not found_names:
+            self.ctx.logger.info("how 表查询未命中角色: query=%s question=%s", query, effective_question)
+            return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+        member_ids = await asyncio.to_thread(self._resolve_character_ids, found_names)
+        rows = await asyncio.to_thread(find_team_rows, member_ids)
+        if not rows:
+            self.ctx.logger.info(
+                "how 表未命中: 角色=%s member_ids=%s（交集为空）", found_names, member_ids
             )
-            if "未在字典中找到" in text:
-                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
-            return await self._send_or_relay(text, effective_question, presets, **kwargs)
-
-        # 单角色查询
+            return {"name": "stellasora_how", "content": "未找到相关攻略。"}
         text = await asyncio.to_thread(
-            query_how,
-            query,
-            self._cache_dir_ready(),
-            with_presets=bool(presets),
-            max_length=int(self.config.query.default_max_length),
-            question=effective_question,
+            query_how_rows,
+            rows,
+            bool(presets),
+            int(self.config.query.default_max_length),
+            effective_question,
         )
-        # 未找到时不走 LLM 加工，直接返回给 planner 自行处理（approach B）
-        if "未在字典中找到" in text:
-            return {"name": "stellasora_how", "content": "未在星塔旅人游戏中找到该角色或元素。"}
         return await self._send_or_relay(text, effective_question, presets, **kwargs)
+
+    @staticmethod
+    def _resolve_character_ids(names: list) -> list[int]:
+        """角色中文名列表 → 去重后的 CharId 列表（经共享查词服务归一）。"""
+        ids: list[int] = []
+        for name in names:
+            res = lookup_term(name)
+            if res and not res.get("not_found") and res.get("cat") == "Character":
+                try:
+                    char_id = int(str(res["id"]).split(".")[1])
+                except (IndexError, ValueError):
+                    continue
+                if char_id not in ids:
+                    ids.append(char_id)
+        return ids
 
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
         """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。
 
         直发判定仅由配置 direct_send 决定（修复点3：移除多角色强制回传门槛，
-        联合查询资料已在 find_teams_by_members 阶段合并为单队，不存在刷屏问题）。
+        联合查询资料已在统一表交集阶段收敛为命中行列表，不存在刷屏问题）。
         """
         query = effective_question
         direct = self.config.query.direct_send
@@ -867,6 +876,10 @@ class StellaSoraPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.exception("星塔旅人离线数据同步异常: %s", exc)
             return False, f"星塔旅人离线数据同步失败: {exc}", 1
+
+        # 表缓存失效接线（Task 3）：同步产出新统一表后立即失效运行时表缓存，
+        # 后续 how 查询即时读取新表（在清空直发成品缓存之前执行）
+        reload_team_table()
 
         # 清空直发成品缓存（磁盘文件与内存缓存）
         answers_dir = self._cache_dir_ready() / "answers"

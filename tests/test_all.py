@@ -12,7 +12,7 @@
   C 术语替换等价性  —— 单遍交替正则 vs 逐条 legacy 在代表样例上全等
   D 中文别名覆盖    —— [overrides.aliases] 模型、DictLookup 链式别名、动态配置
   E 索引页抓取      —— fetch_infodoc_index 缓存命中、URL 正确、异常降级空串
-  F how 双页切分    —— 索引页前置保序、角色段切分、回退整页、[抓取失败] 标注
+  F how 表驱动查询  —— query_how_rows 按区块抓取、预设码行、rotation 字段、表交集（Task 3 新链路）
   G 直发端到端      —— 直发/缓存/去重/鉴权/人格开关/知识注入/SDK 透传（核心用例）
   H 输出格式        —— LLM 输出原样直发（verbatim trust）+ infodoc 输出规则关键词
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
@@ -357,208 +357,190 @@ def run_fetcher_index() -> None:
             urllib.request.urlopen = original
 
 
-# ===== 节 F：how 抓取（详细页队伍区块 + 索引页 Rotation） =====
+# ===== 节 F：how 表驱动查询（query_how_rows 按区块抓取 + 预设码 + Rotation 字段） =====
+
+# F 节 fixture 预设码（任意 20+ 位 base64 形态串，仅作输出保真断言用）
+F_FIXTURE_CODE = "AAAAnAAAAJUAAACfwYADbAZgADsMAJGAAGww"
+
+# F 节 fixture 统一表行：结构 = team_table.json 行契约
+# （slots[3] 定位主/支援、team_name_infodoc 优先、guide_ref 指向区块、rotation 构建期固化）
+F_FIXTURE_ROWS = [
+    {   # 行A：小禾主控 + 格芮/科洛妮丝支援 → Terra Mark (S. Coronis Ver.) 区块
+        "main_key": F_FIXTURE_CODE,
+        "preset_code": F_FIXTURE_CODE,
+        "element": "terra",
+        "slots": [
+            {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+            {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+            {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"},
+        ],
+        "team_name_preset": "Original Terra Mark",
+        "team_name_infodoc": "Terra Mark (S. Coronis Ver.)",
+        "guide_ref": {"element": "terra", "block": "Terra Mark (S. Coronis Ver.)"},
+        "rotation": "ZZROTMARK 先普攻接大招的循环手法",
+    },
+    {   # 行B：锚名≠主控（Otoha (Laser) 队主控是珂赛特）——角色定位取行内槽位
+        "main_key": "terra::Otoha (Laser)::Flora",
+        "preset_code": None,
+        "element": "terra",
+        "slots": [
+            {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
+            {"char_id": 145, "en": "Otoha", "cn": "乙叶"},
+            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
+        ],
+        "team_name_preset": "",
+        "team_name_infodoc": "Otoha (Laser)",
+        "guide_ref": {"element": "terra", "block": "Otoha (Laser)"},
+        "rotation": "",
+    },
+    {   # 行C：guide_ref=None（未关联码行）——只出队名+成员+预设码，无区块四类字段
+        "main_key": "terra::Gerie (Auto Attack) WIP::Ridge",
+        "preset_code": "AAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA",
+        "element": "terra",
+        "slots": [
+            {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
+            {"char_id": 110, "en": "Tilia", "cn": "缇莉亚"},
+        ],
+        "team_name_preset": "Gerie Auto Attack Preset",
+        "team_name_infodoc": "",
+        "guide_ref": None,
+        "rotation": "",
+    },
+    {   # 行D：猫眼主控 + 科洛妮丝（新春）支援 → Chaton (Dark Ray) 区块（别名用例）
+        "main_key": "terra::Chaton (Dark Ray)::Flora",
+        "preset_code": None,
+        "element": "terra",
+        "slots": [
+            {"char_id": 114, "en": "Chaton", "cn": "猫眼"},
+            {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"},
+            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
+        ],
+        "team_name_preset": "",
+        "team_name_infodoc": "Chaton (Dark Ray)",
+        "guide_ref": {"element": "terra", "block": "Chaton (Dark Ray)"},
+        "rotation": "",
+    },
+]
+
+# F 节 fixture infodoc：四区块真实结构（锚点行/段头/角色行/秘纹/纹章转置）+
+# 末尾干扰区块（ZZOTHERTEAM 断言按区块抓取不泄漏其他队伍内容）
+F_FIXTURE_INFODOC = """Terra Mark (S. Coronis Ver.) | ⏏ Back to Top ⏏
+Description | Skill Upgrade Priority
+Nazuna (5★) | 10/10/1/10 (Main Skill only)
+ZZDESCMAIN 小禾主控描述内容
+Priority Potentials | Recommended Main Discs
+ZZDISCA (C1) | ZZDISCB (C6)
+Optional Potentials | Emblem
+Affix Priority | Terra PEN | 110 | Crit Rate | 15%
+Main Skill Lv. | +3 levels | Terra DMG | 20%
+Description | Skill Upgrade Priority
+Gerie (4★) | 1/1/10/1 (Support Skill only)
+ZZDESCSUPP 格芮支援描述内容
+Otoha (Laser) | ⏏ Back to Top ⏏
+Description | Skill Upgrade Priority
+Cosette (4★) | 1/10/1/1 (Main Skill only)
+ZZMAINNOTE 珂赛特主控描述内容
+Description | Skill Upgrade Priority
+Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
+ZZSUPPNOTE 乙叶支援描述内容
+Chaton (Dark Ray) | ⏏ Back to Top ⏏
+Description | Skill Upgrade Priority
+Chaton (5★) | 1+/10/1/1+ (Main Skill >> Auto Attack = Ultimate)
+ZZCHATDESC 猫眼主控描述内容
+Description | Skill Upgrade Priority
+Springseek Coronis (5★) | 1/1/10/1 (Support Skill only)
+ZZCORONISDESC 科洛妮丝支援描述内容
+Other Team | ⏏ Back to Top ⏏
+ZZOTHERTEAM 其他队伍内容不应出现
+"""
+
 
 def run_query_how_section() -> None:
-    print("--- F 详细页队伍区块 + 索引页 Rotation ---")
-    cache_dir = Path(tempfile.mkdtemp(prefix="stellasora_section_"))
-    orig = {
-        "infodoc": service.StelladbFetcher.fetch_infodoc,
-        "index": service.StelladbFetcher.fetch_infodoc_index,
-        "trekker": service.StelladbFetcher.fetch_trekker,
-        "presets": service.GoogleDocFetcher.fetch_presets,
-    }
-    # 详细页 mock：按真实结构（区块锚点行带 ⏏；区块内首角色=主控，后续=支援；
-    # 每角色段含 描述/技能优先度/秘纹/纹章完整四件套）
-    mock_detailed = (
-        "Chaton (Dark Ray) | ⏏ Back to Top ⏏\n"
-        "Description | Skill Upgrade Priority\n"
-        "Chaton (5★) | 1+/10/1/1+ (Main Skill >> Auto Attack = Ultimate)\n"
-        "Chaton build details: Skill 1 > Skill 2\n"
-        "Priority Potentials | Recommended Main Discs\n"
-        "Cat Disc (C1) | Snow Disc (C6)\n"
-        "Optional Potentials | Emblem\n"
-        "Affix Priority | Fire PEN | 110 | Crit Rate | 15%\n"
-        "Main Skill Lv. | +3 levels | Fire DMG | 20%\n"
-        "Description | Skill Upgrade Priority\n"
-        "Flora (4★) | 1/1/10/1 (Support Skill only)\n"
-        "Flora is the irreplaceable support of this team\n"
-        "Priority Potentials | Emblem\n"
-        "Affix Priority | Charge Eff. | 40% | Support Skill Lv. | +3 levels\n"
-        "Snowish Laru (Cannon) | ⏏ Back to Top ⏏\n"
-        "Snowish build details: other team only\n"
-    )
-    # 索引页 mock：Rotation 按六元素列段排列，猫眼（火）在第 2 段。
-    # 注：索引页槽位行（"X (Main Slot)" 等）在当前逻辑下不参与解析，mock 不含
-    mock_index = (
-        "Nazuna-Donna | Chaton (Dark Ray) | Wraith (Melee) | << Prev | Firefly WIP | Next >> | Otoha (Laser)\n"
-        "Rotation | Rotation (WIP) | Rotation | Rotation | Rotation (WIP) | Rotation\n"
-        "idk yet | Chaton Rotation content here | Wraith comps | Terra goals | Lux notes | Umbra tips\n"
-    )
-    try:
-        # 离线保证：trekker 固定返回火属性文本，避免测试依赖外部网络
-        service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Ignis character data with Ignis element"
-        service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
+    print("--- F how 表驱动查询 ---")
+    import unittest.mock
 
-        # 场景 1：问询主控位角色（猫眼），问"攻略"→ guide 模式（描述+技能+纹章）
-        material = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
-        check("F1 主控问询：队名行+本角色标签+队友段，不含其他队",
-              "配队1（猫眼 (暗黑射线)）" in material
-              and "本角色猫眼（主控位）" in material and "队友紫槿（支援位）" in material
-              and "Snowish build details" not in material)
-        check("F2 资料全量（描述/技能/秘纹/纹章四类字段齐全，输出裁剪交由 prompt）",
-              "描述：" in material and "技能升级优先度：" in material
-              and "推荐主位秘纹：" in material and "纹章推荐：" in material
-              and "70级：" in material and "80级：" in material)
-        check("F3 Rotation 仅取猫眼所在列段",
-              "猫眼 循环手法 content here" in material
-              and "Wraith comps" not in material and "idk yet" not in material)
-
-        # 场景 2：问询支援位角色（紫槿/Flora）→ 本角色=紫槿（支援位），主控=猫眼
-        material_supp = service.query_how("Flora", cache_dir, with_presets=False, question="紫槿攻略")
-        check("F4 支援位问询：本角色紫槿(支援位)，猫眼为队友(主控位)",
-              "本角色紫槿（支援位）" in material_supp and "队友猫眼（主控位）" in material_supp
-              and "irreplaceable support" in material_supp)
-
-        # 场景 3：预设码保序（预设码在最前）
-        service.GoogleDocFetcher.fetch_presets = lambda self: "=== 预设码推荐 ===\nChaton\nMain Trekker\nPreset Code\nABCD1234EFGH5678IJKL\n"
-        material_p = service.query_how("Chaton", cache_dir, with_presets=True, question="猫眼攻略")
-        idx_p, idx_t = material_p.find("预设码"), material_p.find("配队1")
-        check("F5 预设码 < 配队正文 严格保序", idx_p > -1 and idx_t > -1 and idx_p < idx_t, f"{idx_p} < {idx_t}")
-
-        # 场景 4：元素查询——不切分、无配队/Rotation 块
-        material_elem = service.query_how("火", cache_dir, with_presets=False)
-        check("F6 元素查询不切分（整页返回，无配队/Rotation块）",
-              "Snowish build details" in material_elem
-              and "配队1" not in material_elem and "输出手法" not in material_elem)
-
-        # 场景 5：角色未命中 → 回退整页全文
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: "Flora build details: Supp only\n"
-        check("F7 角色未命中时回退整页全文",
-              "Supp only" in service.query_how("Chaton", cache_dir, with_presets=False))
-
-        # 场景 6：索引页空串 → 无 Rotation 块，配队正文正常
-        service.StelladbFetcher.fetch_infodoc_index = lambda self: ""
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
-        material_no_idx = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
-        check("F8 索引页空串时配队正文正常、无Rotation块",
-              "本角色猫眼（主控位）" in material_no_idx and "输出手法" not in material_no_idx)
-
-        # 场景 7：infodoc Error
-        service.StelladbFetcher.fetch_infodoc_index = lambda self: mock_index
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: "Error fetching infodoc."
-        check("F9 infodoc 含 Error 时标注[抓取失败]",
-              "[抓取失败]" in service.query_how("Chaton", cache_dir, with_presets=False))
-
-        # 场景 8：Rotation 段数错位保护
-        bad_index = "Chaton (Dark Ray)\nRotation\nonly_one_cell\n"
-        service.StelladbFetcher.fetch_infodoc_index = lambda self: bad_index
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_detailed
-        material_bad = service.query_how("Chaton", cache_dir, with_presets=False, question="猫眼攻略")
-        check("F10 Rotation 段数错位时安全省略", "输出手法" not in material_bad)
-
-        # 场景 9：队名角色 ≠ 主控（暗队 Otoha (Laser) 实例——主控是 Cosette）
-        mock_umbra = (
-            "Otoha (Laser) | ⏏ Back to Top ⏏\n"
-            "Description | Skill Upgrade Priority\n"
-            "Cosette (4★) | 1/10/1/1 (Main Skill only)\n"
-            "Cosette occupies this team's Main slot as she provides high amounts of buffs\n"
-            "Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)\n"
-            "Otoha's laser build revolves on the Soul Rend effect\n"
+    row_a, row_b, row_c, row_d = F_FIXTURE_ROWS
+    with tempfile.TemporaryDirectory(prefix="stellasora_f_") as tmp:
+        # infodocs 目录 fixture：monkeypatch 模块常量 _INFODOCS_DIR（不触真实离线数据）
+        infodocs_dir = Path(tmp)
+        (infodocs_dir / "terra.json").write_text(
+            json.dumps({"data": F_FIXTURE_INFODOC}, ensure_ascii=False), encoding="utf-8"
         )
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_umbra
-        material_otoha = service.query_how("Otoha", cache_dir, with_presets=False, question="乙叶攻略")
-        check("F11 队名角色≠主控（Otoha队主控=珂赛特）",
-              "本角色乙叶（支援位）" in material_otoha
-              and "队友珂赛特（主控位）" in material_otoha)
+        with unittest.mock.patch.object(service, "_INFODOCS_DIR", infodocs_dir):
+            # F1 主控问询：配队头+槽位定位标签（本角色主控/队友支援），只抓命中区块
+            mat_a = service.query_how_rows([row_a], with_presets=False, question="小禾攻略")
+            check("F1 配队头+槽位定位标签，不含未命中区块内容",
+                  "配队1（" in mat_a
+                  and "本角色小禾（主控位）" in mat_a
+                  and "队友格芮（支援位）" in mat_a
+                  and "ZZOTHERTEAM" not in mat_a)
 
-        # 场景 10：多角色联合——2 角色同队 → 单队输出（find_teams_by_members 全链路）
-        mock_aqua = (
-            "Nazuna-Donna | ⏏ Back to Top ⏏\n"
-            "Description | Skill Upgrade Priority\n"
-            "Nazuna (5★) | 10/10/1/10 (Main Skill > Ultimate)\n"
-            "Nazuna is the main dealer of this team\n"
-            "Donna (4★) | 1/1/10/1 (Support Skill only)\n"
-            "Donna supports with heals and buffs\n"
-        )
-        service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Aqua character data with Aqua element"
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_aqua
-        hit = service.find_teams_by_members(["小禾", "多娜"], cache_dir)
-        check("F12 多角色队伍字典匹配（小禾+多娜 → 同队命中）",
-              hit is not None and hit["team_name"] == "Nazuna-Donna"
-              and set(hit["members"]) == {"Nazuna", "Donna"})
+            # F2 四类字段齐全（描述/技能/秘纹/纹章）+ 纹章转置分档（70级/80级）
+            check("F2 四类字段齐全且纹章转置分档",
+                  "描述：" in mat_a
+                  and "技能升级优先度：10/10/1/10" in mat_a
+                  and "技能升级优先度：1/1/10/1" in mat_a
+                  and "推荐主位秘纹：" in mat_a and "ZZDISCA" in mat_a
+                  and "纹章推荐：" in mat_a
+                  and "70级：" in mat_a and "80级：" in mat_a
+                  and "110" in mat_a and "15%" in mat_a)
 
-        # 场景 11：联合命中后 query_how 按多成员模式输出单队
-        material_team = service.query_how("小禾", cache_dir, with_presets=False, question="小禾和多娜的配队", members=["Nazuna", "Donna"])
-        check("F13 联合查询单队输出（无其他队+双本角色标签）",
-              material_team.count("配队1（") == 1
-              and "本角色小禾" in material_team and "本角色多娜" in material_team
-              and "Snowish build details" not in material_team)
+            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 本角色，主控珂赛特为队友
+            mat_b = service.query_how_rows([row_b], with_presets=False, question="乙叶攻略")
+            check("F3 支援位问询定位正确（锚名≠主控）",
+                  "本角色乙叶（支援位）" in mat_b
+                  and "队友珂赛特（主控位）" in mat_b
+                  and "ZZSUPPNOTE" in mat_b and "ZZMAINNOTE" in mat_b)
 
-        # 场景 14：不同队角色组合 → 未命中
-        miss = service.find_teams_by_members(["小禾", "Flora"], cache_dir)
-        check("F14 不同队组合未命中", miss is None)
+            # F4 rotation 直读行内字段；空 rotation 行不产生输出手法块
+            check("F4 rotation 行字段直读（行A含/行B无输出手法块）",
+                  "ZZROTMARK" in mat_a and "循环手法" in mat_a
+                  and "输出手法" not in mat_b)
 
-        # 场景 15：多角色别名识别与多 build 连续吞并（F15 回归用例）
-        # 1. 动态别名 "春科" -> "科洛妮丝（新春）"
-        service.configure_overrides(aliases={"春科": "科洛妮丝（新春）"})
-        try:
-            # find_character_names 识别别名并输出官方名
-            extracted = service.find_character_names("春科 猫眼 谁好")
-            check("F15-1 俗称别名提取为官方角色名",
-                  "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
-                  f"提取结果: {extracted}")
+            # F5 预设码行：码原文保真+主控/援护标注，位于配队头之后；关闭时不出现
+            mat_p = service.query_how_rows([row_a], with_presets=True, question="小禾攻略")
+            idx_t, idx_c = mat_p.find("配队1（"), mat_p.find("预设码：")
+            check("F5 预设码行格式与保序",
+                  idx_t > -1 and idx_c > idx_t
+                  and f"预设码：{F_FIXTURE_CODE}（主控小禾、援护格芮、科洛妮丝（新春））" in mat_p
+                  and "预设码" not in mat_a)
 
-            # 2. 多 build 连续吞并（同一角色多 build 区块连续排列，向后吞并合并成员且队伍不发生断裂）
-            mock_multi_build = (
-                "Chaton (Dark Ray) | ⏏ Back to Top ⏏\n"
-                "Description | Skill Upgrade Priority\n"
-                "Chaton (5★) | 10/10/1/10\n"
-                "Chaton Dark Ray DPS details\n"
-                "Springseek Coronis (5★) | 1/1/10/1\n"
-                "Coronis NY support details\n"
-                "Priority Potentials | Recommended Main Discs\n"
-                "Disc A | Disc B\n"
-                "Chaton (Hybrid) | ⏏ Back to Top ⏏\n"
-                "Description | Skill Upgrade Priority\n"
-                "Chaton (5★) | 1/10/10/1\n"
-                "Chaton Hybrid alternate build\n"
-                "Springseek Coronis (5★) | 1/1/10/1\n"
-                "Coronis NY support details for hybrid\n"
-            )
-            # 验证底层 extract_team_blocks 对同角色多 build 的完整解析与成员保留
-            blocks = service.extract_team_blocks(
-                mock_multi_build, "Chaton", service._get_lookup().get_character_names()
-            )
-            check("F15-2 extract_team_blocks 对多build完整解析且各build队伍不断裂",
-                  len(blocks) == 2
-                  and blocks[0]["name"] == "Chaton (Dark Ray)"
-                  and blocks[1]["name"] == "Chaton (Hybrid)"
-                  and "Springseek Coronis" in blocks[0]["members"]
-                  and "Springseek Coronis" in blocks[1]["members"])
+            # F6 guide_ref=None 行优雅降级：队名+成员+预设码，无区块四类字段
+            mat_c = service.query_how_rows([row_c], with_presets=True, question="格芮攻略")
+            check("F6 未关联行优雅降级（队名+成员+预设码，无四类字段）",
+                  "配队1（" in mat_c
+                  and "本角色格芮（主控位）" in mat_c
+                  and "队友紫槿（支援位）" in mat_c
+                  and "预设码：" in mat_c
+                  and "描述：" not in mat_c and "纹章推荐：" not in mat_c)
 
-            # 验证基于别名提取的角色在 find_teams_by_members 中精准同队命中
-            service.StelladbFetcher.fetch_infodoc = lambda self, element: mock_multi_build
-            alias_hit = service.find_teams_by_members(extracted, cache_dir)
-            check("F15-3 别名提取后多角色联合同队命中",
-                  alias_hit is not None
-                  and alias_hit["team_name"] == "Chaton (Dark Ray)"
-                  and set(alias_hit["members"]) == {"Chaton", "Springseek Coronis"})
+            # F7+F8 别名问句（原 F15-1/F15-4 迁移）：提取官方名 + 双"本角色"标签
+            service.configure_overrides(aliases={"春科": "科洛妮丝（新春）"})
+            try:
+                extracted = service.find_character_names("春科 猫眼 谁好")
+                check("F7 俗称别名提取为官方角色名",
+                      "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
+                      f"提取结果: {extracted}")
+                mat_d = service.query_how_rows([row_d], with_presets=False, question="春科和猫眼")
+                check("F8 别名问句双本角色标签（原F15-4迁移）",
+                      "本角色猫眼（主控位）" in mat_d
+                      and "本角色科洛妮丝（新春）" in mat_d
+                      and "ZZCHATDESC" in mat_d and "ZZCORONISDESC" in mat_d)
+            finally:
+                service.configure_overrides(aliases={})
 
-            # 验证 query_how 联合单队输出与双角色标识
-            mat_team = service.query_how("猫眼", cache_dir, with_presets=False,
-                                         question="春科和猫眼", members=["Chaton", "Springseek Coronis"])
-            check("F15-4 联合查询双角色标签输出且排版完整",
-                  "本角色猫眼" in mat_team and "本角色科洛妮丝（新春）" in mat_team)
-        finally:
-            service.configure_overrides(aliases={})
-    finally:
-        service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
-        service.StelladbFetcher.fetch_infodoc_index = orig["index"]
-        service.StelladbFetcher.fetch_trekker = orig["trekker"]
-        service.GoogleDocFetcher.fetch_presets = orig["presets"]
-        shutil.rmtree(cache_dir, ignore_errors=True)
+            # F9 表交集查询（原 F12/F14 迁移为表语义）：fixture 表经 load_team_table 注入
+            fixture_table = {"rows": F_FIXTURE_ROWS, "report": {"invalid_rows": []}}
+            with unittest.mock.patch.object(service, "load_team_table", return_value=fixture_table):
+                hit_single = service.find_team_rows([156])
+                hit_multi = service.find_team_rows([156, 149])
+                miss_single = service.find_team_rows([141])
+                miss_multi = service.find_team_rows([141, 126])
+            check("F9 表交集查询（单角色命中/双角色交集/未命中空列表）",
+                  len(hit_single) == 1 and len(hit_multi) == 1
+                  and hit_multi[0]["main_key"] == F_FIXTURE_CODE
+                  and miss_single == [] and miss_multi == [])
 
 
 # ===== 节 G：直发端到端（核心用例精简版） =====
@@ -566,9 +548,67 @@ def run_query_how_section() -> None:
 async def run_direct_send() -> None:
     print("--- G 直发端到端 ---")
 
+    # ===== G 节 fixture 表衔接：monkeypatch service.load_team_table 返回 fixture 表
+    # dict（rows+report），handle_how 真实路径经 load_team_table 即得 fixture——不写磁盘。
+    # 未关联行（guide_ref=None）只出队名+成员+预设码骨架；G29 小禾+格芮行挂真实
+    # Terra Mark (S. Coronis Ver.) guide_ref，验证按区块抓取真实离线数据。
+    import unittest.mock
+
+    def _fixture_row(slots: list, *, code: str | None = None, guide_ref: dict | None = None, rotation: str = "") -> dict:
+        """构造单行 fixture 表行（行结构 = team_table.json 行契约）。"""
+        return {
+            "main_key": code or f"fixture::{slots[0]['en']}",
+            "preset_code": code,
+            "element": "terra",
+            "slots": slots,
+            "team_name_preset": "Original Terra Mark",
+            "team_name_infodoc": "Terra Mark (S. Coronis Ver.)",
+            "guide_ref": guide_ref,
+            "rotation": rotation,
+        }
+
+    _CODE_A = "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw"
+    g_fixture_table = {
+        "rows": [
+            # 夏花单角色行（G1/G4/G5/G8/G10-G18/G26/G27）
+            _fixture_row(
+                [{"char_id": 133, "en": "Nazuka", "cn": "夏花"},
+                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
+                code=_CODE_A, rotation="夏花循环手法测试",
+            ),
+            # 猫眼单角色行（G11）
+            _fixture_row(
+                [{"char_id": 114, "en": "Chaton", "cn": "猫眼"},
+                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
+            ),
+            # 夏花+小禾同行（G9 联合查询交集命中）
+            _fixture_row(
+                [{"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                 {"char_id": 133, "en": "Nazuka", "cn": "夏花"},
+                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
+            ),
+            # 小禾+格芮 Terra Mark 行（G9c 双本角色标签，挂真实离线区块）
+            _fixture_row(
+                [{"char_id": 156, "en": "Nazuna", "cn": "小禾"},
+                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
+                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
+                code="AAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA",
+                guide_ref={"element": "terra", "block": "Terra Mark (S. Coronis Ver.)"},
+                rotation="小禾格芮循环手法测试",
+            ),
+        ],
+        "report": {"invalid_rows": []},
+    }
+    g_team_table_patch = unittest.mock.patch.object(
+        service, "load_team_table", return_value=g_fixture_table
+    )
+
     # G1 直发成功：stream 正确 + 人格注入 + model=utils 透传（原用例 1+20 合并）
     p, ctx = make_plugin()
     await p.on_load()
+    g_team_table_patch.start()
     llm, send = ctx.llm, ctx.send
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g1")
     check("G1 直发成功且引导调 wait 禁 reply",
@@ -637,6 +677,33 @@ async def run_direct_send() -> None:
           and "mock LLM 攻略成品" in str(ret.get("content", ""))
           and len(send.sent) == n_sent)
     p._plugin_config_instance.query.direct_send = True
+
+    # G9c 未命中（Task 3 硬约束）：单角色表未命中 → 直接"未找到相关攻略。"，
+    # 无整页资料、不走 LLM、不直发（用户裁定 4：不回退整页、不降级）
+    n_sent = len(send.sent)
+    n_llm = len(llm.calls)
+    r_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9c")
+    check("G9c 单角色表未命中→未找到（无整页资料+不走LLM+不直发）",
+          r_miss == {"name": "stellasora_how", "content": "未找到相关攻略。"}
+          and "配队" not in str(r_miss.get("content", ""))
+          and len(llm.calls) == n_llm and len(send.sent) == n_sent)
+
+    # G9d 未命中（多角色交集为空）→ 同样直接"未找到相关攻略。"
+    n_sent = len(send.sent)
+    n_llm = len(llm.calls)
+    r_miss2 = await p.handle_how(query="夏花", question="夏花 猫眼 配队", group_id="g1", stream_id="stream_g9d")
+    check("G9d 多角色交集为空→未找到（无整页资料+不走LLM+不直发）",
+          r_miss2 == {"name": "stellasora_how", "content": "未找到相关攻略。"}
+          and "配队" not in str(r_miss2.get("content", ""))
+          and len(llm.calls) == n_llm and len(send.sent) == n_sent)
+
+    # G9e presets=true 直发：资料含"预设码："行（码原文）——透传至 LLM prompt
+    n_sent = len(send.sent)
+    await p.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_g9e")
+    check("G9e presets=true 资料+prompt 含预设码行",
+          len(send.sent) == n_sent + 1
+          and "预设码：" in llm.calls[-1]["prompt"]
+          and "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in llm.calls[-1]["prompt"])
 
     # G10-G12 去重守卫：同流同 query 拦截 / 不同 query 放行 / 窗口过期放行
     # dedup_window=60：G10 的拦截断言依赖默认 60s 窗口生效
@@ -860,6 +927,54 @@ async def run_direct_send() -> None:
           and "空白响应降级资料" in str(r28.get("content", ""))
           and "未找到相关攻略" not in str(r28.get("content", "")))
 
+    # G29-G30 表缓存 reload 接线（Task 3）：同步产出新统一表后 reload_team_table()
+    # 使运行时表缓存即时失效——手动 /st_update 与每日 17:00 定时两通道均须接线。
+    # plugin 以 from service import reload_team_table 绑定，故补丁挂在 plug 命名空间
+    g29_calls: list = []
+    g29_patch = unittest.mock.patch.object(plug, "reload_team_table", side_effect=lambda: g29_calls.append(True))
+    g29_patch.start()
+    try:
+        # G29 手动更新通道：handle_update（授权路径）同步成功后调用 reload
+        p29, ctx29 = make_plugin()
+        await p29.on_load()
+        orig_sync29 = plug.sync_offline_data
+        plug.sync_offline_data = lambda **kwargs: {"status": "ok"}
+        try:
+            n_reloads = len(g29_calls)
+            await p29.handle_update(stream_id="stream_g29", group_id="any_group")
+            check("G29 handle_update 同步后调用 reload_team_table", len(g29_calls) == n_reloads + 1)
+        finally:
+            plug.sync_offline_data = orig_sync29
+
+        # G30 定时同步通道：_schedule_daily_sync 内 sync 完成后调用 reload
+        p30, ctx30 = make_plugin(ttl=3600)
+        orig_sync30 = plug.sync_offline_data
+        plug.sync_offline_data = lambda **kwargs: {"status": "ok"}
+        delays = [0.05, 3600.0]
+
+        def mock_calc_delay(*args, **kwargs):
+            return delays.pop(0) if delays else 3600.0
+
+        orig_calc30 = p30._calculate_delay_to_sync
+        p30._calculate_delay_to_sync = mock_calc_delay
+        n_reloads30 = len(g29_calls)
+        try:
+            await p30.on_load()
+            await asyncio.sleep(0.2)
+            check("G30 _schedule_daily_sync 同步后调用 reload_team_table",
+                  len(g29_calls) == n_reloads30 + 1,
+                  f"reload 次数={len(g29_calls)}（前值 {n_reloads30}）")
+        finally:
+            plug.sync_offline_data = orig_sync30
+            p30._calculate_delay_to_sync = orig_calc30
+            if p30._sync_task and not p30._sync_task.done():
+                p30._sync_task.cancel()
+                await asyncio.gather(p30._sync_task, return_exceptions=True)
+    finally:
+        g29_patch.stop()
+        g_team_table_patch.stop()
+        service.reload_team_table()
+
 
 # ===== 节 H：输出格式（verbatim trust + infodoc 输出规则） =====
 
@@ -1035,6 +1150,11 @@ async def run_manual_update() -> None:
         return {"status": "ok"}
 
     plug.sync_offline_data = mock_sync_offline_data
+    # Task 3 reload 接线：手动更新同步成功后 reload_team_table() 失效表缓存
+    # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
+    reload_calls: list = []
+    orig_reload = plug.reload_team_table
+    plug.reload_team_table = lambda: reload_calls.append(True)
     try:
         # 准备缓存测试文件与内存数据
         answers_dir = p._cache_dir_ready() / "answers"
@@ -1051,8 +1171,11 @@ async def run_manual_update() -> None:
         check("K11 发送开始与完成两批提示消息", len(ctx.send.sent) >= 2 and any("正在后台同步" in t[1] for t in ctx.send.sent) and any("同步完成" in t[1] for t in ctx.send.sent))
         check("K12 磁盘 answers 缓存被清空", not dummy_file.exists())
         check("K13 内存 answers 缓存被清空", len(cache_mgr._memory_cache) == 0)
+        check("K20 同步后调用 reload_team_table 失效表缓存", len(reload_calls) == 1)
+        service.reload_team_table()
     finally:
         plug.sync_offline_data = orig_sync
+        plug.reload_team_table = orig_reload
 
     # 4. 同步异常降级
     def mock_sync_fail(**kwargs):
@@ -1152,6 +1275,11 @@ async def run_daily_sync_schedule() -> None:
         return {"status": "ok"}
 
     plug.sync_offline_data = mock_sync_offline_data
+    # Task 3 reload 接线：定时同步产出新统一表后 reload_team_table() 失效表缓存
+    # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
+    reload_calls: list = []
+    orig_reload = plug.reload_team_table
+    plug.reload_team_table = lambda: reload_calls.append(True)
     p, ctx = make_plugin(ttl=3600)
 
     # 模拟 delay 序列：第一次返回 0.05 秒触发同步，后续返回 3600 秒防空转
@@ -1184,6 +1312,8 @@ async def run_daily_sync_schedule() -> None:
         check("L6 后台任务触发 sync_offline_data(sync_all=True)", len(sync_called) >= 1 and sync_called[0].get("sync_all") is True)
         check("L7 同步后 answers 磁盘缓存被清空", not dummy_file.exists())
         check("L8 同步后 answers 内存缓存被清空", len(cache_mgr._memory_cache) == 0)
+        check("L11 定时同步完成后调用 reload_team_table 失效表缓存", len(reload_calls) >= 1)
+        service.reload_team_table()
 
         # 3. on_unload 优雅注销与取消
         task_ref = p._sync_task
@@ -1192,6 +1322,7 @@ async def run_daily_sync_schedule() -> None:
         check("L10 后台任务被成功取消并完成 (done)", task_ref is not None and task_ref.done())
     finally:
         plug.sync_offline_data = orig_sync
+        plug.reload_team_table = orig_reload
         p._calculate_delay_to_sync = orig_calc
         if p._sync_task and not p._sync_task.done():
             p._sync_task.cancel()
@@ -1514,7 +1645,7 @@ SECTIONS = {
     "C": ("术语替换等价性", run_term_replace),
     "D": ("中文别名覆盖", run_overrides),
     "E": ("索引页抓取", run_fetcher_index),
-    "F": ("how 双页切分", run_query_how_section),
+    "F": ("how 表驱动查询", run_query_how_section),
     "G": ("直发端到端", run_direct_send),
     "H": ("输出格式", run_output_format),
     "I": ("非阻塞探针", run_nonblocking),
