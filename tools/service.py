@@ -327,6 +327,11 @@ def _split_cells(line: str) -> list:
     return [c.strip() for c in line.split(" | ") if c.strip()]
 
 
+def _split_cells_keep_empty(line: str) -> list[str]:
+    """按 ' | ' 切分，对每个 segment 执行 strip，保留中间与首部空字符串（emblem 分支专用）。"""
+    return [c.strip() for c in line.split(" | ")]
+
+
 def _parse_block_body(block_lines: list, name_res: list) -> tuple:
     """解析单支队伍区块体 → (members, roles, segments)（单区块版结构化解析引擎）。
 
@@ -350,15 +355,14 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
     seg: Optional[dict] = None
     mode = "normal"           # normal | disc | emblem | pot
     emblem_cols: list = []    # 纹章列模板（None = 空列）
-    emblem_cursor = 0         # 下一个待填充的非空列索引（轮转发牌）
-    emblem_overflow: list = []  # 保留字段：防御性兼容（当前逻辑不使用）
-    emblem_pending = None
+    col_affix_idx: dict[int, int] = {}  # 列索引 k -> Affix 行词条格在 cs 中的绝对下标 j
+    emblem_band_anchor: Optional[int] = None  # 横向列带首个词条绝对下标锚点
+    band_col_start: int = 0   # 横向列带起始列号（右侧列带延续）
 
     def _flush_emblem_into(target: Optional[dict]) -> None:
         """把 emblem 转置按 70/80/90 级写入目标角色段。
 
-        溢出行按"轮转发牌"模型接续到非空列（实测 aqua 页 Suntide 段
-        row126→70级列、row127→90级列、row195→80级列），无"未标注"情况。
+        各列按网格绝对列索引与横向列带延续分派，保持 70/80/90 级或无需升级格式。
         """
         grade_labels = ["70级", "80级", "90级"]
         if target is None:
@@ -370,10 +374,11 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
             else:
                 target["emblem"].append(f"{label}：无需升级")
         emblem_cols.clear()
+        col_affix_idx.clear()
 
     def _close_segment() -> None:
         """结束当前角色段：冲刷纹章转置并入队。"""
-        nonlocal seg, mode
+        nonlocal seg, mode, emblem_band_anchor, band_col_start
         if seg is not None and seg.get("en"):
             _flush_emblem_into(seg)
             segments[seg["en"]] = seg
@@ -382,6 +387,8 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
                 roles[seg["en"]] = "主控位" if len(members) == 1 else "支援位"
         seg = None
         mode = "normal"
+        emblem_band_anchor = None
+        band_col_start = 0
 
     for line in block_lines:
         low = line.lower()
@@ -406,10 +413,11 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
         if "recommended main discs" in low:
             mode = "disc"
             continue
-        if "emblem" in low and len(line) <= 60:
+        # 放宽长度阈值至 120 以容纳网格展开后的占位空段（如 " | | | Optional Potentials | Emblem"）
+        if "emblem" in low and len(line) <= 120:
             mode = "emblem"
             continue
-        if re.match(r"^\s*(?:Priority|Optional) Potentials\b", line, re.IGNORECASE):
+        if re.match(r"^\s*(?:Priority|Optional) Potentials\b", line.lstrip(" |"), re.IGNORECASE):
             _close_segment()
             mode = "pot"
             continue
@@ -437,55 +445,118 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
 
         # 段内数据行分派
         if mode == "disc":
-            seg["discs"].append(line)
+            seg["discs"].append(" | ".join(_split_cells(line)))
             continue
         if mode == "emblem":
-            first_is_affix = cells and cells[0].lower() in ("affix priority", "词条优先级")
-            if first_is_affix:
-                emblem_cols = _split_emblem_columns(cells[1:])
-                emblem_overflow = []
-                emblem_pending = None
+            cs = _split_cells_keep_empty(line)
+            non_empty = [c for c in cs if c]
+            # 跳过全空行与纯数字单 cell 行（行号噪声）
+            if not non_empty:
+                continue
+            if len(non_empty) == 1 and non_empty[0].isdigit():
                 continue
 
-            # 数据行分派（Google Sheet 溢出模型，实测 row125-127）：
-            # - Affix 主行的词条进列模板对应等级
-            # - 溢出行（Affix 主行填满后的数据行）按"非空列轮转"接续：
-            #   每对词条填入下一个非空列，对间 cursor 前进，列尾回绕。
-            #   实测 aqua 页 Suntide 段：溢出行 1 对 1 → 70级列（cursor 0 起）；
-            #   跨行 cursor 保持前进（row127 的 Engulfing Tide → 90级列）
-            if any(col is not None for col in emblem_cols):
-                pairs = _split_emblem_columns(cells)
-                has_real = any(p is not None for p in pairs)
-                if has_real:
-                    for p in pairs:
-                        if p is None:
-                            continue
-                        filled = False
-                        for ci in range(emblem_cursor, len(emblem_cols)):
-                            if emblem_cols[ci] is not None:
-                                emblem_cols[ci].append(p if isinstance(p, str) else p[0])
-                                emblem_cursor = ci + 1
-                                filled = True
-                                break
-                        if not filled:
-                            # cursor 后无非空列 → 回绕到最前（溢出条目超过列容量）
-                            for ci in range(len(emblem_cols)):
-                                if emblem_cols[ci] is not None:
-                                    emblem_cols[ci].append(p if isinstance(p, str) else p[0])
-                                    emblem_cursor = ci + 1
-                                    filled = True
-                                    break
-                    continue
+            first_is_affix = non_empty[0].lower() in ("affix priority", "词条优先级")
+            if first_is_affix:
+                L = cs.index(non_empty[0])
+                emblem_cols = []
+                col_affix_idx = {}
+                emblem_band_anchor = None
+                band_col_start = 0
+                j = L + 1
+                k = 0
+                while j < len(cs):
+                    c = cs[j]
+                    if not c:
+                        j += 1
+                        continue
+                    if _EMPTY_EMBLEM_RE.match(c):
+                        emblem_cols.append(None)
+                        col_affix_idx[k] = j
+                        k += 1
+                        j += 1
+                    elif j + 1 < len(cs) and _EMBLEM_VALUE_RE.match(cs[j + 1]):
+                        emblem_cols.append([f"{c} {cs[j + 1]}".strip()])
+                        col_affix_idx[k] = j
+                        k += 1
+                        j += 2
+                    else:
+                        emblem_cols.append([c])
+                        col_affix_idx[k] = j
+                        k += 1
+                        j += 1
+                continue
+
+            # 数据行分派
+            if not emblem_cols:
+                continue
+
+            # 提取所有非空、非纯数字的词条格 (j, cs[j]) 及其数值格 cs[j+1]
+            pairs = []
+            j = 0
+            while j < len(cs):
+                c = cs[j]
+                if c and not c.isdigit() and not _EMBLEM_VALUE_RE.match(c):
+                    val = cs[j + 1] if j + 1 < len(cs) and _EMBLEM_VALUE_RE.match(cs[j + 1]) else ""
+                    entry = f"{c} {val}".strip() if val else c
+                    pairs.append((j, entry))
+                    j += 2 if val else 1
+                else:
+                    j += 1
+
+            if not pairs:
+                continue
+
+            idx_to_col = {v: k for k, v in col_affix_idx.items()}
+
+            is_arithmetic = False
+            if len(pairs) >= 1:
+                diffs = [pairs[i + 1][0] - pairs[i][0] for i in range(len(pairs) - 1)]
+                is_arithmetic = all(d == 2 for d in diffs)
+
+            for j_pos, entry in pairs:
+                if j_pos in idx_to_col:
+                    k = idx_to_col[j_pos]
+                    if emblem_cols[k] is None:
+                        emblem_cols[k] = [entry]
+                    else:
+                        emblem_cols[k].append(entry)
+                elif is_arithmetic:
+                    if emblem_band_anchor is not None and j_pos >= emblem_band_anchor:
+                        pass
+                    else:
+                        emblem_band_anchor = pairs[0][0]
+                        band_col_start = max(0, len(emblem_cols) - len(pairs))
+                    k = band_col_start + (j_pos - emblem_band_anchor) // 2
+                    if k < len(emblem_cols):
+                        if emblem_cols[k] is None:
+                            emblem_cols[k] = [entry]
+                        else:
+                            emblem_cols[k].append(entry)
+                    else:
+                        logger.warning("无法定位纹章列索引 k=%d（列上限 %d），追加至末列：%s", k, len(emblem_cols) - 1, entry)
+                        if emblem_cols[-1] is None:
+                            emblem_cols[-1] = [entry]
+                        else:
+                            emblem_cols[-1].append(entry)
+                else:
+                    logger.warning("纹章数据行格子下标非等差带且未命中列锚点（j=%d），追加至末列：%s", j_pos, entry)
+                    if emblem_cols[-1] is None:
+                        emblem_cols[-1] = [entry]
+                    else:
+                        emblem_cols[-1].append(entry)
+            continue
+
         if mode == "pot":
             # 潜能数据行（'+3 levels' 结尾的短行）丢弃；叙述行恢复段内描述
             if cells and all(c.endswith("levels") or re.match(r"^[\d.]+%$", c) for c in cells if c):
                 continue
             mode = "normal"
             if seg is not None:
-                seg["description"].append(line)
+                seg["description"].append(" | ".join(_split_cells(line)))
             continue
         # normal：描述文本
-        seg["description"].append(line)
+        seg["description"].append(" | ".join(_split_cells(line)))
 
     _close_segment()
     return members, roles, segments
@@ -700,9 +771,8 @@ def _split_emblem_columns(cells: list) -> list:
 # ---------------------------------------------------------------------------
 # 输出装配层噪声过滤（移植自旧 strip_infodoc_noise，d701800~1:tools/service.py）
 #
-# 警告：过滤**只允许**发生在 segments 已产出的字段值装配进输出文本时——
-# 解析层（_parse_block_body/_split_emblem_columns/_flush_emblem_into）禁止滤噪：
-# 发牌序按噪声占位校准，解析层滤噪会导致转置错位。
+# 说明：解析层已采用网格列索引模型，不再依赖噪声占位校准发牌序，
+# _filter_noise_lines 与 _filter_emblem_entry 保留为输出层兜底。
 # 与旧实现的"Potentials 标签行不在此处删除——parse 需要它们触发模式切换"
 # 依赖意识同源：行标签判断仍完全由解析层消费，本层不触碰任何标签行。
 # ---------------------------------------------------------------------------
