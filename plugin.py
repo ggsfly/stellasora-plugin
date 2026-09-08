@@ -737,25 +737,26 @@ class StellaSoraPlugin(MaiBotPlugin):
     @Tool(
         "stellasora_how",
         description="查询星塔旅人游戏中配队、纹章搭配、秘纹搭配、技能升级优先度等操作指南。"
-                    "输入：角色名或元素名（中文名：水/火/风/地/光/暗）。"
+                    "输入：query 传角色名（可空格分隔多个，如'小禾 格芮'）。"
                     "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
                     "关闭直接发送时返回攻略正文，用 reply 组织回复。"
                     "适用：用户问'XX怎么配队''XX纹章怎么选''XX秘纹推荐''XX先升级什么技能'，"
                     "以及'XX的攻略/怎么玩'时；用户问'XX的完整资料'则改用 stellasora_what。"
                     "注意：仅当用户明确要求'预设码'时才传 presets=true 参数。"
+                    "question 必须传用户原话逐字内容（联合查询识别与'第一个角色'排序依赖原文，缺失时仅能按 query 兜底）。"
                     "同一对象在同一轮只允许调用本组工具中的一个：已调用本工具并收到\u2018已发送\u2019后，不要再调用另一个，直接调 wait。",
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色名或元素名，只传名字本身，不带「攻略」「配队」「秘纹」等后缀词（中/英均可，元素中文名：水/火/风/地/光/暗）",
+                description="角色名，可空格分隔多个（如'小禾 格芮'）；question 缺失时作为兜底归一（中/英均可）",
                 required=True,
             ),
             ToolParameterInfo(
                 name="question",
                 param_type=ToolParamType.STRING,
-                description="用户的原始问题原文（如'夏花的完整攻略'），用于生成贴合问题的回答；无法提取时可不传",
-                required=False,
+                description="用户的原始问题原文，逐字传入（如'小禾 格芮攻略'）——联合查询识别与首个角色排序依赖原文，不可改写或省略",
+                required=True,
             ),
             ToolParameterInfo(
                 name="presets",
@@ -786,10 +787,13 @@ class StellaSoraPlugin(MaiBotPlugin):
         # "第一个角色"依赖问句出现顺序
         found_names = await asyncio.to_thread(find_character_names_ordered, effective_question)
         if not found_names:
-            # 问句未命中角色名：用 query 参数做兜底归一（planner 只传名字本身）
-            res = lookup_term(query)
-            if res and not res.get("not_found") and res.get("cat") == "Character":
-                found_names = [res["cn"]]
+            # 问句未命中角色名：用 query 参数做兜底归一（支持空格分隔多名）
+            for token in query.split():
+                res = lookup_term(token)
+                if res and not res.get("not_found") and res.get("cat") == "Character":
+                    cn = res["cn"]
+                    if cn not in found_names:
+                        found_names.append(cn)
         if not found_names:
             self.ctx.logger.info("how 表查询未命中角色: query=%s question=%s", query, effective_question)
             return {"name": "stellasora_how", "content": "未找到相关攻略。"}

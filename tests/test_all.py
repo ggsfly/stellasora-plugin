@@ -879,6 +879,29 @@ async def run_direct_send() -> None:
           and "预设码：" in llm.calls[-1]["prompt"]
           and "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in llm.calls[-1]["prompt"])
 
+    # G9f-G9h 运行时兼容验证（question 契约改必传 + query 多名兜底）：
+    # SDK 层 required=True 语义未经宿主运行时实测（无宿主环境），handler 层
+    # 优雅降级在此验证——question 缺省（""/None）经 (question or "").strip()
+    # 兜底不抛异常，走 query 归一路径命中角色。
+    ctx.llm, ctx.send = MockLLM(), MockSend()
+    r_qf = await p.handle_how(query="小禾 格芮", question="", group_id="g1", stream_id="stream_g9f")
+    check("G9f question 空串→query 兜底命中双角色（不抛异常+直发+两名入 prompt）",
+          "已直接发送" in r_qf.get("content", "")
+          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
+
+    ctx.llm, ctx.send = MockLLM(), MockSend()
+    r_qg = await p.handle_how(query="小禾 格芮", question=None, group_id="g1", stream_id="stream_g9g")
+    check("G9g question=None→不抛异常且 query 兜底命中（直发+两名入 prompt）",
+          "已直接发送" in r_qg.get("content", "")
+          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
+
+    # G9h 4.3 多名兜底路径：问句无可提取角色名时 query 按空格分词逐个归一
+    ctx.llm, ctx.send = MockLLM(), MockSend()
+    r_qh = await p.handle_how(query="小禾 格芮", question="他俩怎么配队", group_id="g1", stream_id="stream_g9h")
+    check("G9h 问句未命中→query 多名分词兜底命中双角色（直发+两名入 prompt）",
+          "已直接发送" in r_qh.get("content", "")
+          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
+
     # G10-G12 去重守卫：同流同 query 拦截 / 不同 query 放行 / 窗口过期放行
     # dedup_window=60：G10 的拦截断言依赖默认 60s 窗口生效
     p2, ctx2 = make_plugin(dedup=60)
@@ -1197,10 +1220,13 @@ async def run_output_format() -> None:
         service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Ignis character data with Ignis element"
         res = await p3.handle_how(query="赤霞", question="赤霞攻略", group_id="g1", stream_id="s_h3")
         prompt = ctx3.llm.calls[0]["prompt"]
-        # 新版关键词：资料结构约定 + 按问裁剪 + 多队去重
-        missing = [kw for kw in ("本角色", "队友", "配队", "纹章", "去重", "秘纹") if kw not in prompt]
-        check("H2 prompt 含 infodoc 输出规则关键词",
-              not missing and "已直接发送" in res["content"], f"缺少 {missing}")
+        # 新版关键词：分组结构说明（N. 队伍名）+ 队友并集行 + 同级词条合并；
+        # 旧单角色字样（本角色/配队N）随规则 4 改写一并清除
+        missing = [kw for kw in ("队友：", "N. ", "合并为一条", "纹章", "秘纹") if kw not in prompt]
+        leftover = [kw for kw in ("本角色", "配队N（") if kw in prompt]
+        check("H2 prompt 含分组新结构标记且旧单角色字样清除",
+              not missing and not leftover and "已直接发送" in res["content"],
+              f"缺少 {missing} 残留 {leftover}")
     finally:
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
@@ -1270,6 +1296,8 @@ def run_tool_query_desc() -> None:
     print("--- J 工具参数描述 ---")
     attr = "__maibot_component_info__"
     tool_infos: dict = {}
+    tool_descs: dict = {}
+    tool_required: dict = {}
     for name in dir(plug.StellaSoraPlugin):
         func = getattr(plug.StellaSoraPlugin, name, None)
         info = getattr(func, attr, None) if func is not None else None
@@ -1278,13 +1306,32 @@ def run_tool_query_desc() -> None:
             tool_infos[info.name] = {
                 param.name: param.description for param in params if hasattr(param, "name")
             }
+            tool_descs[info.name] = getattr(info, "description", "")
+            tool_required[info.name] = {
+                param.name: getattr(param, "required", False)
+                for param in params if hasattr(param, "name")
+            }
 
     how_params = tool_infos.get("stellasora_how", {})
+    how_desc = tool_descs.get("stellasora_how", "")
+    how_required = tool_required.get("stellasora_how", {})
     desc = how_params.get("query", "")
-    check("J1 how.query 含「只传名字本身」", "只传名字本身" in desc, desc)
-    check("J2 how.query 点出后缀词禁令示例", all(w in desc for w in ("攻略", "配队", "秘纹")))
-    check("J3 how.query 保留元素中文名",
-          all(elem in desc for elem in ("水", "火", "风", "地", "光", "暗")))
+    # J1（契约翻转）：query 由旧"只传名字本身"改为支持空格分隔多名 + 兜底归一
+    check("J1 how.query 多名+兜底归一契约（取代旧'只传名字本身'）",
+          "空格分隔多个" in desc and "兜底归一" in desc and "只传名字本身" not in desc, desc)
+    # J2 工具 description 契约：用途示例（配队/攻略/秘纹）保留；元素名宣称清除；
+    # question 参数 required=True；query description 含多名写法
+    check("J2 how.description 保留用途示例且清除元素名宣称+question 必传",
+          all(w in how_desc for w in ("攻略", "配队", "秘纹"))
+          and "元素" not in how_desc
+          and not any(w in how_desc for w in ("水", "火", "风"))
+          and how_required.get("question") is True
+          and "空格分隔多个" in desc,
+          f"desc={how_desc}, required={how_required}")
+    # J3（契约翻转）：query 不再宣称元素中文名（水/火/风/地/光/暗）
+    check("J3 how.query 清除元素中文名宣称",
+          not any(elem in desc for elem in ("水", "火", "风", "地", "光", "暗"))
+          and "元素" not in desc, desc)
     what_desc = tool_infos.get("stellasora_what", {}).get("query", "")
     check("J4 what.query 描述未受影响", "角色" in what_desc and "装备" in what_desc, what_desc)
 
@@ -1996,6 +2043,32 @@ def run_section_n() -> None:
             and service.find_character_names_ordered("小禾 格芮攻略") == ["小禾", "格芮"],
             f"a={service.find_character_names_ordered('格芮 小禾攻略')!r}, "
             f"b={service.find_character_names_ordered('小禾 格芮攻略')!r}",
+        )
+
+        # N15g 字段筛选触发词（详略词表扩展锁定）：字段问法（纹章）命中触发词表
+        # →detail_ens=None→各成员字段齐全（prompt 4b-4e 的"各成员"语义）——
+        # 双问询角色（小禾/格芮）的纹章行都进 material，不丢第二角色字段
+        mat_g15 = service.query_how_rows(rows_156_149, False, None, "小禾 格芮 纹章")
+        seg_by_member: dict = {}
+        cur_member: str | None = None
+        for ln in mat_g15.split("\n"):
+            mh = re.match(r"^([^（]+)（(?:主控位|支援位)）$", ln)
+            if mh:
+                cur_member = mh.group(1)
+                seg_by_member.setdefault(cur_member, [])
+                continue
+            if cur_member is not None:
+                if ln.startswith("队友：") or re.match(r"^\d+\. ", ln):
+                    cur_member = None
+                else:
+                    seg_by_member[cur_member].append(ln)
+        check(
+            "N15g 字段问法（纹章）双角色字段齐全：纹章行≥2组且两人各含 70级 行",
+            mat_g15.count("纹章推荐：") >= 2
+            and any(l.startswith("70级：") for l in seg_by_member.get("小禾", []))
+            and any(l.startswith("70级：") for l in seg_by_member.get("格芮", [])),
+            f"emblem_cnt={mat_g15.count('纹章推荐：')}, "
+            f"members={ {k: len(v) for k, v in seg_by_member.items()} }",
         )
     finally:
         service.reload_team_table()

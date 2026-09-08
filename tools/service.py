@@ -802,10 +802,12 @@ def query_how_rows(
 
     # 详略策略（用户规则）：问句命中 1-2 角色→仅第一个详述；≥3→全部详述；
     # 含全量触发词（与 prompt 4a 词表一致）→全员详述（不设限，含非问询成员）；
+    # 字段筛选类问法（配队/纹章/秘纹/技能/升级，对应 prompt 4b-4e 的"各成员"
+    # 语义）要求各成员字段齐全，同样不设详略限制；
     # 空角色集→回退 T2 行为（展开行全部 slots 详述，detail_ens=None 表示不设限）
     detail_ens: Optional[set] = None
     if asker_ens:
-        if any(w in question for w in ("完整", "详细", "全部", "所有")) or len(asker_ens) >= 3:
+        if any(w in question for w in ("完整", "详细", "全部", "所有", "配队", "纹章", "秘纹", "技能", "升级")) or len(asker_ens) >= 3:
             detail_ens = None
         else:
             detail_ens = {asker_ens[0]}
