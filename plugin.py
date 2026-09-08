@@ -34,7 +34,7 @@ from service import (  # noqa: E402
     check_permission,
     configure_overrides,
     count_character_names,
-    find_character_names,
+    find_character_names_ordered,
     find_team_rows,
     load_team_table,
     lookup_term,
@@ -782,7 +782,9 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 兜底归一 query 词 → char_id 集 → find_team_rows 交集查询。
         # 单/多角色共用同一链路；表未命中直接"未找到相关攻略"——不回退整页、
         # 不降级单角色、不调旧 query_how（用户裁定 4）。
-        found_names = await asyncio.to_thread(find_character_names, effective_question)
+        # 问句保序提取（含别名预处理，支持多角色）——联合查询详略与
+        # "第一个角色"依赖问句出现顺序
+        found_names = await asyncio.to_thread(find_character_names_ordered, effective_question)
         if not found_names:
             # 问句未命中角色名：用 query 参数做兜底归一（planner 只传名字本身）
             res = lookup_term(query)

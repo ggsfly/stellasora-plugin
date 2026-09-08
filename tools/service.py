@@ -181,12 +181,12 @@ def count_character_names(text: str) -> int:
     return sum(1 for name in _get_lookup().get_character_names() if name in text)
 
 
-def find_character_names(text: str) -> list:
-    """返回 text 中命中的角色名列表（字典原名，长名优先防子串误配）。
+def _scan_character_hits(text: str) -> list:
+    """掩码扫描命中角色：(命中区间首字符索引, 官方名)，按匹配序返回。
 
-    在匹配角色名前先做别名替换预处理（支持 config.overrides.aliases 与
-    data/overrides.json），将玩家俗称/变体映射为官方角色名，避免多角色联合
-    查询识别失败。
+    匹配前先做别名替换预处理（支持 config.overrides.aliases 与
+    data/overrides.json），将玩家俗称/变体映射为官方角色名——替换后的
+    text 即扫描对象，索引为替换后文本的位置（保序语义以此为准）。
 
     命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
     先命中的长名保留、被覆盖区间的短名跳过）。掩码 None = 未占用，
@@ -231,7 +231,7 @@ def find_character_names(text: str) -> list:
         )
         text = pattern.sub(lambda m: alias_map[m.group(0)], text)
 
-    # 3. 匹配角色名并做掩码去重叠
+    # 3. 匹配角色名并做掩码去重叠（记录命中区间首字符索引）
     names = sorted(lookup.get_character_names(), key=len, reverse=True)
     found: list = []
     masked: list = [None] * len(text)  # None = 未占用（修复：之前是字符列表恒非 None）
@@ -244,11 +244,32 @@ def find_character_names(text: str) -> list:
             if idx < 0:
                 break
             if all(m is None for m in masked[idx:idx + len(name)]):
-                found.append(name)
+                found.append((idx, name))
                 for k in range(idx, idx + len(name)):
                     masked[k] = "#"
             start = idx + 1
     return found
+
+
+def find_character_names(text: str) -> list:
+    """返回 text 中命中的角色名列表（字典原名，长名优先防子串误配）。
+
+    在匹配角色名前先做别名替换预处理（支持 config.overrides.aliases 与
+    data/overrides.json），将玩家俗称/变体映射为官方角色名，避免多角色联合
+    查询识别失败。
+
+    命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
+    先命中的长名保留、被覆盖区间的短名跳过）。掩码 None = 未占用，
+    "#" = 已被更长名占用。
+    """
+    return [name for _idx, name in _scan_character_hits(text)]
+
+
+def find_character_names_ordered(text: str) -> list:
+    """返回 text 中命中的角色名列表，按问句首次出现位置升序（保序键=命中
+    区间首字符最小索引，与长度排序/字典遍历序解耦；等长名先后由文本位置
+    唯一决定；每角色最多一次，掩码去重叠语义保留）。"""
+    return [name for _idx, name in sorted(_scan_character_hits(text), key=lambda t: t[0])]
 
 
 def _fit_lines(lines: list, max_length: Optional[int]) -> str:
@@ -752,6 +773,10 @@ def query_how_rows(
     交由上层 LLM Prompt 完成——不读整页、不做元素判定、不做全元素扫描，
     token 消耗随命中队伍规模线性增长。
 
+    详略策略：问句命中 1-2 个角色时仅第一个问询角色详述（其余成员并入"队友"
+    并集行）；≥3 个角色、问句含全量触发词（完整/详细/全部/所有）或未命中
+    角色时全部成员详述。
+
     Args:
         rows: find_team_rows 命中的统一队伍-槽位表行列表
            （含 slots/team_name_*/guide_ref/rotation/preset_code 字段）
@@ -766,12 +791,24 @@ def query_how_rows(
     # replacer 与 lookup 同源：_get_lookup 初始化时构建的共享实例（元组第 5 位）
     replacer = _instances[str(_DATA_DIR)][4]
 
-    # 问句 → "本角色" EN 名集合（find_character_names 含别名预处理，多角色一次提取）
-    asker_ens: set = set()
-    for cn_name in find_character_names(question):
+    # 问句 → 问询角色 EN 名有序 list（保序版提取；多角色详略依赖顺序）
+    asker_ens: list = []
+    for cn_name in find_character_names_ordered(question):
         res = lookup.lookup_term(cn_name)
         if res and res.get("cat") == "Character":
-            asker_ens.add(res["en"])
+            en = res["en"]
+            if en not in asker_ens:
+                asker_ens.append(en)
+
+    # 详略策略（用户规则）：问句命中 1-2 角色→仅第一个详述；≥3→全部详述；
+    # 含全量触发词（与 prompt 4a 词表一致）→全员详述（不设限，含非问询成员）；
+    # 空角色集→回退 T2 行为（展开行全部 slots 详述，detail_ens=None 表示不设限）
+    detail_ens: Optional[set] = None
+    if asker_ens:
+        if any(w in question for w in ("完整", "详细", "全部", "所有")) or len(asker_ens) >= 3:
+            detail_ens = None
+        else:
+            detail_ens = {asker_ens[0]}
 
     # 同元素页文本与同区块结构化结果在本次调用内复用（省 IO/CPU）
     page_cache: Dict[str, str] = {}
@@ -848,6 +885,9 @@ def query_how_rows(
         detailed_ids: set = set()
         for slot in ordered:
             en = slot["en"]
+            if detail_ens is not None and en not in detail_ens:
+                continue  # 非详述成员（含未详述的问询角色）不输出名字行，
+                          # 由下方队友并集扫描 rescue——"其他角色简要说明"
             seg = block.get("segments", {}).get(en) if block else None
             if block is not None and seg is None:
                 # 区块已解析但缺该成员段（关联规则保证 slots ⊆ 区块成员，

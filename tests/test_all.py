@@ -548,8 +548,10 @@ def run_query_how_section() -> None:
             json.dumps({"data": F_FIXTURE_INFODOC}, ensure_ascii=False), encoding="utf-8"
         )
         with unittest.mock.patch.object(service, "_INFODOCS_DIR", infodocs_dir):
-            # F1 组头+成员行：编号队名头+槽位定位标签（主控/支援），只抓命中区块
-            mat_a = service.query_how_rows([row_a], with_presets=False, question="小禾攻略")
+            # F1 组头+成员行：编号队名头+槽位定位标签（主控/支援），只抓命中区块。
+            # 问句含触发词"完整"→两问询角色全详述（详略策略回归；科洛妮丝（新春）
+            # 无区块段，由队友并集 rescue）
+            mat_a = service.query_how_rows([row_a], with_presets=False, question="小禾 格芮完整攻略")
             check("F1 组头+槽位定位标签，不含未命中区块内容",
                   "1. 地系印记 (S. 科洛妮丝 Ver.)" in mat_a
                   and "小禾（主控位）" in mat_a
@@ -566,12 +568,14 @@ def run_query_how_section() -> None:
                   and "70级：" in mat_a and "80级：" in mat_a
                   and "110" in mat_a and "15%" in mat_a)
 
-            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 问询角色排首位，主控珂赛特为队友
+            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 问询角色排首位。
+            # 详略策略（1 角色→仅乙叶详述）：珂赛特/紫槿进队友并集行，主控字段不再渲染
             mat_b = service.query_how_rows([row_b], with_presets=False, question="乙叶攻略")
             check("F3 支援位问询定位正确（锚名≠主控）",
                   "乙叶（支援位）" in mat_b
-                  and "珂赛特（主控位）" in mat_b
-                  and "ZZSUPPNOTE" in mat_b and "ZZMAINNOTE" in mat_b)
+                  and "ZZSUPPNOTE" in mat_b
+                  and "队友：珂赛特（主控位）、紫槿（支援位）" in mat_b
+                  and "ZZMAINNOTE" not in mat_b)
 
             # F4 rotation 直读行内字段；空 rotation 行不产生输出手法块
             check("F4 rotation 行字段直读（行A含/行B无输出手法块）",
@@ -579,7 +583,7 @@ def run_query_how_section() -> None:
                   and "输出手法" not in mat_b)
 
             # F5 预设码行：码原文保真+主控/援护标注，位于组头之后；关闭时不出现
-            mat_p = service.query_how_rows([row_a], with_presets=True, question="小禾攻略")
+            mat_p = service.query_how_rows([row_a], with_presets=True, question="小禾 格芮完整攻略")
             idx_t, idx_c = mat_p.find("1. 地系印记 (S. 科洛妮丝 Ver.)"), mat_p.find("预设码：")
             check("F5 预设码行格式与保序",
                   idx_t > -1 and idx_c > idx_t
@@ -602,11 +606,14 @@ def run_query_how_section() -> None:
                 check("F7 俗称别名提取为官方角色名",
                       "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
                       f"提取结果: {extracted}")
-                mat_d = service.query_how_rows([row_d], with_presets=False, question="春科和猫眼")
-                check("F8 别名问句双问询角色成员行（原F15-4迁移）",
-                      "猫眼（主控位）" in mat_d
-                      and "科洛妮丝（新春）（支援位）" in mat_d
-                      and "ZZCHATDESC" in mat_d and "ZZCORONISDESC" in mat_d)
+                mat_d = service.query_how_rows([row_d], with_presets=False, question="春科 猫眼攻略")
+                # 详略策略（2 角色→仅第一个即别名角色详述）：科洛妮丝（新春）详述
+                # 可观测（别名识别），猫眼（第二问询角色/主控位）进队友并集行
+                check("F8 别名问句首角色详述+第二问询角色进并集（详略策略翻转）",
+                      "科洛妮丝（新春）（支援位）" in mat_d
+                      and "ZZCORONISDESC" in mat_d
+                      and "猫眼（主控位）" in mat_d
+                      and "ZZCHATDESC" not in mat_d)
             finally:
                 service.configure_overrides(aliases={})
 
@@ -1812,7 +1819,9 @@ def run_section_n() -> None:
             r for r in real_table_nb["rows"]
             if r.get("guide_ref") and r["guide_ref"].get("block") == "Terra Mark Amplification"
         ]
-        out_tma = service.query_how_rows(rows_tma, question="小禾攻略")
+        # 问句改三名形（详略策略：3 角色→全员详述），保持 9 行 emblem 的
+        # 噪声过滤验收语义（T1 不回归）
+        out_tma = service.query_how_rows(rows_tma, question="小禾 格芮 缇莉娅攻略")
         out_lines_tma = out_tma.split("\n")
         # 收集渲染输出中的全部 emblem 行（"纹章推荐：" 之后至空行前的等级标签行）
         emblem_rows_tma: list = []
@@ -1921,6 +1930,72 @@ def run_section_n() -> None:
             # fold 区块只有 Nazuna 段——多娜/苍兰缺段成员由队友并集 rescue（不丢弃任何成员）
             and "队友：多娜（支援位）、苍兰（支援位）" in out_fold,
             f"out_fold={out_fold!r}",
+        )
+
+        # N15: 详略策略（真实表，mock 问句）——1-2 角色仅问句第一个详述、
+        # ≥3 全员详述、触发词全员详述、空角色集回退全详述、保序提取
+        service.reload_team_table()
+        rows_156_149 = service.find_team_rows([156, 149])
+
+        # N15a 2 角色（问句第一个=小禾）：仅小禾详述，格芮/缇莉娅等进队友并集行
+        mat_a = service.query_how_rows(rows_156_149, False, None, "小禾 格芮攻略")
+        check(
+            "N15a 详略策略2角色：3组头+仅首问询角色详述+未详述成员进并集行",
+            len(re.findall(r"^\d+\. ", mat_a, flags=re.M)) == 3
+            and "队友：格芮（支援位）、缇莉娅（支援位）" in mat_a
+            and "队友：格芮（支援位）、科洛妮丝（新春）（支援位）" in mat_a
+            and "队友：格芮（主控位）、科洛妮丝（新春）（支援位）、岭川（支援位）" in mat_a
+            and "技能升级优先度：1/10/1/10 (主技能 > 终极技)" in mat_a,
+            f"mat_a={mat_a!r}",
+        )
+
+        # N15b 反序（问句第一个=格芮）：格芮详述、小禾进并集行（保序决胜）
+        mat_b = service.query_how_rows(rows_156_149, False, None, "格芮 小禾攻略")
+        check(
+            "N15b 详略策略反序：格芮详述（组3主控头）+小禾进并集行",
+            "格芮（支援位）" in mat_b
+            and "格芮（主控位）" in mat_b
+            and "技能升级优先度：无需升级" in mat_b
+            and "队友：小禾（主控位）、缇莉娅（支援位）" in mat_b
+            and "队友：小禾（支援位）、科洛妮丝（新春）（支援位）、岭川（支援位）" in mat_b,
+            f"mat_b={mat_b!r}",
+        )
+
+        # N15c 3 角色全详述：TMA 组 3 成员 × 3 等级 = 9 行纹章（同 N13）
+        rows_tma15 = [
+            r for r in service.load_team_table()["rows"]
+            if r.get("guide_ref") and r["guide_ref"].get("block") == "Terra Mark Amplification"
+        ]
+        mat_c = service.query_how_rows(rows_tma15, False, None, "小禾 格芮 缇莉娅攻略")
+        check(
+            "N15c 详略策略3角色全员详述：emblem 行数==9",
+            sum(1 for ln in mat_c.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
+            f"mat_c={mat_c!r}",
+        )
+
+        # N15d 触发词（2 角色 + "完整"）→ 全员详述：emblem 行数==9
+        mat_d15 = service.query_how_rows(rows_tma15, False, None, "小禾 格芮完整攻略")
+        check(
+            "N15d 详略策略触发词全员详述：emblem 行数==9",
+            sum(1 for ln in mat_d15.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
+            f"mat_d={mat_d15!r}",
+        )
+
+        # N15e 空角色集回退：不设限全详述，不崩且 emblem 行数==9
+        mat_e = service.query_how_rows(rows_tma15, False, None, "攻略")
+        check(
+            "N15e 详略策略空角色集回退全详述：emblem 行数==9",
+            sum(1 for ln in mat_e.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
+            f"mat_e={mat_e!r}",
+        )
+
+        # N15f 保序提取单测：等长名先后由文本位置唯一决定
+        check(
+            "N15f find_character_names_ordered 保序（等长名文本位决定）",
+            service.find_character_names_ordered("格芮 小禾攻略") == ["格芮", "小禾"]
+            and service.find_character_names_ordered("小禾 格芮攻略") == ["小禾", "格芮"],
+            f"a={service.find_character_names_ordered('格芮 小禾攻略')!r}, "
+            f"b={service.find_character_names_ordered('小禾 格芮攻略')!r}",
         )
     finally:
         service.reload_team_table()
