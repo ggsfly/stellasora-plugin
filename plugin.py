@@ -710,20 +710,9 @@ class StellaSoraPlugin(MaiBotPlugin):
             await asyncio.to_thread(count_character_names, effective_question)
         ) < 2
         # 去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）
-        stream_id = self._resolve_stream_id(kwargs)
-        now = time.time()
-        # 清理过期键（含硬上界保护，防多群内存增长，【双审 SH-4】）
-        if len(self._recent_direct) > MAX_DEDUP_ENTRIES:
-            self._recent_direct.clear()
-        else:
-            expired = [k for k, ts in self._recent_direct.items() if now - ts > 10 * self.config.query.dedup_window]
-            for k in expired:
-                del self._recent_direct[k]
-        dedup_key = (stream_id, query)
-        if direct and dedup_key in self._recent_direct and (now - self._recent_direct[dedup_key]) < self.config.query.dedup_window:
-            elapsed = int(now - self._recent_direct[dedup_key])
-            self.ctx.logger.info("直发去重拦截: key=%s 距上次=%ds", dedup_key, elapsed)
-            return {"name": "stellasora_what", "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 wait 工具（seconds=5）结束本轮。"}
+        dedup_resp = self._dedup_guard("stellasora_what", query, direct, **kwargs)
+        if dedup_resp is not None:
+            return dedup_resp
         return await self._direct_send(
             tool_name="stellasora_what",
             question=effective_question,
@@ -813,6 +802,30 @@ class StellaSoraPlugin(MaiBotPlugin):
         )
         return await self._send_or_relay(text, effective_question, presets, **kwargs)
 
+    # ===== 去重守卫 =====
+
+    def _dedup_guard(self, tool_name: str, query: str, direct: bool, **kwargs) -> Optional[dict]:
+        """直发去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）。
+
+        返回拦截响应 dict；放行时返回 None。同时清理过期键（含硬上界保护，
+        防多群内存增长，【双审 SH-4】）。
+        """
+        stream_id = self._resolve_stream_id(kwargs)
+        now = time.time()
+        # 清理过期键（含硬上界保护，防多群内存增长，【双审 SH-4】）
+        if len(self._recent_direct) > MAX_DEDUP_ENTRIES:
+            self._recent_direct.clear()
+        else:
+            expired = [k for k, ts in self._recent_direct.items() if now - ts > 10 * self.config.query.dedup_window]
+            for k in expired:
+                del self._recent_direct[k]
+        dedup_key = (stream_id, query)
+        if direct and dedup_key in self._recent_direct and (now - self._recent_direct[dedup_key]) < self.config.query.dedup_window:
+            elapsed = int(now - self._recent_direct[dedup_key])
+            self.ctx.logger.info("直发去重拦截: key=%s 距上次=%ds", dedup_key, elapsed)
+            return {"name": tool_name, "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 wait 工具（seconds=5）结束本轮。"}
+        return None
+
     @staticmethod
     def _resolve_character_ids(names: list) -> list[int]:
         """角色中文名列表 → 去重后的 CharId 列表（经共享查词服务归一）。"""
@@ -837,20 +850,9 @@ class StellaSoraPlugin(MaiBotPlugin):
         query = effective_question
         direct = self.config.query.direct_send
         # 去重守卫：同流同主题在 dedup_window 内直接拦截（Fix A，【Metis 修订 #7/#8】）
-        stream_id = self._resolve_stream_id(kwargs)
-        now = time.time()
-        # 清理过期键（含硬上界保护，防多群内存增长，【双审 SH-4】）
-        if len(self._recent_direct) > MAX_DEDUP_ENTRIES:
-            self._recent_direct.clear()
-        else:
-            expired = [k for k, ts in self._recent_direct.items() if now - ts > 10 * self.config.query.dedup_window]
-            for k in expired:
-                del self._recent_direct[k]
-        dedup_key = (stream_id, query)
-        if direct and dedup_key in self._recent_direct and (now - self._recent_direct[dedup_key]) < self.config.query.dedup_window:
-            elapsed = int(now - self._recent_direct[dedup_key])
-            self.ctx.logger.info("直发去重拦截: key=%s 距上次=%ds", dedup_key, elapsed)
-            return {"name": "stellasora_how", "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 wait 工具（seconds=5）结束本轮。"}
+        dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
+        if dedup_resp is not None:
+            return dedup_resp
         return await self._direct_send(
             tool_name="stellasora_how",
             question=effective_question,

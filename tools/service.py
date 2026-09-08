@@ -28,8 +28,6 @@ from text_clean import detect_element, strip_game_markup
 
 logger = logging.getLogger("stellasora.service")
 
-ELEMENT_SECTIONS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
-
 # 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
