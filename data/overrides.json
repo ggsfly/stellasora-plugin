@@ -11,12 +11,12 @@
   },
   "team_overrides": {
     "AAAAkAAAAKAAAAB9zbAjBAAwBsBkBqwAKAwA": {
-      "unlink": true,
-      "_comment": "行8：千都世/盛夏薇洛/苍兰 普攻队预设，与 Main Skill 攻略区块解绑"
+      "block": "Chitose (Auto Attack) WIP",
+      "_comment": "行8：千都世/盛夏薇洛/苍兰 普攻队预设，重定向绑定到 Chitose (Auto Attack) WIP 攻略区块"
     },
     "AAAAkAAAAKAAAAB/zbAjDAAwBsBkBqRAAGyA": {
-      "unlink": true,
-      "_comment": "行9：千都世/盛夏薇洛/特丽莎 普攻队预设，与 Main Skill 攻略区块解绑"
+      "block": "Chitose (Auto Attack) WIP",
+      "_comment": "行9：千都世/盛夏薇洛/特丽莎 普攻队预设，重定向绑定到 Chitose (Auto Attack) WIP 攻略区块"
     }
   }
 }
