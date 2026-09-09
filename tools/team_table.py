@@ -32,7 +32,7 @@ logger = logging.getLogger("stellasora.team_table")
 FIXED_ELEMENTS = ["aqua", "ignis", "ventus", "terra", "lux", "umbra"]
 ELEMENT_SECTIONS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
 _LABEL_LINE_RE = re.compile(r"Trekker|Preset Code|Slot", re.IGNORECASE)
-_CODE_LINE_RE = re.compile(r"^[A-Za-z0-9\-_]{20,}$")
+_CODE_LINE_RE = re.compile(r"^[A-Za-z0-9\-_+/]{20,}$")
 
 
 def decode_preset_code(code: str) -> Optional[List[int]]:
@@ -54,15 +54,23 @@ def decode_preset_code(code: str) -> Optional[List[int]]:
 
 
 def parse_presets_doc(text: str) -> List[Dict[str, Any]]:
-    """解析预设文档文本为条目列表。"""
+    """解析预设文档文本为条目列表。
+
+    使用 "Main Trekker" 标签行作为新队伍主标题的确认标志：
+    非标签文本行先暂存为 pending_team，仅在后续遇到 "Main Trekker" 时才提升为
+    current_team；否则视为子标题/版本标签（如 Teresa Version、AoE (Mobbing)），
+    不覆盖当前队名。这样嵌套标题下的预设码行仍归属于主标题队名。
+    """
     current_elem: Optional[str] = None
     current_team, saw_wip = "", False
+    pending_team: Optional[str] = None
     items: List[Dict[str, Any]] = []
 
     for line in text.splitlines():
         s = line.strip()
         if s in ELEMENT_SECTIONS:
             current_elem, current_team, saw_wip = s.lower(), "", False
+            pending_team = None
             continue
         if not current_elem:
             continue
@@ -76,9 +84,19 @@ def parse_presets_doc(text: str) -> List[Dict[str, Any]]:
                 "code": s,
                 "wip": saw_wip or ("WIP" in current_team.upper()),
             })
+            pending_team = None
             continue
-        if not _LABEL_LINE_RE.search(s) and re.search(r"[A-Za-z]", s):
-            current_team, saw_wip = s, False
+        # "Main Trekker" 标签行 → 确认 pending_team 为新队伍主标题
+        if re.search(r"Main\s+Trekker", s, re.IGNORECASE):
+            if pending_team is not None:
+                current_team = pending_team
+                saw_wip = False
+                pending_team = None
+            continue
+        if _LABEL_LINE_RE.search(s):
+            continue
+        if re.search(r"[A-Za-z]", s):
+            pending_team = s
 
     return items
 
@@ -143,13 +161,31 @@ def _make_slots(chars: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
     ]
 
 
+def _load_team_overrides() -> Dict[str, Any]:
+    """从 data/overrides.json 中加载队伍人工修正配置。"""
+    from pathlib import Path
+    import json
+    overrides_path = Path(__file__).resolve().parents[1] / "data" / "overrides.json"
+    if overrides_path.is_file():
+        try:
+            with overrides_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("team_overrides", {})
+        except Exception as e:
+            logger.warning("Failed to load team_overrides from %s: %s", overrides_path, e)
+    return {}
+
+
 def build_team_table(
     presets_text: str,
     infodocs: Dict[str, str],
     lookup: Any,
     index_text: str,
+    team_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """构建全量队伍-槽位统一表。"""
+    if team_overrides is None:
+        team_overrides = _load_team_overrides()
     char_idx: Dict[str, str] = lookup._build_character_index() if hasattr(lookup, "_build_character_index") else {}
     en_names = sorted(list(char_idx.keys()), key=len, reverse=True)
     blocks_by_element = {elem: iter_infodoc_blocks(infodocs.get(elem, ""), en_names) for elem in FIXED_ELEMENTS}
@@ -192,6 +228,17 @@ def build_team_table(
             )
             if scored[0][0] > scored[1][0]:
                 matched_block = scored[0][1]
+
+        # 人工修正层：支持根据预设码显式解绑或重定向攻略区块
+        code_override = team_overrides.get(code, {})
+        if code_override.get("unlink"):
+            matched_block = None
+        elif code_override.get("block"):
+            target_block_name = code_override["block"]
+            for b in blocks_by_element.get(elem, []):
+                if b.get("name") == target_block_name:
+                    matched_block = b
+                    break
 
         team_name_infodoc = matched_block["name"] if matched_block else None
         if matched_block:

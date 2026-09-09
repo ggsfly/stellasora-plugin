@@ -1609,6 +1609,7 @@ Freesia (5★) | 1/1/1/1
     # M8: Sparkla 3 码 -> 3 行同 guide_ref
     sparkla_doc = """Terra
 Sparkla (Rapid Fire) WIP
+\tMain Trekker
 \tPreset Code
 \tAAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw
 \tAAAAjAAAAJwAAABrzbAbAADBgBgMBmAGGGAG
@@ -1663,6 +1664,7 @@ Freesia (5★) | 1/1/1/1
     fake_code = base64.b64encode(struct.pack(">III", 999999, 130, 125) + b"\x00" * 15).decode("utf-8")
     invalid_presets_doc = f"""Aqua
 Fake Team
+\tMain Trekker
 \tPreset Code
 \t{fake_code}
 Ignis
@@ -1689,6 +1691,7 @@ Nazuna special 5-star combo rotation | Flora combo | Wraith combo
     table_rot = team_table.build_team_table(
         """Aqua
 Nazuna Team
+\tMain Trekker
 \tPreset Code
 \tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
 """,
