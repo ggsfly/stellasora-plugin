@@ -31,9 +31,11 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from cache import CacheManager  # noqa: E402
 from service import (  # noqa: E402
+    apply_priority_filter,
     check_permission,
     configure_overrides,
     count_character_names,
+    detect_element_query,
     find_character_names_ordered,
     find_team_rows,
     lookup_term,
@@ -43,48 +45,46 @@ from service import (  # noqa: E402
 )
 from sync_data import sync_offline_data  # noqa: E402
 
-_GAME_KNOWLEDGE_CACHE: Optional[str] = None
-
-
-def _load_game_knowledge() -> str:
-    """加载 docs/game_knowledge.md 游戏机制知识文档（模块级缓存）。
-
-    知识文档是增强项，缺失或读取失败返回空串，保证流程不崩。
-    """
-    global _GAME_KNOWLEDGE_CACHE
-    if _GAME_KNOWLEDGE_CACHE is None:
-        try:
-            doc_path = Path(__file__).resolve().parent / "docs" / "game_knowledge.md"
-            if doc_path.is_file():
-                _GAME_KNOWLEDGE_CACHE = doc_path.read_text(encoding="utf-8")
-            else:
-                _GAME_KNOWLEDGE_CACHE = ""
-        except Exception:
-            _GAME_KNOWLEDGE_CACHE = ""
-    return _GAME_KNOWLEDGE_CACHE
-
-
 logger = logging.getLogger("stellasora.plugin")
 
 # 直发提示词单一事实源文档路径与模块级缓存（修改文档后需重启插件生效）
-_PROMPT_DOC_PATH = Path(__file__).resolve().parent / "docs" / "prompts.md"
-_PROMPT_DOC_CACHE: Optional[str] = None
+# how 与 what 各自独立：how 用 docs/prompts_how.md（含内联游戏知识），what 用 docs/prompts_what.md
+_PROMPT_DOC_PATH_HOW = Path(__file__).resolve().parent / "docs" / "prompts_how.md"
+_PROMPT_DOC_PATH_WHAT = Path(__file__).resolve().parent / "docs" / "prompts_what.md"
+_PROMPT_DOC_CACHE_HOW: Optional[str] = None
+_PROMPT_DOC_CACHE_WHAT: Optional[str] = None
 
 
-def _load_prompt_doc() -> Optional[str]:
-    """加载 docs/prompts.md 直发提示词文档（模块级缓存，单一事实源）。
+def _load_prompt_doc_how() -> Optional[str]:
+    """加载 docs/prompts_how.md 直发提示词文档（模块级缓存，单一事实源）。
 
     提示词文档是直发模式的必需项：缺失或读取失败记录 error 并返回 None
     （不回退内嵌旧文），由 _direct_send 显式处理失败。
     """
-    global _PROMPT_DOC_CACHE
-    if _PROMPT_DOC_CACHE is None:
+    global _PROMPT_DOC_CACHE_HOW
+    if _PROMPT_DOC_CACHE_HOW is None:
         try:
-            _PROMPT_DOC_CACHE = _PROMPT_DOC_PATH.read_text(encoding="utf-8")
+            _PROMPT_DOC_CACHE_HOW = _PROMPT_DOC_PATH_HOW.read_text(encoding="utf-8")
         except Exception as exc:
-            logger.error("加载直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH, exc)
-            _PROMPT_DOC_CACHE = None
-    return _PROMPT_DOC_CACHE
+            logger.error("加载 how 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_HOW, exc)
+            _PROMPT_DOC_CACHE_HOW = None
+    return _PROMPT_DOC_CACHE_HOW
+
+
+def _load_prompt_doc_what() -> Optional[str]:
+    """加载 docs/prompts_what.md 直发提示词文档（模块级缓存，单一事实源）。
+
+    what 工具专用提示词，当前仅含人格注入模块与骨架（其余待补充）。
+    缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
+    """
+    global _PROMPT_DOC_CACHE_WHAT
+    if _PROMPT_DOC_CACHE_WHAT is None:
+        try:
+            _PROMPT_DOC_CACHE_WHAT = _PROMPT_DOC_PATH_WHAT.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.error("加载 what 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_WHAT, exc)
+            _PROMPT_DOC_CACHE_WHAT = None
+    return _PROMPT_DOC_CACHE_WHAT
 
 
 # LLM 加工失败降级回传前缀（单一事实源）：攻略资料本身查询成功、仅回答加工失败时，
@@ -100,7 +100,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.0", description="配置版本")
+    config_version: str = Field(default="1.1.1", description="配置版本")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -164,11 +164,6 @@ class QueryConfig(PluginConfigBase):
         description="直发模式注入 bot 人格与表达风格（读取主程序人格配置，"
         "使成品回答与 bot 口吻一致）；关闭则使用无人格的攻略助手口吻。"
         "回传模式（direct_send=false）恒为客观攻略体，不受此项影响",
-    )
-
-    inject_knowledge: bool = Field(
-        default=True,
-        description="直发模式注入 docs/game_knowledge.md 游戏机制知识（纹章推荐输出格式等）；关闭则不注入",
     )
 
 
@@ -371,11 +366,13 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     # ===== 直接发送模式 =====
 
-    # 说明：直发 Prompt 的单一事实源为 docs/prompts.md（含 {persona_block}/{knowledge_block}/{question}/{material} 占位符与回答规则 1-9），
-    # 由模块级 _load_prompt_doc() 加载（模块级缓存，修改文档后需重启插件生效）；加载失败为 None，
-    # _direct_send 开头显式判 None 返回"未找到相关攻略。"，不回退内嵌旧文。
+    # 直发 Prompt 双模板：how 用 docs/prompts_how.md（含 {persona_block}/{question}/{material} 与内联游戏知识+回答规则 1-9），
+    # what 用 docs/prompts_what.md（当前仅人格注入模块+骨架，其余待补充）。
+    # 由模块级 _load_prompt_doc_how() / _load_prompt_doc_what() 加载（模块级缓存，修改后需重启生效）；
+    # 加载失败为 None，_direct_send 开头显式判 None 返回"未找到相关攻略。"，不回退内嵌旧文。
     # 本 Prompt 为插件自维护文档模板，非 prompts/ 目录模板，不受多语言同步约束。
-    _DIRECT_SEND_PROMPT: Optional[str] = _load_prompt_doc()
+    _DIRECT_SEND_PROMPT_HOW: Optional[str] = _load_prompt_doc_how()
+    _DIRECT_SEND_PROMPT_WHAT: Optional[str] = _load_prompt_doc_what()
 
     async def _config_get_value(self, key: str, default: Any) -> Any:
         """读取宿主全局配置值（Host 返回 {success, value} 结构，解包 value）。"""
@@ -456,9 +453,12 @@ class StellaSoraPlugin(MaiBotPlugin):
         """
         not_found = {"name": tool_name, "content": "未找到相关攻略。"}
 
-        # 提示词单一事实源守卫：docs/prompts.md 加载失败时不静默兜底、不回退内嵌旧文
-        if self._DIRECT_SEND_PROMPT is None:
-            self.ctx.logger.error("直发提示词文档缺失，无法加工攻略，返回未找到")
+        # 提示词双模板选择：how → prompts_how.md，what → prompts_what.md
+        is_what = tool_name.endswith("_what")
+        prompt_template = self._DIRECT_SEND_PROMPT_WHAT if is_what else self._DIRECT_SEND_PROMPT_HOW
+        # 提示词单一事实源守卫：加载失败时不静默兜底、不回退内嵌旧文
+        if prompt_template is None:
+            self.ctx.logger.error("%s 直发提示词文档缺失，无法加工攻略，返回未找到", tool_name)
             return not_found
 
         question = (question or "").strip()
@@ -477,7 +477,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         cache_key = ""
         if direct and self.config.query.answer_cache_ttl > 0:
             inject_persona = self.config.query.inject_persona
-            cache_key = f"{tool_name}|{query}|{question}|{presets}|{self.config.query.llm_model}|{self.config.plugin.config_version}|{inject_persona}|{self.config.query.inject_knowledge}"
+            cache_key = f"{tool_name}|{query}|{question}|{presets}|{self.config.query.llm_model}|{self.config.plugin.config_version}|{inject_persona}"
             cache = self._get_answer_cache()
             cached_answer = cache.get(cache_key)
             if cached_answer:
@@ -524,17 +524,9 @@ class StellaSoraPlugin(MaiBotPlugin):
             )
         else:
             persona_block = ""
-        knowledge_content = (
-            _load_game_knowledge() if self.config.query.inject_knowledge else ""
-        )
-        knowledge_block = (
-            f"【游戏机制知识（回答格式必须遵守）】\n{knowledge_content}\n\n"
-            if knowledge_content
-            else ""
-        )
-        prompt = self._DIRECT_SEND_PROMPT.format(
+        # 游戏知识已内联至 prompts_how.md 正文，无需运行时注入；what 模板无知识块
+        prompt = prompt_template.format(
             persona_block=persona_block,
-            knowledge_block=knowledge_block,
             question=question,
             material=material,  # service._fit_lines 已按 max_length 截断，此处不再硬切片
         )
@@ -720,11 +712,11 @@ class StellaSoraPlugin(MaiBotPlugin):
     @Tool(
         "stellasora_how",
         description="查询星塔旅人游戏中配队、纹章搭配、秘纹搭配、技能升级优先度等操作指南。"
-                    "输入：query 传角色名（可空格分隔多个，如'小禾 格芮'）。"
+                    "输入：query 传角色名（可空格分隔多个，如'小禾 格芮'）；纯属性泛查直接传属性词（如'风队'）。"
                     "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
                     "关闭直接发送时返回攻略正文，用 reply 组织回复。"
                     "适用：用户问'XX怎么配队''XX纹章怎么选''XX秘纹推荐''XX先升级什么技能'，"
-                    "以及'XX的攻略/怎么玩'时；用户问'XX的完整资料'则改用 stellasora_what。"
+                    "以及'XX的攻略/怎么玩'或'X系/属性队'时；用户问'XX的完整资料'则改用 stellasora_what。"
                     "注意：仅当用户明确要求'预设码'时才传 presets=true 参数。"
                     "question 必须传用户原话逐字内容（联合查询识别与'第一个角色'排序依赖原文，缺失时仅能按 query 兜底）。"
                     "同一对象在同一轮只允许调用本组工具中的一个：已调用本工具并收到\u2018已发送\u2019后，不要再调用另一个，直接调 wait。",
@@ -764,7 +756,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         effective_question = (question or "").strip() or query
         # 统一表驱动链路：问句提取角色（含别名预处理，支持多角色）→
         # 兜底归一 query 词 → char_id 集 → find_team_rows 交集查询。
-        # 单/多角色共用同一链路；表未命中直接"未找到相关攻略"。
+        # 问句未命中任何角色时尝试纯属性泛查（如"风队"），仍未命中则"未找到相关攻略"。
         # 问句保序提取——联合查询详略与首角色排序依赖问句出现顺序。
         found_names = await asyncio.to_thread(find_character_names_ordered, effective_question)
         if not found_names:
@@ -775,16 +767,25 @@ class StellaSoraPlugin(MaiBotPlugin):
                     cn = res["cn"]
                     if cn not in found_names:
                         found_names.append(cn)
-        if not found_names:
-            self.ctx.logger.info("how 表查询未命中角色: query=%s question=%s", query, effective_question)
-            return {"name": "stellasora_how", "content": "未找到相关攻略。"}
-        member_ids = await asyncio.to_thread(self._resolve_character_ids, found_names)
-        rows = await asyncio.to_thread(find_team_rows, member_ids)
+        if found_names:
+            member_ids = await asyncio.to_thread(self._resolve_character_ids, found_names)
+            rows = await asyncio.to_thread(find_team_rows, member_ids)
+            miss_desc = f"角色={found_names} member_ids={member_ids}"
+        else:
+            # 纯属性泛查：问句含「元素词+队/系/属性」→ 该元素全量候选行，交优先级过滤
+            element = detect_element_query(effective_question)
+            if not element:
+                self.ctx.logger.info("how 表查询未命中角色且非属性泛查: query=%s question=%s", query, effective_question)
+                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            member_ids = []
+            rows = await asyncio.to_thread(find_team_rows, [], element)
+            miss_desc = f"元素={element}"
         if not rows:
-            self.ctx.logger.info(
-                "how 表未命中: 角色=%s member_ids=%s（交集为空）", found_names, member_ids
-            )
+            self.ctx.logger.info("how 表未命中: %s（交集为空）", miss_desc)
             return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+        # 热门优先过滤（单角色/纯属性泛查统一）：热门全出，热门区块<3 按表序补冷门至 3；
+        # 问句含 全部/所有/完整/详细 时不过滤
+        rows = await asyncio.to_thread(apply_priority_filter, rows, effective_question)
         text = await asyncio.to_thread(
             query_how_rows,
             rows,

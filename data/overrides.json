@@ -18,5 +18,14 @@
       "block": "Chitose (Auto Attack) WIP",
       "_comment": "行9：千都世/盛夏薇洛/特丽莎 普攻队预设，重定向绑定到 Chitose (Auto Attack) WIP 攻略区块"
     }
+  },
+  "team_priorities": {
+    "_comment": "热门（优先展示）队伍区块名，按元素分组。构建时写入 team_table.json 各行 priority 字段；查询层据此过滤。",
+    "aqua": ["Chitose (Main Skill)", "Chitose (Mark DMG) WIP"],
+    "ignis": ["Chaton (Dark Ray)", "Fuyuka (Ultimate)"],
+    "lux": ["Shia (Night Rabbit)", "Shia (Snow Rabbit) WIP"],
+    "terra": ["Terra Mark (S. Coronis Ver.)", "Terra Mark Amplification"],
+    "umbra": ["Firenze (Main Skill)", "Karin (Boss Shark) WIP"],
+    "ventus": ["Eleanor (Supp. Skill) WIP", "Wraith (Melee)"]
   }
 }

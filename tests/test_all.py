@@ -19,6 +19,9 @@
   J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
   K 手动更新指令    —— @Command('st_update') 鉴权拦截、授权后台同步、缓存清空与异常降级
   L 定时自动同步    —— 每日 17:00 等待秒数计算、后台定时调度、同步完成清空缓存、on_unload 优雅取消
+  M 统一队伍-槽位表构建器 —— 解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化
+  N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略
+  P 热门优先级与属性泛查 —— 元素泛查检测、热门过滤组级补齐（<3补冷门至3）、priority 字段固化、端到端集成
 """
 from __future__ import annotations
 
@@ -959,17 +962,13 @@ async def run_direct_send() -> None:
     check("G15 presets 独立缓存键（1→2→命中 2）",
           len(llm18.calls) == 2 and len(send18.sent) == 3)
 
-    # G16 游戏知识注入开关：默认注入标头 / 关闭后不含
+    # G16 游戏知识内联验证：how 模板已内联游戏知识，直发 prompt 恒含知识标头
     p19, ctx19 = make_plugin()
     await p19.on_load()
     llm19 = ctx19.llm
     await p19.handle_how(query="夏花", group_id="g1", stream_id="stream_k19a")
     has_knowledge = "【游戏机制知识（回答格式必须遵守）】" in llm19.calls[0]["prompt"]
-    p19._plugin_config_instance.query.inject_knowledge = False
-    await p19.handle_how(query="夏花", group_id="g1", stream_id="stream_k19b")
-    check("G16 知识注入开关生效",
-          has_knowledge
-          and "【游戏机制知识（回答格式必须遵守）】" not in llm19.calls[-1]["prompt"])
+    check("G16 游戏知识内联 how 模板（恒含知识标头）", has_knowledge)
 
     # G17 llm_model 空串 → generate kwargs 不含 model 键（负路径）
     p20, ctx20 = make_plugin()
@@ -988,45 +987,51 @@ async def run_direct_send() -> None:
           "不要使用任何 markdown 格式" in ctx20.llm.calls[0]["prompt"]
           and "已直接发送" in r22.get("content", ""))
 
-    # G19 提示词单一事实源：docs/prompts.md 加载成功且含关键规则标记（走插件同一加载路径）
+    # G19 提示词单一事实源：docs/prompts_how.md 加载成功且含关键规则标记（走插件同一加载路径）
     p23, ctx23 = make_plugin()
     await p23.on_load()
-    loaded_prompt = plug._load_prompt_doc()
-    check("G19 提示词文档加载成功且含三标记",
+    loaded_prompt = plug._load_prompt_doc_how()
+    check("G19 how 提示词文档加载成功且含三标记",
           isinstance(loaded_prompt, str)
           and "不要使用任何 markdown 格式" in loaded_prompt
           and "2000 字" in loaded_prompt
           and "预设码保持原样" in loaded_prompt)
+    loaded_prompt_what = plug._load_prompt_doc_what()
+    check("G19b what 提示词文档加载成功且含人格占位符",
+          isinstance(loaded_prompt_what, str)
+          and "{persona_block}" in loaded_prompt_what
+          and "{question}" in loaded_prompt_what
+          and "{material}" in loaded_prompt_what)
 
-    # G20-G21 失败路径：monkeypatch 提示词文档路径为不存在并清空模块缓存，
+    # G20-G21 失败路径：monkeypatch how 提示词文档路径为不存在并清空模块缓存，
     # 按插件加载同一路径重新赋值类属性 → _direct_send 返回未找到 + 双路 error 日志
     ctx_logger = logging.getLogger("plugin.ggsfly.stellasora-plugin")  # 与 make_plugin 的 plugin_id 对应
     module_logger = logging.getLogger("stellasora.plugin")
     ctx_handler, module_handler = _ListLogHandler(), _ListLogHandler()
     ctx_logger.addHandler(ctx_handler)
     module_logger.addHandler(module_handler)
-    saved_doc_path = plug._PROMPT_DOC_PATH
-    saved_doc_cache = plug._PROMPT_DOC_CACHE
-    saved_prompt = plug.StellaSoraPlugin._DIRECT_SEND_PROMPT
-    plug._PROMPT_DOC_PATH = Path(tempfile.mkdtemp(prefix="stellasora_g20_")) / "prompts.md"
-    plug._PROMPT_DOC_CACHE = None
-    plug.StellaSoraPlugin._DIRECT_SEND_PROMPT = plug._load_prompt_doc()
+    saved_doc_path_how = plug._PROMPT_DOC_PATH_HOW
+    saved_doc_cache_how = plug._PROMPT_DOC_CACHE_HOW
+    saved_prompt_how = plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW
+    plug._PROMPT_DOC_PATH_HOW = Path(tempfile.mkdtemp(prefix="stellasora_g20_")) / "prompts_how.md"
+    plug._PROMPT_DOC_CACHE_HOW = None
+    plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW = plug._load_prompt_doc_how()
     try:
         ctx23.llm, ctx23.send = MockLLM(), MockSend()
         r23 = await p23._direct_send(
             tool_name="stellasora_how", question="夏花攻略", material="资料",
             direct=True, query="夏花", stream_id="stream_g20",
         )
-        check("G20 提示词文档缺失→未找到且不调 LLM 不发送",
+        check("G20 how 提示词文档缺失→未找到且不调 LLM 不发送",
               r23 == {"name": "stellasora_how", "content": "未找到相关攻略。"}
               and ctx23.llm.calls == [] and ctx23.send.sent == [])
         check("G21 提示词文档缺失记录 error 日志（加载器+守卫双路）",
               any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in module_handler.records)
               and any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in ctx_handler.records))
     finally:
-        plug._PROMPT_DOC_PATH = saved_doc_path
-        plug._PROMPT_DOC_CACHE = saved_doc_cache
-        plug.StellaSoraPlugin._DIRECT_SEND_PROMPT = saved_prompt
+        plug._PROMPT_DOC_PATH_HOW = saved_doc_path_how
+        plug._PROMPT_DOC_CACHE_HOW = saved_doc_cache_how
+        plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW = saved_prompt_how
         ctx_logger.removeHandler(ctx_handler)
         module_logger.removeHandler(module_handler)
 
@@ -1210,7 +1215,6 @@ async def run_output_format() -> None:
 
     # H2 infodoc 输出规则关键词注入（赤霞→Chaton 火队）
     p3, ctx3 = make_plugin()
-    p3._plugin_config_instance.query.inject_knowledge = True
     await p3.on_load()
     ctx3.llm = MockLLM(answer="赤霞攻略纯文本输出")
 
@@ -1328,12 +1332,10 @@ def run_tool_query_desc() -> None:
     # J1（契约翻转）：query 由旧"只传名字本身"改为支持空格分隔多名 + 兜底归一
     check("J1 how.query 多名+兜底归一契约（取代旧'只传名字本身'）",
           "空格分隔多个" in desc and "兜底归一" in desc and "只传名字本身" not in desc, desc)
-    # J2 工具 description 契约：用途示例（配队/攻略/秘纹）保留；元素名宣称清除；
+    # J2 工具 description 契约：用途示例（配队/攻略/秘纹）保留；属性泛查支持宣称（"风队"示例）；
     # question 参数 required=True；query description 含多名写法
-    check("J2 how.description 保留用途示例且清除元素名宣称+question 必传",
-          all(w in how_desc for w in ("攻略", "配队", "秘纹"))
-          and "元素" not in how_desc
-          and not any(w in how_desc for w in ("水", "火", "风"))
+    check("J2 how.description 保留用途示例+属性泛查支持+question 必传",
+          all(w in how_desc for w in ("攻略", "配队", "秘纹", "属性泛查", "风队"))
           and how_required.get("question") is True
           and "空格分隔多个" in desc,
           f"desc={how_desc}, required={how_required}")
@@ -2112,6 +2114,122 @@ def run_section_n() -> None:
         service.reload_team_table()
 
 
+async def run_section_p() -> None:
+    """测试热门优先级过滤与纯属性泛查：元素检测、组级补齐、全量豁免、build priority 固化。"""
+
+    # ---- P1 组：detect_element_query 单测 ----
+    check("P1a 风队→ventus", service.detect_element_query("风队") == "ventus")
+    check("P1b 小桃火队（乱说角色+真实属性）→ignis", service.detect_element_query("小桃火队") == "ignis")
+    check("P1c 土队别名→terra", service.detect_element_query("土队") == "terra")
+    check("P1d 多元素同现按词表序取首个（风水队→aqua）", service.detect_element_query("风水队") == "aqua")
+    check("P1e 无后缀不触发（小火攻略→None）", service.detect_element_query("小火攻略") is None)
+    check("P1f 纯角色问法不触发（夏花攻略→None）", service.detect_element_query("夏花攻略") is None)
+
+    # ---- P2 组：apply_priority_filter 组级补齐（fixture 隔离） ----
+    def _row(key: str, elem: str, block: str | None, priority: bool) -> dict:
+        ref = {"element": elem, "block": block} if block else None
+        return {"main_key": key, "element": elem, "guide_ref": ref, "priority": priority}
+
+    fixture = [
+        _row("hot-a-1", "aqua", "HotA", True),
+        _row("hot-a-2", "aqua", "HotA", True),   # 同区块第二行（组级完整性用）
+        _row("cold-a-1", "aqua", "ColdA", False),
+        _row("cold-a-2", "aqua", "ColdA", False),
+        _row("cold-b-1", "aqua", "ColdB", False),
+        _row("cold-c-1", "aqua", "ColdC", False),
+        _row("orphan-1", "aqua", None, False),   # 孤码行（无 guide_ref）
+    ]
+    kept = service.apply_priority_filter(fixture, "风队")
+    kept_keys = [r["main_key"] for r in kept]
+    check("P2a 热门1区块<3 补冷门至3（HotA+ColdA+ColdB）",
+          kept_keys == ["hot-a-1", "hot-a-2", "cold-a-1", "cold-a-2", "cold-b-1"],
+          f"kept={kept_keys}")
+
+    three_hot = [
+        _row("h1", "aqua", "HotA", True),
+        _row("h2", "aqua", "HotB", True),
+        _row("h3", "aqua", "HotC", True),
+        _row("c1", "aqua", "ColdA", False),
+    ]
+    kept3 = service.apply_priority_filter(three_hot, "风队")
+    check("P2b 热门已满3区块不补冷门", [r["main_key"] for r in kept3] == ["h1", "h2", "h3"],
+          f"kept={[r['main_key'] for r in kept3]}")
+
+    kept_all = service.apply_priority_filter(fixture, "展示全部队伍")
+    check("P2c 全量触发词（全部）豁免过滤", [r["main_key"] for r in kept_all] == [r["main_key"] for r in fixture])
+
+    no_hot = [_row("o1", "aqua", None, False), _row("c1", "aqua", "ColdA", False)]
+    kept_fallback = service.apply_priority_filter(no_hot, "风队")
+    check("P2d 0热门行回退全量", [r["main_key"] for r in kept_fallback] == ["o1", "c1"])
+
+    # ---- P3 组：build_team_table 写入 priority 字段 ----
+    lookup = DictLookup(DATA_DIR)
+    lookup._load()
+    artifact_doc = """Aqua
+Teresa's Team
+\tMain Trekker
+\tPreset Code
+\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
+\tAAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA
+"""
+    infodoc = """Teresa's Team | ⏏ Back to Top ⏏
+Nazuna (5★) | 1/1/1/1
+Donna (5★) | 1/1/1/1
+Freesia (5★) | 1/1/1/1
+⏏ BACK TO TOP ⏏
+"""
+    table_hot = team_table.build_team_table(
+        artifact_doc, {"aqua": infodoc}, lookup, "",
+        team_priorities={"aqua": ["Teresa's Team"]},
+    )
+    table_cold = team_table.build_team_table(
+        artifact_doc, {"aqua": infodoc}, lookup, "",
+        team_priorities={"umbra": ["Nope"]},
+    )
+    check("P3a 命中 team_priorities 的行 priority=True",
+          len(table_hot["rows"]) == 2
+          and table_hot["rows"][0].get("priority") is True
+          and table_hot["rows"][0]["guide_ref"]["block"] == "Teresa's Team"
+          and table_hot["rows"][1].get("priority") is False,
+          f"rows={[ (r['main_key'][:12], r.get('priority')) for r in table_hot['rows'] ]}")
+    check("P3b 未命中 team_priorities 的行 priority=False",
+          all(r.get("priority") is False for r in table_cold["rows"]))
+
+    # ---- P4 组：handle_how 集成（真实表 + 真实离线 infodoc） ----
+    p1, ctx1 = make_plugin()
+    await p1.on_load()
+    ctx1.llm = MockLLM()
+    ctx1.send = MockSend()
+    r_elem = await p1.handle_how(query="风队", question="风队有哪些", group_id="g1", stream_id="stream_p4a")
+    mat_elem = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
+    groups_elem = re.findall(r"(?m)^\d+\. ", mat_elem)
+    check("P4a 纯属性泛查（风队）直发成功且出3队（2热门+1补冷门）",
+          "已直接发送" in r_elem.get("content", "")
+          and len(groups_elem) == 3,
+          f"content={r_elem.get('content', '')!r}, groups={len(groups_elem)}")
+
+    ctx1.llm, ctx1.send = MockLLM(), MockSend()
+    r_char = await p1.handle_how(query="夏花", question="夏花攻略", group_id="g1", stream_id="stream_p4b")
+    mat_char = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
+    groups_char = re.findall(r"(?m)^\d+\. ", mat_char)
+    check("P4b 单角色查询热门<3 补齐至3队",
+          "已直接发送" in r_char.get("content", "") and len(groups_char) == 3,
+          f"groups={len(groups_char)}")
+
+    ctx1.llm, ctx1.send = MockLLM(), MockSend()
+    r_all = await p1.handle_how(query="夏花", question="夏花全部队伍", group_id="g1", stream_id="stream_p4c")
+    mat_all = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
+    groups_all = re.findall(r"(?m)^\d+\. ", mat_all)
+    check("P4c 问句含'全部'豁免过滤（组数>3）",
+          "已直接发送" in r_all.get("content", "") and len(groups_all) > 3,
+          f"groups={len(groups_all)}")
+
+    ctx1.llm, ctx1.send = MockLLM(), MockSend()
+    r_none = await p1.handle_how(query="小火攻略", question="小火攻略", group_id="g1", stream_id="stream_p4d")
+    check("P4d 无角色且无元素后缀→未找到", r_none.get("content") == "未找到相关攻略。" and ctx1.llm.calls == [],
+          f"content={r_none.get('content', '')!r}")
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -2129,11 +2247,12 @@ SECTIONS = {
     "L": ("定时自动同步", run_daily_sync_schedule),
     "M": ("统一队伍-槽位表构建器", run_section_m),
     "N": ("slot 查询服务", run_section_n),
+    "P": ("热门优先级与属性泛查", run_section_p),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
-ASYNC_SECTIONS = {"G", "H", "I", "K", "L"}
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P"]
+ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P"}
 
 
 async def run_async_sections(keys: list) -> None:

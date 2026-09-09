@@ -637,6 +637,74 @@ def find_team_rows(
     return matches
 
 
+# 纯属性泛查元素词表（中文元素字 → team_table 的 element 代码；"土" 为 "地" 俗称）
+_ELEMENT_QUERY_KEYWORDS = {
+    "水": "aqua",
+    "火": "ignis",
+    "光": "lux",
+    "地": "terra",
+    "土": "terra",
+    "暗": "umbra",
+    "风": "ventus",
+}
+
+# 触发属性泛查的队伍类后缀词（元素字必须与其同现才判为属性泛查）
+_ELEMENT_QUERY_SUFFIXES = ("队", "系", "属性")
+
+
+def detect_element_query(text: str) -> Optional[str]:
+    """纯属性泛查检测：文本含「元素词 + 队/系/属性」组合时返回元素代码，否则 None。
+
+    仅在问句未命中任何角色名时调用——风影 等角色名含元素字，由角色提取先行拦截，
+    不会误入本检测。多元素同现（如"风水队"）按词表顺序取首个。
+    """
+    if not any(w in text for w in _ELEMENT_QUERY_SUFFIXES):
+        return None
+    for kw, elem in _ELEMENT_QUERY_KEYWORDS.items():
+        if kw in text:
+            return elem
+    return None
+
+
+def _row_block_key(row: dict) -> Optional[tuple]:
+    """行的区块归组键 (element, block)；无 guide_ref（孤码行）返回 None。"""
+    ref = row.get("guide_ref")
+    if not ref:
+        return None
+    return (row.get("element", ""), str(ref.get("block", "")))
+
+
+def apply_priority_filter(rows: list, question: str) -> list:
+    """按热门优先级（row.priority）过滤命中行——组级过滤，同区块行整组保留。
+
+    统一规则（单角色/多角色/纯属性泛查一致，与 team_priority.txt 标记约定对齐；
+    当前每属性仅 2 个热门队，不补齐则结果过少）：
+    - 问句含全量触发词（全部/所有/完整/详细）→ 不过滤原样返回
+    - 热门行全保留（不做数量上限检查）
+    - 热门区块数 < 3 时按表序补冷门区块至 3 个；0 热门行时回退全量
+      （角色无热门队时不至空结果）
+
+    过滤在 find_team_rows 之后、query_how_rows 之前执行。
+    """
+    if any(w in question for w in ("全部", "所有", "完整", "详细")):
+        return rows
+    hot = [r for r in rows if r.get("priority")]
+    if not hot:
+        return rows
+    # 热门区块不足 3 时按表序补冷门区块（组级补齐，保组完整）
+    keep = {key for key in (_row_block_key(r) for r in hot) if key}
+    for r in rows:
+        if r.get("priority"):
+            continue
+        key = _row_block_key(r)
+        if key is None or key in keep:
+            continue
+        if len(keep) >= 3:
+            break
+        keep.add(key)
+    return [r for r in rows if _row_block_key(r) in keep]
+
+
 def extract_block_by_name(
     infodoc_text: str,
     block_name: str,

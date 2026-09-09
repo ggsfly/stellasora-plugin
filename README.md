@@ -72,8 +72,8 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 ```toml
 [plugin]
-# 升级到 1.1.0 后旧格式直发缓存自动失效；若 config.toml 中钉死 1.0.0，请手动改为 1.1.0 以立即失效旧缓存（或等待 24h TTL 自然过期）
-config_version = "1.1.0"
+# 升级到 1.1.1 后直发成品缓存 key 变更自动失效；若 config.toml 中钉死旧版本号，请手动改为 1.1.1 以立即失效旧缓存（或等待 24h TTL 自然过期）
+config_version = "1.1.1"
 
 [access_control]
 # 鉴权模式：
@@ -112,8 +112,6 @@ llm_model = "utils"
 # 直接发送时注入 bot 人格与表达风格（读取主程序人格配置，成品回答与 bot 口吻一致）；
 # 关闭则使用无人格的攻略助手口吻
 inject_persona = true
-# 直发模式注入 docs/game_knowledge.md 游戏机制知识（纹章推荐输出格式等）；关闭则不注入
-inject_knowledge = true
 
 [overrides]
 # 别名/俗称映射：将别名、俗称、变体写法映射到官方中文名、英文名或条目 ID
@@ -217,12 +215,14 @@ python tools/update_dict.py --mode local --source /path/to/StellaSoraData
 
 ### 提示词文档
 
-直接发送模式的 LLM 提示词以 `docs/prompts.md` 为单一事实源：插件启动时由 `plugin.py` 的
-`_load_prompt_doc()` 读取并缓存于模块级变量，修改该文件后需**重启插件**才能生效。
-文档含 4 个占位符（`persona_block`/`knowledge_block`/`question`/`material`）与回答规则 1-9；
-若文档缺失或读取失败，直发相关查询将返回"未找到相关攻略。"并记录 error 日志。
+直接发送模式的 LLM 提示词按工具分为两份单一事实源，插件启动时由 `plugin.py` 读取并缓存于
+模块级变量，修改后需**重启插件**才能生效；若文档缺失或读取失败，直发相关查询将返回
+"未找到相关攻略。"并记录 error 日志：
 
-- 游戏机制知识文档（`docs/game_knowledge.md`，注入 `{knowledge_block}` 占位符）修改后同样需重启生效。
+- `docs/prompts_how.md`（`stellasora_how` 工具）：含 `persona_block`/`question`/`material`
+  占位符、内联游戏机制知识与回答规则 1-9
+- `docs/prompts_what.md`（`stellasora_what` 工具）：含 `persona_block`/`question`/`material`
+  占位符（当前仅人格注入模块+骨架，回答规则待补充）
 
 ## 关于与致谢
 

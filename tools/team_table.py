@@ -176,16 +176,35 @@ def _load_team_overrides() -> Dict[str, Any]:
     return {}
 
 
+def _load_team_priorities() -> Dict[str, list]:
+    """从 data/overrides.json 中加载热门队伍优先级清单（元素 → 区块名列表）。"""
+    from pathlib import Path
+    import json
+    overrides_path = Path(__file__).resolve().parents[1] / "data" / "overrides.json"
+    if overrides_path.is_file():
+        try:
+            with overrides_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw = data.get("team_priorities", {})
+            return {k: list(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
+        except Exception as e:
+            logger.warning("Failed to load team_priorities from %s: %s", overrides_path, e)
+    return {}
+
+
 def build_team_table(
     presets_text: str,
     infodocs: Dict[str, str],
     lookup: Any,
     index_text: str,
     team_overrides: Optional[Dict[str, Any]] = None,
+    team_priorities: Optional[Dict[str, list]] = None,
 ) -> Dict[str, Any]:
     """构建全量队伍-槽位统一表。"""
     if team_overrides is None:
         team_overrides = _load_team_overrides()
+    if team_priorities is None:
+        team_priorities = _load_team_priorities()
     char_idx: Dict[str, str] = lookup._build_character_index() if hasattr(lookup, "_build_character_index") else {}
     en_names = sorted(list(char_idx.keys()), key=len, reverse=True)
     blocks_by_element = {elem: iter_infodoc_blocks(infodocs.get(elem, ""), en_names) for elem in FIXED_ELEMENTS}
@@ -249,15 +268,18 @@ def build_team_table(
             continue
 
         main_en = valid_resolved[0][1]
+        matched_block_name = matched_block["name"] if matched_block else None
+        is_priority = matched_block_name in team_priorities.get(elem, [])
         rows.append({
             "main_key": code,
             "preset_code": code,
             "element": elem,
             "slots": _make_slots(valid_resolved),
             "team_name_preset": team_name_preset,
-            "team_name_infodoc": team_name_infodoc,
+            "team_name_infodoc": matched_block_name,
             "rotation": extract_rotation(index_text, main_en) if main_en else "",
-            "guide_ref": {"element": elem, "block": matched_block["name"]} if matched_block else None,
+            "guide_ref": {"element": elem, "block": matched_block_name} if matched_block else None,
+            "priority": is_priority,
         })
         preset_count += 1
 
@@ -295,6 +317,7 @@ def build_team_table(
                     "team_name_infodoc": block_name,
                     "rotation": rotation,
                     "guide_ref": {"element": elem, "block": block_name},
+                    "priority": block_name in team_priorities.get(elem, []),
                 })
                 codeless_count += 1
 
