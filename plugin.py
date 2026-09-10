@@ -351,6 +351,23 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._answer_cache._memory_cache.clear()
         self.ctx.logger.info("直发成品缓存已清空")
 
+    def _code_fingerprint(self) -> str:
+        """插件代码指纹（源码/提示词文件最新 mtime 的整秒值）。
+
+        纳入直发成品缓存 key：代码或提示词更新后旧答案自动失效，
+        不再依赖人工 bump config_version（实例事故：过滤逻辑修复后
+        config_version 未变，同 key 命中修复前的 10 队旧答案原样重发）。
+        """
+        root = Path(__file__).resolve().parent
+        latest = 0.0
+        candidates = [root / "plugin.py", *root.glob("tools/*.py"), *root.glob("docs/*.md")]
+        for p in candidates:
+            try:
+                latest = max(latest, p.stat().st_mtime)
+            except OSError:
+                continue
+        return str(int(latest))
+
     def _answer_relevant_fingerprint(self) -> str:
         """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。"""
         c = self.config
@@ -515,7 +532,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         cache_key = ""
         if direct and self.config.query.answer_cache_ttl > 0:
             inject_persona = self.config.query.inject_persona
-            cache_key = f"{tool_name}|{query}|{question}|{presets}|{self.config.query.llm_model}|{self.config.plugin.config_version}|{inject_persona}"
+            cache_key = f"{tool_name}|{query}|{question}|{presets}|{self.config.query.llm_model}|{self.config.plugin.config_version}|{inject_persona}|{self._code_fingerprint()}"
             cache = self._get_answer_cache()
             cached_answer = cache.get(cache_key)
             if cached_answer:
