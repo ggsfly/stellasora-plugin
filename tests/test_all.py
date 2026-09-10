@@ -959,9 +959,16 @@ async def run_direct_send() -> None:
           and send15.sent[0][1] == send15.sent[1][1] == "夏花纹章推荐成品攻略"
           and "已直接发送" in r15b.get("content", ""))
 
+    # G14 配置更新去抖：无答案相关变化 → 保留缓存；相关字段实质变化 → 清缓存
+    await p15.on_config_update(scope="self", config_data={}, version="1.2.3")
+    await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15c")
+    check("G14a 无实质变化的配置更新保留缓存（LLM 仍 1 次）",
+          len(llm15.calls) == 1 and len(send15.sent) == 3)
+
+    p15._plugin_config_instance.query.default_max_length = 12345  # 答案相关字段实质变化（不在缓存 key 内，证明清的是缓存）
     await p15.on_config_update(scope="query", config_data={}, version="1.2.3")
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    check("G14 配置更新清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.sent) == 3)
+    check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.sent) == 4)
 
     # G15 presets 独立缓存键（需要 ttl>0 才有成品缓存行为）
     p18, ctx18 = make_plugin(ttl=86400)
@@ -2259,6 +2266,32 @@ Freesia (5★) | 1/1/1/1
         cm.set(f"k{i}", "v")
     check("P5c 内存条目硬上界（溢出整体清空）", len(cm._memory_cache) <= 128,
           f"len={len(cm._memory_cache)}")
+
+    # ---- P6 组：表缓存 mtime 自愈（外部进程重建表 → 内存缓存自动失效） ----
+    import unittest.mock  # noqa: E402
+
+    fixture_tbl = {"rows": [{"main_key": "a", "priority": False}], "report": {"stats": {}}}
+    fixture_tbl_v2 = {"rows": [{"main_key": "a", "priority": True}], "report": {"stats": {}}}
+    with tempfile.TemporaryDirectory(prefix="stellasora_p6_") as td:
+        presets_dir = Path(td) / "offline" / "presets"
+        presets_dir.mkdir(parents=True)
+        tpath = presets_dir / "team_table.json"
+        tpath.write_text(json.dumps(fixture_tbl), encoding="utf-8")
+        with unittest.mock.patch.object(service, "_DATA_DIR", Path(td)):
+            service.reload_team_table()
+            t1 = service.load_team_table()
+            check("P6a 首次加载磁盘表", t1["rows"][0].get("priority") is False)
+            # 模拟旧缓存：直接改内存缓存值 + 保持 mtime 不变 → 仍命中缓存
+            service._team_table_cache = fixture_tbl_v2
+            check("P6b mtime 未变时信任内存缓存", service.load_team_table()["rows"][0].get("priority") is True)
+            # 外部进程重建：mtime 变化 → 自动重读磁盘（无需 reload_team_table）
+            time.sleep(0.02)
+            tpath.write_text(json.dumps(fixture_tbl), encoding="utf-8")
+            t2 = service.load_team_table()
+            check("P6c mtime 变化自动重读（外部重建自愈）",
+                  t2["rows"][0].get("priority") is False
+                  and service._team_table_cache_mtime is not None)
+    service.reload_team_table()
 
 
 # ===== 汇总入口 =====

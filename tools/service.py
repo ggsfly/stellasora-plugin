@@ -36,6 +36,7 @@ _INFODOCS_DIR = Path(__file__).resolve().parents[1] / "data" / "offline" / "info
 
 # 统一队伍-槽位表缓存（data/offline/presets/team_table.json）
 _team_table_cache: Optional[Dict[str, Any]] = None
+_team_table_cache_mtime: Optional[float] = None
 
 # 模块级单例（按数据目录缓存，避免每次调用重载 8.8MB 字典）；
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
@@ -569,17 +570,29 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
 def load_team_table() -> Dict[str, Any]:
     """加载统一队伍-槽位表（data/offline/presets/team_table.json）。
 
+    缓存绑定文件 mtime 自愈：外部进程（bat 更新脚本/手动重建）覆写表文件后，
+    下次查询自动重读——不依赖插件进程内的 reload_team_table() 调用
+    （实例事故：独立进程重建新表后，运行中进程的内存缓存仍是旧表，
+    priority 字段全空导致热门过滤静默失效）。mtime 为 None 视为测试注入，信任缓存。
+
     缺失或损坏时记录警告日志并返回空表结构 {"rows": [], "report": {}}，
-    不抛出异常。读取成功后缓存于 _team_table_cache。
+    不抛出异常。
     """
-    global _team_table_cache
-    if _team_table_cache is not None:
+    global _team_table_cache, _team_table_cache_mtime
+    table_path = _DATA_DIR / "offline" / "presets" / "team_table.json"
+    try:
+        mtime = table_path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    if _team_table_cache is not None and (
+        _team_table_cache_mtime is None or _team_table_cache_mtime == mtime
+    ):
         return _team_table_cache
 
-    table_path = _DATA_DIR / "offline" / "presets" / "team_table.json"
     if not table_path.is_file():
         logger.warning("team_table.json not found: %s", table_path)
         _team_table_cache = {"rows": [], "report": {}}
+        _team_table_cache_mtime = mtime
         return _team_table_cache
 
     try:
@@ -593,14 +606,15 @@ def load_team_table() -> Dict[str, Any]:
     except Exception as e:
         logger.warning("Failed to load team_table.json: %s", e)
         _team_table_cache = {"rows": [], "report": {}}
-
+    _team_table_cache_mtime = mtime
     return _team_table_cache
 
 
 def reload_team_table() -> None:
     """清除统一队伍-槽位表缓存，强制下次查询重新读盘。"""
-    global _team_table_cache
+    global _team_table_cache, _team_table_cache_mtime
     _team_table_cache = None
+    _team_table_cache_mtime = None
 
 
 def preheat_services() -> None:

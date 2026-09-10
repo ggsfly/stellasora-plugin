@@ -220,6 +220,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
         self._sync_task: asyncio.Task[Any] | None = None
         self._preheat_task: asyncio.Task[None] | None = None
+        self._answer_cfg_fp: str = ""  # 答案相关配置指纹（on_config_update 去抖）
 
     # ===== 生命周期 =====
 
@@ -297,6 +298,8 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._apply_overrides_config()
+        # 答案相关配置指纹基线：加载后的首次空更新不清缓存
+        self._answer_cfg_fp = self._answer_relevant_fingerprint()
         self._sync_task = asyncio.create_task(self._schedule_daily_sync())
         # 后台预热共享服务（字典 8.8MB 解析+替换器编译+表加载）：消除首次查询秒级冷启动
         self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
@@ -319,11 +322,23 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def on_config_update(
         self, scope: str, config_data: dict, version: str
     ) -> None:
-        """配置热重载：黑白名单、overrides 与查询参数即时生效，无需重启。"""
+        """配置热重载：黑白名单、overrides 与查询参数即时生效，无需重启。
+
+        答案相关配置指纹去抖：宿主会推送 scope=self 的配置更新（WebUI 保存/
+        轮询均可能触发），其中大量为无实质变化的空更新——若每次都清空答案缓存，
+        刚写入的成品秒被清掉，重复问题重复调用 LLM（实例日志证实）。
+        仅当影响答案的配置字段（aliases/replacements/llm_model/inject_persona/
+        default_max_length/config_version）实际变化时才清缓存。
+        """
         self.ctx.logger.info(
             "配置已更新: scope=%s version=%s（黑白名单与自定义覆盖即时生效）", scope, version
         )
         self._apply_overrides_config()
+        fingerprint = self._answer_relevant_fingerprint()
+        if fingerprint == self._answer_cfg_fp:
+            self.ctx.logger.info("配置更新无答案相关变化，保留直发成品缓存")
+            return
+        self._answer_cfg_fp = fingerprint
         # 清空直发成品缓存（防旧配置答案残留）
         answers_dir = self._cache_dir_ready() / "answers"
         if answers_dir.exists():
@@ -335,6 +350,23 @@ class StellaSoraPlugin(MaiBotPlugin):
         if self._answer_cache is not None:
             self._answer_cache._memory_cache.clear()
         self.ctx.logger.info("直发成品缓存已清空")
+
+    def _answer_relevant_fingerprint(self) -> str:
+        """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。"""
+        c = self.config
+        try:
+            aliases = json.dumps(c.overrides.aliases, ensure_ascii=False, sort_keys=True)
+            replacements = json.dumps(c.overrides.replacements, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            aliases = replacements = ""
+        return "|".join((
+            aliases,
+            replacements,
+            c.query.llm_model,
+            str(c.query.inject_persona),
+            str(c.query.default_max_length),
+            c.plugin.config_version,
+        ))
 
     # ===== 内部工具 =====
 
