@@ -39,6 +39,7 @@ from service import (  # noqa: E402
     find_character_names_ordered,
     find_team_rows,
     lookup_term,
+    preheat_services,
     query_how_rows,
     query_what,
     reload_team_table,
@@ -218,6 +219,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._answer_cache: CacheManager | None = None
         self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
         self._sync_task: asyncio.Task[Any] | None = None
+        self._preheat_task: asyncio.Task[None] | None = None
 
     # ===== 生命周期 =====
 
@@ -296,6 +298,8 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._apply_overrides_config()
         self._sync_task = asyncio.create_task(self._schedule_daily_sync())
+        # 后台预热共享服务（字典 8.8MB 解析+替换器编译+表加载）：消除首次查询秒级冷启动
+        self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
         self.ctx.logger.info("星塔旅人插件已加载，缓存目录: %s", self._cache_dir)
 
     async def on_unload(self) -> None:
@@ -304,6 +308,10 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._sync_task.cancel()
             await asyncio.gather(self._sync_task, return_exceptions=True)
         self._sync_task = None
+        if self._preheat_task and not self._preheat_task.done():
+            self._preheat_task.cancel()
+            await asyncio.gather(self._preheat_task, return_exceptions=True)
+        self._preheat_task = None
         self._cache_dir = None
         self._answer_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")
@@ -350,8 +358,8 @@ class StellaSoraPlugin(MaiBotPlugin):
         return self._answer_cache
 
     def _resolve_stream_id(self, kwargs: dict) -> str:
-        """从工具调用 kwargs 提取 stream_id（复用 _direct_send 现有逻辑）。"""
-        return str(kwargs.get("stream_id") or kwargs.get("chat_id") or "")
+        """从工具调用 kwargs 提取 stream_id（直发/去重/未找到发送共用）。"""
+        return (str(kwargs.get("stream_id") or kwargs.get("chat_id") or "")).strip()
 
     def _denied(self, **kwargs) -> bool:
         """黑白名单鉴权。群聊看 group_id，私聊看 user_id。"""
@@ -466,9 +474,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("直接发送模式缺少用户问题，返回未找到")
             return not_found
 
-        stream_id = (
-            str(kwargs.get("stream_id") or "") or str(kwargs.get("chat_id") or "")
-        ).strip()
+        stream_id = self._resolve_stream_id(kwargs)
         if direct and not stream_id:
             self.ctx.logger.warning("直接发送模式缺少 stream_id，无法确定发送目标")
             return not_found
@@ -776,13 +782,13 @@ class StellaSoraPlugin(MaiBotPlugin):
             element = detect_element_query(effective_question)
             if not element:
                 self.ctx.logger.info("how 表查询未命中角色且非属性泛查: query=%s question=%s", query, effective_question)
-                return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+                return await self._send_or_relay("未找到相关攻略。", effective_question, presets, **kwargs)
             member_ids = []
             rows = await asyncio.to_thread(find_team_rows, [], element)
             miss_desc = f"元素={element}"
         if not rows:
             self.ctx.logger.info("how 表未命中: %s（交集为空）", miss_desc)
-            return {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            return await self._send_or_relay("未找到相关攻略。", effective_question, presets, **kwargs)
         # 热门优先过滤（单角色/纯属性泛查统一）：热门全出，热门区块<3 按表序补冷门至 3；
         # 问句含 全部/所有/完整/详细 时不过滤
         rows = await asyncio.to_thread(apply_priority_filter, rows, effective_question)
@@ -834,12 +840,37 @@ class StellaSoraPlugin(MaiBotPlugin):
         return ids
 
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
-        """how 查询的直发/回传公共路径（去重守卫 + LLM 加工）。
+        """how 查询的直发/回传公共路径（未找到直发提示 + 去重守卫 + LLM 加工）。
 
         直发判定由配置 direct_send 决定。
+        未找到语义（用户裁定）：direct_send=true 时不再回传 planner——
+        直接向聊天发送用户可读提示并返回"已发送"确认，planner 只需 wait 结束本轮，
+        避免 planner 拿到否定结果后再组织一轮多余回复；direct_send=false 维持回传。
         """
         query = effective_question
         direct = self.config.query.direct_send
+        stream_id = self._resolve_stream_id(kwargs)
+        # 未找到短路（用户裁定）：不走 LLM 加工、不让 planner 组织否定回复。
+        # 直发模式：提示文本直接发送到聊天，planner 收"已发送"告知只需 wait；
+        # 回传模式：维持原文返回 planner（不直发，replyer 自行组织）。
+        if not (text or "").strip() or "未找到相关攻略" in text:
+            not_found = {"name": "stellasora_how", "content": "未找到相关攻略。"}
+            if not direct:
+                return not_found
+            self.ctx.logger.info("how 未找到，直发模式直接发送提示: stream=%s", stream_id)
+            if stream_id:
+                try:
+                    await self.ctx.send.text("攻略库里没有查到相关内容，换个说法或换个角色试试～", stream_id)
+                except Exception:
+                    self.ctx.logger.exception("how 未找到提示发送异常")
+                    return not_found
+            return {
+                "name": "stellasora_how",
+                "content": (
+                    "已向聊天发送'未找到相关攻略'的提示。你不需要也不应该再调用 reply 工具，"
+                    "请立即调用 wait 工具（seconds=5）结束本轮即可。"
+                ),
+            }
         # 去重守卫：同流同主题在 dedup_window 内直接拦截
         dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
         if dedup_resp is not None:

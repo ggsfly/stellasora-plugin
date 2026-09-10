@@ -12,18 +12,17 @@ CLI 运行时用 data/.cache。
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import json
 import logging
 import re
 import threading
 
-from cache import CacheManager
 from dict_lookup import DictLookup
 from fetcher_google_doc import GoogleDocFetcher
 from fetcher_stelladb import StelladbFetcher, _read_offline_file
-from text_clean import detect_element, strip_game_markup
+from text_clean import strip_game_markup
 import term_replace as _term_replace_module
 
 logger = logging.getLogger("stellasora.service")
@@ -602,6 +601,17 @@ def reload_team_table() -> None:
     """清除统一队伍-槽位表缓存，强制下次查询重新读盘。"""
     global _team_table_cache
     _team_table_cache = None
+
+
+def preheat_services() -> None:
+    """预热共享服务：字典单例（含替换引擎编译）与统一队伍-槽位表。
+
+    供插件 on_load 后台调用——消除首次用户查询的秒级冷启动
+    （字典 8.8MB JSON 解析 + TermReplacer 编译 + 表加载），
+    实例日志证实暖态单次链路仅 0.05-0.3s。
+    """
+    _get_lookup()
+    load_team_table()
 
 
 def find_team_rows(

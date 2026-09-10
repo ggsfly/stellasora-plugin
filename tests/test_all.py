@@ -25,18 +25,16 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncio
 import json
 import logging
 import re
-import shutil
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
-from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -864,24 +862,37 @@ async def run_direct_send() -> None:
           and len(send.sent) == n_sent)
     p._plugin_config_instance.query.direct_send = True
 
-    # G9c 未命中（Task 3 硬约束）：单角色表未命中 → 直接"未找到相关攻略。"，
-    # 无整页资料、不走 LLM、不直发（用户裁定 4：不回退整页、不降级）
+    # G9c 未命中（用户裁定更新）：单角色表未命中 + 直发模式 → 提示文本直接发送到聊天，
+    # 不回传 planner（planner 收到已发送告知 + wait 指引），不走 LLM
     n_sent = len(send.sent)
     n_llm = len(llm.calls)
     r_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9c")
-    check("G9c 单角色表未命中→未找到（无整页资料+不走LLM+不直发）",
-          r_miss == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-          and "配队" not in str(r_miss.get("content", ""))
-          and len(llm.calls) == n_llm and len(send.sent) == n_sent)
+    check("G9c 单角色表未命中→直发模式直接发送提示（不回传planner+不走LLM）",
+          len(send.sent) == n_sent + 1
+          and "没有查到相关内容" in send.sent[-1][1]
+          and "wait 工具" in str(r_miss.get("content", ""))
+          and len(llm.calls) == n_llm,
+          f"r_miss={r_miss}")
 
-    # G9d 未命中（多角色交集为空）→ 同样直接"未找到相关攻略。"
+    # G9d 未命中（多角色交集为空）→ 同样直接发送提示
     n_sent = len(send.sent)
     n_llm = len(llm.calls)
     r_miss2 = await p.handle_how(query="夏花", question="夏花 猫眼 配队", group_id="g1", stream_id="stream_g9d")
-    check("G9d 多角色交集为空→未找到（无整页资料+不走LLM+不直发）",
-          r_miss2 == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-          and "配队" not in str(r_miss2.get("content", ""))
-          and len(llm.calls) == n_llm and len(send.sent) == n_sent)
+    check("G9d 多角色交集为空→直发模式直接发送提示（不回传planner+不走LLM）",
+          len(send.sent) == n_sent + 1
+          and "没有查到相关内容" in send.sent[-1][1]
+          and "wait 工具" in str(r_miss2.get("content", ""))
+          and len(llm.calls) == n_llm,
+          f"r_miss2={r_miss2}")
+
+    # G9d2 回传模式未命中：direct_send=false 维持旧行为（返回"未找到相关攻略。"给 planner，不直发）
+    p._plugin_config_instance.query.direct_send = False
+    n_sent = len(send.sent)
+    r_relay_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9d2")
+    check("G9d2 回传模式未命中→返回planner原文（不直发）",
+          r_relay_miss == {"name": "stellasora_how", "content": "未找到相关攻略。"}
+          and len(send.sent) == n_sent)
+    p._plugin_config_instance.query.direct_send = True
 
     # G9e presets=true 直发：资料含"预设码："行（码原文）——透传至 LLM prompt
     n_sent = len(send.sent)
@@ -2226,8 +2237,28 @@ Freesia (5★) | 1/1/1/1
 
     ctx1.llm, ctx1.send = MockLLM(), MockSend()
     r_none = await p1.handle_how(query="小火攻略", question="小火攻略", group_id="g1", stream_id="stream_p4d")
-    check("P4d 无角色且无元素后缀→未找到", r_none.get("content") == "未找到相关攻略。" and ctx1.llm.calls == [],
+    check("P4d 无角色且无元素后缀→直发提示不回传planner（不走LLM）",
+          len(ctx1.send.sent) == 1
+          and "没有查到相关内容" in ctx1.send.sent[0][1]
+          and "wait 工具" in r_none.get("content", "")
+          and ctx1.llm.calls == [],
           f"content={r_none.get('content', '')!r}")
+
+    # ---- P5 组：答案缓存过期驱逐与内存上界 ----
+    from cache import CacheManager  # noqa: E402
+
+    cm = CacheManager(Path(tempfile.mkdtemp(prefix="stellasora_p5_")), ttl_seconds=1)
+    cm.set("k1", "v1")
+    check("P5a 未过期命中", cm.get("k1") == "v1")
+    time.sleep(1.1)
+    check("P5b 过期即驱逐：内存条目删除+磁盘过期文件清理",
+          cm.get("k1") is None
+          and "k1" not in cm._memory_cache
+          and not list(cm.cache_dir.glob("*.json")))
+    for i in range(200):
+        cm.set(f"k{i}", "v")
+    check("P5c 内存条目硬上界（溢出整体清空）", len(cm._memory_cache) <= 128,
+          f"len={len(cm._memory_cache)}")
 
 
 # ===== 汇总入口 =====

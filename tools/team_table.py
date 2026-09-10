@@ -259,16 +259,15 @@ def build_team_table(
                     matched_block = b
                     break
 
-        team_name_infodoc = matched_block["name"] if matched_block else None
+        matched_block_name = matched_block["name"] if matched_block else None
         if matched_block:
-            correlated_block_keys.add((elem, matched_block["name"]))
+            correlated_block_keys.add((elem, matched_block_name))
 
-        if not (team_name_preset or team_name_infodoc):
+        if not (team_name_preset or matched_block_name):
             invalid_rows.append({"code": code, "reason": "缺名字（孤码且未关联到区块）", "detail": item})
             continue
 
         main_en = valid_resolved[0][1]
-        matched_block_name = matched_block["name"] if matched_block else None
         is_priority = matched_block_name in team_priorities.get(elem, [])
         rows.append({
             "main_key": code,

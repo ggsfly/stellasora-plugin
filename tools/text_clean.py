@@ -15,9 +15,6 @@ from typing import Dict, Tuple
 import html as html_module
 import re
 
-# 星塔旅人元素列表（用于从角色页文本中检测元素属性）
-ELEMENTS = {"Aqua", "Ignis", "Ventus", "Terra", "Lux", "Umbra"}
-
 # 表格网格解析正则：Google Sheets 导出的 waffle 结构规整（无嵌套 td），
 # 用 <table>/<tr>/<td>/<th> 边界匹配即可，无需引入完整 HTML 解析器
 _TABLE_RE = re.compile(r"<table[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
@@ -182,11 +179,3 @@ def strip_game_markup(text: str) -> str:
     text = _PARAM_ANNOT_RE.sub("", text)
     text = _PARAM_REF_RE.sub("", text)
     return text
-
-
-def detect_element(text: str) -> str | None:
-    """从角色页文本中检测元素属性。"""
-    for element in ELEMENTS:
-        if element in text:
-            return element
-    return None

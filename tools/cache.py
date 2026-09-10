@@ -4,6 +4,9 @@ import hashlib
 import json
 import time
 
+# 内存缓存条目硬上界：长驻进程中防无界增长（与去重守卫同模式，溢出整体清空）
+_MEMORY_CACHE_MAX = 128
+
 
 class CacheManager:
     def __init__(self, cache_dir: Path, ttl_seconds: int = 3600):
@@ -21,6 +24,7 @@ class CacheManager:
             entry = self._memory_cache[key]
             if time.time() - entry["timestamp"] < self.ttl_seconds:
                 return entry["data"]
+            del self._memory_cache[key]  # 过期即驱逐，防长驻进程内存无界增长
         path = self._get_path(key)
         if path.is_file():
             try:
@@ -29,11 +33,14 @@ class CacheManager:
                 if time.time() - entry["timestamp"] < self.ttl_seconds:
                     self._memory_cache[key] = entry
                     return entry["data"]
+                path.unlink()  # 过期磁盘文件即读即删（每日同步另有全量清空）
             except Exception:
                 pass
         return None
 
     def set(self, key: str, data: str) -> None:
+        if len(self._memory_cache) >= _MEMORY_CACHE_MAX and key not in self._memory_cache:
+            self._memory_cache.clear()
         entry = {"timestamp": time.time(), "data": data}
         self._memory_cache[key] = entry
         path = self._get_path(key)
