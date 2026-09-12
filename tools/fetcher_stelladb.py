@@ -1,5 +1,5 @@
 ﻿from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 import json
 import os
 import time
@@ -16,6 +16,12 @@ _OFFLINE_DIR = Path(__file__).resolve().parent.parent / "data" / "offline"
 
 # 默认代理地址；可通过环境变量 HTTPS_PROXY / HTTP_PROXY 或构造函数 proxy 参数覆盖
 _DEFAULT_PROXY = "http://127.0.0.1:7890"
+
+_SS_DATA_BASE = "https://raw.githubusercontent.com/AutumnVN/ss-data/refs/heads/main"
+_SS_LB_BASE = "https://raw.githubusercontent.com/AutumnVN/ssleaderboard/refs/heads/main"
+
+# 模块级数据集缓存：(文件绝对路径, 数据集名称) -> (mtime, parsed_dict)
+_ssdata_cache: Dict[Tuple[Path, str], Tuple[float, dict]] = {}
 
 
 def _atomic_write(file_path: Path, content: str) -> None:
@@ -50,6 +56,41 @@ def _read_offline_file(file_path: Path) -> Optional[str]:
             elif isinstance(data, str) and data:
                 return data
         return text
+    except Exception:
+        return None
+
+
+def _read_offline_dataset(file_path: Path, name: str) -> Optional[dict]:
+    """读取 ssdata / ssleaderboard 离线持久化 JSON 数据集，带 mtime 模块级缓存。"""
+    if not file_path.is_file():
+        return None
+    try:
+        mtime = file_path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+
+    cache_key = (file_path.resolve(), name)
+    cached = _ssdata_cache.get(cache_key)
+    if cached is not None:
+        cached_mtime, cached_data = cached
+        if cached_mtime == mtime:
+            return cached_data
+
+    try:
+        text = file_path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                _ssdata_cache[cache_key] = (mtime, data)
+                return data
+            # 容错：若文件直接为数据集 dict（无外层包装且非包装字段）
+            if "data" not in payload and "url" not in payload:
+                _ssdata_cache[cache_key] = (mtime, payload)
+                return payload
+        return None
     except Exception:
         return None
 
@@ -266,3 +307,83 @@ class StelladbFetcher:
             if offline_data:
                 return offline_data
         return ""
+
+    def _fetch_json_from_url(self, url: str, retries: int = 1) -> Optional[dict]:
+        """抓取 JSON 数据并解析为 dict（带 1 次重试）。"""
+        for attempt in range(retries + 1):
+            try:
+                req = urllib.request.Request(url, headers=self.headers)
+                with self._opener.open(req, timeout=30) as response:
+                    if response.getcode() == 200:
+                        text = response.read().decode("utf-8")
+                        data = json.loads(text)
+                        if isinstance(data, dict):
+                            return data
+            except Exception:
+                if attempt < retries:
+                    time.sleep(1.5)
+        return None
+
+    def fetch_ssdata_dataset(self, name: str, force_update: bool = False) -> Optional[dict]:
+        """获取 ss-data 数据集（character, disc, gacha, raid, item, word 等），本地优先。"""
+        offline_file = self.offline_dir / "ssdata" / f"{name}.json" if self.offline_dir else None
+        if not force_update and offline_file:
+            offline_data = _read_offline_dataset(offline_file, name)
+            if offline_data is not None:
+                return offline_data
+
+        url = f"{_SS_DATA_BASE}/{name}.json"
+        res = self._fetch_json_from_url(url)
+        if res is not None:
+            if offline_file:
+                payload = {
+                    "url": url,
+                    "name": name,
+                    "timestamp": int(time.time()),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                    mtime = offline_file.stat().st_mtime
+                    _ssdata_cache[(offline_file.resolve(), name)] = (mtime, res)
+                except Exception:
+                    pass
+            return res
+
+        if offline_file:
+            offline_data = _read_offline_dataset(offline_file, name)
+            if offline_data is not None:
+                return offline_data
+        return None
+
+    def fetch_leaderboard_meta(self, force_update: bool = False) -> Optional[dict]:
+        """获取 ssleaderboard 元数据，本地优先。"""
+        offline_file = self.offline_dir / "ssleaderboard" / "meta.json" if self.offline_dir else None
+        if not force_update and offline_file:
+            offline_data = _read_offline_dataset(offline_file, "leaderboard")
+            if offline_data is not None:
+                return offline_data
+
+        url = f"{_SS_LB_BASE}/meta.json"
+        res = self._fetch_json_from_url(url)
+        if res is not None:
+            if offline_file:
+                payload = {
+                    "url": url,
+                    "name": "leaderboard",
+                    "timestamp": int(time.time()),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                    mtime = offline_file.stat().st_mtime
+                    _ssdata_cache[(offline_file.resolve(), "leaderboard")] = (mtime, res)
+                except Exception:
+                    pass
+            return res
+
+        if offline_file:
+            offline_data = _read_offline_dataset(offline_file, "leaderboard")
+            if offline_data is not None:
+                return offline_data
+        return None
