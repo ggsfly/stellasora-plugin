@@ -1493,10 +1493,15 @@ def _build_disc_material(
     st: StelladbFetcher,
     num_id: str,
     lookup: Any,
+    modules: Optional[Collection[str]] = None,
 ) -> Tuple[str, bool]:
     """渲染秘纹官方中文资料（来源于 ss-data 的 disc.json）。
 
     返回 (material_text, True)；若 dataset 缺失或对应 id 不存在则返回 ("", False)。
+    modules 给定（模块化查询）时只渲染 overview（恒出）+ modules 命中的区块
+    （details=面板数值+潜能加成+升级消耗；melody=主技能+副技能+支援旋律），
+    dupe/upgrade 与副技能的条件耦合仅存在于 modules=None 全量路径；
+    modules=None 保持既有全量输出逐字节不变。
     """
     if not st:
         return "", False
@@ -1509,6 +1514,8 @@ def _build_disc_material(
         return "", False
 
     lines: list[str] = []
+
+    # overview：名称/星级/属性/标签/适配角色 恒渲染；模块化查询时补 获取途径（source）
     en_name = disc.get("name", "")
     cn_name = _cn_by_en(lookup, en_name)
     if en_name and en_name != cn_name:
@@ -1537,38 +1544,75 @@ def _build_disc_material(
         if char_cn:
             lines.append(f"适配角色：{'、'.join(char_cn)}")
 
-    main_skill = disc.get("mainSkill")
-    if main_skill and isinstance(main_skill, dict):
-        ms_name = main_skill.get("nameCN") or _cn_by_en(lookup, main_skill.get("name", ""))
-        ms_desc = main_skill.get("descCN") or main_skill.get("desc", "")
-        lines.append(f"【主技能】{ms_name}")
-        if ms_desc:
-            lines.append(f"描述：{ms_desc}")
-        params = main_skill.get("params")
-        if params:
-            if isinstance(params, list):
-                lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
-            else:
-                lines.append(f"数值表：{params}")
+    if modules is not None:
+        # 模块化 overview 扩展字段（缺失省略；source 经字典反查中文名）
+        source = disc.get("source", [])
+        if isinstance(source, list) and source:
+            source_cn = [_cn_by_en(lookup, s) for s in source if s]
+            if source_cn:
+                lines.append(f"获取途径：{'、'.join(source_cn)}")
 
+    # melody 模块（主技能 + 副技能）：副技能判定仅在 modules=None 全量路径用于
+    # dupe/upgrade 的既有条件耦合，模块化路径各区块独立渲染
     has_secondary = False
-    for sec_key, sec_label in [("secondarySkill1", "副技能1"), ("secondarySkill2", "副技能2")]:
-        sec_skill = disc.get(sec_key)
-        if sec_skill and isinstance(sec_skill, dict):
-            has_secondary = True
-            sec_name = sec_skill.get("nameCN") or _cn_by_en(lookup, sec_skill.get("name", ""))
-            sec_desc = sec_skill.get("descCN") or sec_skill.get("desc", "")
-            lines.append(f"【{sec_label}】{sec_name}")
-            if sec_desc:
-                lines.append(f"描述：{sec_desc}")
-            params = sec_skill.get("params")
+    if modules is None or "melody" in modules:
+        main_skill = disc.get("mainSkill")
+        if main_skill and isinstance(main_skill, dict):
+            ms_name = main_skill.get("nameCN") or _cn_by_en(lookup, main_skill.get("name", ""))
+            ms_desc = main_skill.get("descCN") or main_skill.get("desc", "")
+            lines.append(f"【主技能】{ms_name}")
+            if ms_desc:
+                lines.append(f"描述：{ms_desc}")
+            params = main_skill.get("params")
             if params:
                 if isinstance(params, list):
                     lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
                 else:
                     lines.append(f"数值表：{params}")
 
-    if not has_secondary:
+        for sec_key, sec_label in [("secondarySkill1", "副技能1"), ("secondarySkill2", "副技能2")]:
+            sec_skill = disc.get(sec_key)
+            if sec_skill and isinstance(sec_skill, dict):
+                has_secondary = True
+                sec_name = sec_skill.get("nameCN") or _cn_by_en(lookup, sec_skill.get("name", ""))
+                sec_desc = sec_skill.get("descCN") or sec_skill.get("desc", "")
+                lines.append(f"【{sec_label}】{sec_name}")
+                if sec_desc:
+                    lines.append(f"描述：{sec_desc}")
+                params = sec_skill.get("params")
+                if params:
+                    if isinstance(params, list):
+                        lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+                    else:
+                        lines.append(f"数值表：{params}")
+
+    # details 模块（模块化新增）：面板数值（stat list[dict] 取首尾等级）
+    if modules is not None and "details" in modules:
+        stat_list = disc.get("stat", [])
+        if isinstance(stat_list, list) and stat_list:
+            lines.append("【面板数值】")
+            shown_indexes: set[int] = set()
+            for idx in (0, len(stat_list) - 1):
+                if idx in shown_indexes:
+                    continue
+                shown_indexes.add(idx)
+                s = stat_list[idx]
+                if not isinstance(s, dict):
+                    continue
+                parts = []
+                for k in ("HP", "ATK"):
+                    if k in s:
+                        label = "生命" if k == "HP" else "攻击"
+                        parts.append(f"{label} {s[k]}")
+                if not parts:
+                    parts = [f"{_cn_by_en(lookup, k)} {v}" for k, v in s.items()]
+                    parts = parts[:3]
+                lines.append(f"  {idx + 1}级：{' | '.join(parts)}")
+
+    # 潜能加成（dupe）+ 升级消耗（upgrade）：modules=None 保持"无副技能才展示"的
+    # 既有耦合行为；模块化路径归属 details 区块，独立渲染不再受副技能抑制
+    render_dupe_upgrade = (not has_secondary) if modules is None else ("details" in modules)
+    if render_dupe_upgrade:
         dupe = disc.get("dupe")
         if dupe and isinstance(dupe, list):
             lines.append("【潜能加成】")
@@ -1584,15 +1628,18 @@ def _build_disc_material(
                     parts = [f"{_cn_by_en(lookup, k)}: {v}" for k, v in item.items()]
                     lines.append(f"  阶段{idx}：{'、'.join(parts)}")
 
-    support_notes = disc.get("supportNote")
-    if support_notes and isinstance(support_notes, list):
-        lines.append("【支援旋律】")
-        for item in support_notes:
-            if isinstance(item, dict):
-                parts = [f"{_cn_by_en(lookup, k)} (等级 {v})" for k, v in item.items()]
-                lines.append(f"  {'、'.join(parts)}")
-            elif isinstance(item, str):
-                lines.append(f"  {_cn_by_en(lookup, item)}")
+    # 支援旋律（supportNote）：melody 模块尾部（modules=None 全量路径保持
+    # 既有"主技能→副技能→潜能/升级→支援旋律"顺序逐字节不变）
+    if modules is None or "melody" in modules:
+        support_notes = disc.get("supportNote")
+        if support_notes and isinstance(support_notes, list):
+            lines.append("【支援旋律】")
+            for item in support_notes:
+                if isinstance(item, dict):
+                    parts = [f"{_cn_by_en(lookup, k)} (等级 {v})" for k, v in item.items()]
+                    lines.append(f"  {'、'.join(parts)}")
+                elif isinstance(item, str):
+                    lines.append(f"  {_cn_by_en(lookup, item)}")
 
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)

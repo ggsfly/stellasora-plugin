@@ -14,6 +14,36 @@
       "char": [
         "Noya"
       ],
+      "source": [
+        "Permanent",
+        "Standard",
+        "Recruit",
+        "Gacha",
+        "Banner",
+        "f2p"
+      ],
+      "stat": [
+        {
+          "HP": 50,
+          "ATK": 5
+        },
+        {
+          "HP": 50,
+          "ATK": 7
+        },
+        {
+          "HP": 50,
+          "ATK": 8
+        },
+        {
+          "HP": 230,
+          "ATK": 30
+        },
+        {
+          "HP": 720,
+          "ATK": 72
+        }
+      ],
       "mainSkill": {
         "id": 1001,
         "name": "Fortissimo: Main Theme",
