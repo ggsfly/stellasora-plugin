@@ -1,0 +1,49 @@
+{
+  "url": "",
+  "name": "duel",
+  "timestamp": 1,
+  "data": {
+    "1": {
+      "id": "1",
+      "name": "[Cat-stle Siege] Chaton",
+      "type": "Overlord",
+      "weakTo": ["Aqua"],
+      "resistTo": "None",
+      "stat": {
+        "HP": 800000000,
+        "ATK": 4364,
+        "DEF": 500,
+        "Hit Rate": "100%",
+        "Attack Speed": "100%",
+        "Aqua DMG": "100%",
+        "Ignis DMG": "100%",
+        "Terra DMG": "100%",
+        "Ventus DMG": "100%",
+        "Lux DMG": "100%",
+        "Umbra DMG": "100%"
+      },
+      "mechanic": [
+        {
+          "affix": [
+            {
+              "name": "Full-auto Fire",
+              "desc": "Enhanced Assault Mode: continuously fires at the nearest Trekker, damage scales with ATK."
+            },
+            {
+              "name": "Volley Formation",
+              "desc": "Launches a volley of Aqua projectiles at the target area."
+            }
+          ]
+        },
+        {
+          "affix": [
+            {
+              "name": "Dark Ray",
+              "desc": "Charges a dark beam that sweeps the battlefield, Umbra DMG to all Treekers."
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
