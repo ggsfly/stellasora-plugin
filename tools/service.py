@@ -11,6 +11,7 @@ CLI 运行时用 data/.cache。
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -1422,6 +1423,411 @@ def _build_disc_material(
                 lines.append(f"  {'、'.join(parts)}")
             elif isinstance(item, str):
                 lines.append(f"  {_cn_by_en(lookup, item)}")
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _route_what_keywords(term: str) -> Optional[str]:
+    """根据关键词路由 what 查询意图。
+
+    banner: 卡池 / 池子 / up池 / UP池
+    leaderboard: 排行榜 / 榜单 / 赛季
+    disc: 秘纹 / 旋律（严格排除纹章——那是 how 侧词汇）
+    其它: None
+    """
+    if not term:
+        return None
+    lower_term = term.lower()
+    # 1. banner 关键词
+    if any(k in lower_term for k in ("卡池", "池子", "up池")):
+        return "banner"
+    # 2. leaderboard 关键词
+    if any(k in lower_term for k in ("排行榜", "榜单", "赛季")):
+        return "leaderboard"
+    # 3. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
+    if "纹章" in lower_term:
+        return None
+    if any(k in lower_term for k in ("秘纹", "旋律")):
+        return "disc"
+    return None
+
+
+def _build_banner_material(
+    st: StelladbFetcher,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染卡池资讯（进行中 + 最近 1 期已结束，最多 3 期）。
+
+    返回 (material_text, True)；若 dataset 缺失返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    dataset = st.fetch_ssdata_dataset("gacha")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    char_dataset = st.fetch_ssdata_dataset("character") or {}
+    disc_dataset = st.fetch_ssdata_dataset("disc") or {}
+
+    def _parse_dt(dt_str: str) -> Optional[datetime]:
+        if not dt_str:
+            return None
+        try:
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _format_date(dt_str: str) -> str:
+        dt = _parse_dt(dt_str)
+        if dt:
+            return dt.strftime("%Y-%m-%d")
+        return dt_str[:10] if len(dt_str) >= 10 else dt_str
+
+    banners = [b for b in dataset.values() if isinstance(b, dict)]
+    sorted_banners = sorted(
+        banners,
+        key=lambda b: str(b.get("startTime", "")),
+        reverse=True,
+    )
+    if not sorted_banners:
+        return "", False
+
+    now = datetime.now(timezone.utc)
+    ongoing: list[dict] = []
+    ended: list[dict] = []
+    for b in sorted_banners:
+        st_dt = _parse_dt(b.get("startTime", ""))
+        ed_dt = _parse_dt(b.get("endTime", ""))
+        if st_dt and ed_dt:
+            if st_dt <= now <= ed_dt:
+                ongoing.append(b)
+            elif ed_dt < now:
+                ended.append(b)
+        else:
+            ended.append(b)
+
+    # 取当前进行中 + 最近 1 期已结束（共最多 3 期）
+    selected_banners: list[dict] = list(ongoing)
+    if ended:
+        selected_banners.append(ended[0])
+    if not ongoing and ended:
+        selected_banners = ended[:min(3, len(ended))]
+    elif not selected_banners:
+        selected_banners = sorted_banners[:3]
+    selected_banners = selected_banners[:3]
+
+    lines: list[str] = ["【卡池资讯】"]
+    for b in selected_banners:
+        b_type = b.get("type", "")
+        en_name = b.get("name", "")
+        cn_name = _cn_by_en(lookup, en_name)
+        st_date = _format_date(b.get("startTime", ""))
+        ed_date = _format_date(b.get("endTime", ""))
+        type_label = "角色卡池" if b_type == "character" else ("秘纹卡池" if b_type == "disc" else f"{b_type}卡池")
+        if cn_name and cn_name != en_name:
+            lines.append(f"【{type_label}】{cn_name}（{en_name}，{st_date} ~ {ed_date}）")
+        else:
+            lines.append(f"【{type_label}】{cn_name or en_name}（{st_date} ~ {ed_date}）")
+
+        for star_label, up_key in [("5★ UP", "rateUp5Star"), ("4★ UP", "rateUp4Star")]:
+            up_list = b.get(up_key, [])
+            if isinstance(up_list, list) and up_list:
+                item_descs = []
+                for item in up_list:
+                    if not isinstance(item, dict):
+                        continue
+                    i_id = str(item.get("id", ""))
+                    i_name = item.get("name", "")
+                    if b_type == "character":
+                        c_info = char_dataset.get(i_id, {}) if isinstance(char_dataset, dict) else {}
+                        c_en = c_info.get("name") or i_name
+                        i_cn = _cn_by_en(lookup, c_en)
+                    elif b_type == "disc":
+                        d_info = disc_dataset.get(i_id, {}) if isinstance(disc_dataset, dict) else {}
+                        d_en = d_info.get("name") or i_name
+                        i_cn = _cn_by_en(lookup, d_en)
+                    else:
+                        i_cn = _cn_by_en(lookup, i_name)
+                    elem = item.get("element", "")
+                    elem_cn = _ELEMENT_CN.get(elem, elem)
+                    if elem_cn:
+                        item_descs.append(f"{i_cn}（{elem_cn}）")
+                    else:
+                        item_descs.append(f"{i_cn}")
+                if item_descs:
+                    lines.append(f"  - {star_label}：{'、'.join(item_descs)}")
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _build_leaderboard_material(
+    st: StelladbFetcher,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染排行榜与赛季资讯。
+
+    返回 (material_text, True)；若 meta 为空返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    meta = st.fetch_leaderboard_meta()
+    if not meta or not isinstance(meta, dict):
+        return "", False
+
+    raid_dataset = st.fetch_ssdata_dataset("raid") or {}
+
+    lines: list[str] = ["【排行榜与赛季资讯】"]
+    for s_key, s_val in meta.items():
+        if not isinstance(s_val, dict):
+            continue
+        if s_key.startswith("bb"):
+            s_title = f"Boss Blitz S{s_key[2:]}"
+        elif s_key.startswith("fe"):
+            s_title = f"Finale Echoing S{s_key[2:]}"
+        else:
+            s_title = s_key
+
+        lines.append(f"【{s_title}】")
+        floors = s_val.get("floor", {})
+        if isinstance(floors, dict) and floors:
+            boss_lines = []
+            for fl_id, fl_info in floors.items():
+                if not isinstance(fl_info, dict):
+                    continue
+                fl_name = fl_info.get("name", "")
+                raid_info = raid_dataset.get(str(fl_id), {}) if isinstance(raid_dataset, dict) else {}
+                raid_name = raid_info.get("name") or fl_name
+                cn_name = _cn_by_en(lookup, raid_name)
+                if cn_name == raid_name and raid_name != fl_name:
+                    cn_name = _cn_by_en(lookup, fl_name)
+                if cn_name == fl_name or cn_name == raid_name:
+                    boss_display = f"{fl_name}（暂无中文译名）"
+                else:
+                    boss_display = f"{cn_name}（{fl_name}）"
+                boss_lines.append(f"层级 {fl_id}：{boss_display}")
+            if boss_lines:
+                lines.append("  首领信息：")
+                for bl in boss_lines:
+                    lines.append(f"    - {bl}")
+
+        removed = s_val.get("removed", {})
+        if isinstance(removed, dict):
+            counts = {
+                r: len(removed.get(r, [])) if isinstance(removed.get(r), list) else 0
+                for r in ["all", "cn", "en", "jp", "kr", "tw"]
+            }
+            lines.append(
+                f"  违规封禁统计：全服 {counts['all']} 人 | 国服(cn) {counts['cn']} 人 | 国际服(en) {counts['en']} 人 | "
+                f"日服(jp) {counts['jp']} 人 | 韩服(kr) {counts['kr']} 人 | 台服(tw) {counts['tw']} 人"
+            )
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _build_disc_list_material(
+    st: StelladbFetcher,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染秘纹列表概要（前 20 条）。
+
+    返回 (material_text, True)；若 dataset 缺失返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    dataset = st.fetch_ssdata_dataset("disc")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    def _get_id(item: dict) -> int:
+        try:
+            return int(item.get("id", 0))
+        except (ValueError, TypeError):
+            return 0
+
+    sorted_discs = sorted(
+        [d for d in dataset.values() if isinstance(d, dict)],
+        key=_get_id,
+    )
+    selected = sorted_discs[:20]
+    if not selected:
+        return "", False
+
+    lines: list[str] = ["【秘纹列表（前20条）】"]
+    for d in selected:
+        en_name = d.get("name", "")
+        cn_name = _cn_by_en(lookup, en_name)
+        star = d.get("star", 0)
+        elem = d.get("element", "")
+        elem_cn = _ELEMENT_CN.get(elem, elem)
+        star_str = f"{star}星" if star else ""
+        elem_str = f"{elem_cn}属性" if elem_cn else ""
+        attr_parts = [p for p in [star_str, elem_str] if p]
+        attr_desc = f"（{' / '.join(attr_parts)}）" if attr_parts else ""
+        lines.append(f"- {cn_name}{attr_desc}")
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _match_monster(
+    term: str,
+    lookup: Any,
+    st: StelladbFetcher,
+) -> Optional[str]:
+    """匹配首领怪物 ID。
+
+    先通过 lookup 查 MonsterManual 且要求 id 存在于 raid 键集中；
+    若未命中或不在 raid 键集中，落入 raid.json 大小写不敏感子串/精确 id 匹配。
+    """
+    if not term or not st:
+        return None
+
+    raid_dataset = st.fetch_ssdata_dataset("raid")
+    if not raid_dataset or not isinstance(raid_dataset, dict):
+        return None
+
+    # 1. 尝试 lookup_term 反查 MonsterManual
+    if lookup:
+        res = lookup.lookup_term(term)
+        if res and isinstance(res, dict) and res.get("cat") == "MonsterManual":
+            raw_id = str(res.get("id", ""))
+            parts = raw_id.split(".")
+            if len(parts) > 1:
+                num_id = parts[1]
+                if num_id in raid_dataset:
+                    return num_id
+
+    # 2. raid.json 匹配
+    clean_term = term.strip()
+    if clean_term in raid_dataset:
+        return clean_term
+
+    def _normalize(s: str) -> str:
+        # 去除非字母数字（保留中英文字符与数字），转小写
+        return re.sub(r"[\W_]+", "", s.lower(), flags=re.UNICODE)
+
+    norm_term = _normalize(clean_term)
+    if not norm_term:
+        return None
+
+    for m_id, m_val in raid_dataset.items():
+        if not isinstance(m_val, dict):
+            continue
+        raw_name = m_val.get("name", "")
+        # 去除 [方括号] 标点，规范化
+        norm_name = _normalize(raw_name)
+        if norm_term in norm_name:
+            return str(m_id)
+        # 兼容中文反查名命中
+        if lookup:
+            cn_name = _cn_by_en(lookup, raw_name)
+            if cn_name != raw_name:
+                norm_cn = _normalize(cn_name)
+                if norm_term in norm_cn:
+                    return str(m_id)
+
+    return None
+
+
+def _build_monster_material(
+    st: StelladbFetcher,
+    num_id: str,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染首领怪物官方中文资料。
+
+    返回 (material_text, True)；若 dataset 缺失或对应 id 不存在返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    dataset = st.fetch_ssdata_dataset("raid")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    monster = dataset.get(num_id) or dataset.get(str(num_id))
+    if not monster or not isinstance(monster, dict):
+        return "", False
+
+    lines: list[str] = []
+    en_name = monster.get("name", "")
+    cn_name = _cn_by_en(lookup, en_name)
+    if en_name and en_name != cn_name:
+        lines.append(f"【首领】{cn_name}（{en_name}）")
+    else:
+        lines.append(f"【首领】{cn_name or en_name}")
+
+    m_type = monster.get("type", "")
+    if m_type:
+        lines.append(f"类型：{m_type}")
+
+    weak_to = monster.get("weakTo", [])
+    if isinstance(weak_to, list) and weak_to:
+        weak_cn = [_ELEMENT_CN.get(w, w) for w in weak_to]
+        lines.append(f"{_WEAK_LABEL}：{'、'.join(weak_cn)}")
+
+    resist_to = monster.get("resistTo")
+    if resist_to:
+        if isinstance(resist_to, list):
+            resist_cn = [_ELEMENT_CN.get(r, r) for r in resist_to]
+            lines.append(f"{_RESIST_LABEL}：{'、'.join(resist_cn)}")
+        elif isinstance(resist_to, str) and resist_to.lower() != "none":
+            lines.append(f"{_RESIST_LABEL}：{_ELEMENT_CN.get(resist_to, resist_to)}")
+        else:
+            lines.append(f"{_RESIST_LABEL}：无")
+    else:
+        lines.append(f"{_RESIST_LABEL}：无")
+
+    mechanics = monster.get("mechanic", [])
+    if isinstance(mechanics, list) and mechanics:
+        lines.append("【首领机制】")
+        for m in mechanics:
+            if not isinstance(m, dict):
+                continue
+            m_name = _cn_by_en(lookup, m.get("name", ""))
+            m_desc = m.get("desc", "")
+            lines.append(f"  - {m_name}")
+            if m_desc:
+                lines.append(f"    描述：{m_desc}")
+
+    diff_list = monster.get("diff", [])
+    if isinstance(diff_list, list) and diff_list:
+        lines.append("【难度与属性】")
+        for d in diff_list:
+            if not isinstance(d, dict):
+                continue
+            d_name = d.get("name", "")
+            stat_entries = d.get("stat", [])
+            stat_dict = {}
+            if stat_entries and isinstance(stat_entries, list):
+                first = stat_entries[0]
+                if isinstance(first, list) and first and isinstance(first[0], dict):
+                    stat_dict = first[0]
+                elif isinstance(first, dict):
+                    stat_dict = first
+
+            stats_parts = []
+            for k in ["HP", "ATK", "DEF"]:
+                if k in stat_dict:
+                    label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
+                    stats_parts.append(f"{label} {stat_dict[k]}")
+            if not stats_parts:
+                for k, v in stat_dict.items():
+                    if k not in ("Type", "HP Bar", "Score", "Max Score"):
+                        stats_parts.append(f"{k} {v}")
+                        if len(stats_parts) >= 3:
+                            break
+            stat_str = " | ".join(stats_parts) if stats_parts else "无属性详情"
+            lines.append(f"  - {d_name}：{stat_str}")
 
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
