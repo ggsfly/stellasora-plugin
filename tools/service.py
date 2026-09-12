@@ -307,10 +307,87 @@ def _fit_lines(lines: list, max_length: Optional[int]) -> str:
 def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> str:
     """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
+
+    # 1. 关键词概念路由（banner / leaderboard / disc 概念列表）
+    route = _route_what_keywords(term)
+    if route == "banner":
+        text, _ = _build_banner_material(st_fetcher, lookup)
+        return _fit_lines(text.splitlines(), max_length)
+    elif route == "leaderboard":
+        text, _ = _build_leaderboard_material(st_fetcher, lookup)
+        return _fit_lines(text.splitlines(), max_length)
+    elif route == "disc":
+        text, _ = _build_disc_list_material(st_fetcher, lookup)
+        return _fit_lines(text.splitlines(), max_length)
+
+    # 2. 查词与首领怪物路由
     res = lookup.lookup_term(term)
     if not res:
+        monster_id = _match_monster(term, lookup, st_fetcher)
+        if monster_id:
+            text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
+            if ok and text:
+                return _fit_lines(text.splitlines(), max_length)
         return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
 
+    # res 存在且 cat == "MonsterManual"
+    if res["cat"] == "MonsterManual":
+        parts = res["id"].split(".")
+        num_id = parts[1] if len(parts) > 1 else res["id"]
+        raid_dataset = st_fetcher.fetch_ssdata_dataset("raid") or {}
+        if num_id in raid_dataset:
+            monster_id = num_id
+        else:
+            monster_id = _match_monster(term, lookup, st_fetcher)
+
+        if monster_id:
+            text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
+            if ok and text:
+                return _fit_lines(text.splitlines(), max_length)
+
+        # 若该兜底 _match_monster 返回 None → 落入 step 5 的"没有专属攻略页"文案
+        lines = [
+            "=== 字典匹配 ===",
+            f"  中文: {res['cn']}",
+            f"  英文: {res['en']}",
+            f"  ID:   {res['id']}",
+            f"  类别: {res['cat']}",
+            "",
+            f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
+        ]
+        return _fit_lines(lines, max_length)
+
+    # 3. 角色路由（优先 ssdata descCN，失败回退 trekker HTML 攻略）
+    if res["cat"] == "Character":
+        parts = res["id"].split(".")
+        num_id = parts[1] if len(parts) > 1 else res["id"]
+        text, ok = _build_character_material(st_fetcher, num_id, lookup)
+        if ok and text:
+            return _fit_lines(text.splitlines(), max_length)
+
+        # 回退现有 fetch_trekker(num_id) 路径（strip_game_markup + replacer.replace，维持现在输出）
+        lines = [
+            "=== 字典匹配 ===",
+            f"  中文: {res['cn']}",
+            f"  英文: {res['en']}",
+            f"  ID:   {res['id']}",
+            f"  类别: {res['cat']}",
+            "",
+            f"=== 角色攻略 (stelladb /trekker/{num_id}) ===",
+            strip_game_markup(replacer.replace(st_fetcher.fetch_trekker(num_id))),
+        ]
+        return _fit_lines(lines, max_length)
+
+    # 4. 秘纹（disc）路由——按数字 id 成员判断，不按 cat 字符串
+    parts = res["id"].split(".")
+    num_id = parts[1] if len(parts) > 1 else res["id"]
+    disc_dataset = st_fetcher.fetch_ssdata_dataset("disc") or {}
+    if num_id in disc_dataset:
+        text, ok = _build_disc_material(st_fetcher, num_id, lookup)
+        if ok and text:
+            return _fit_lines(text.splitlines(), max_length)
+
+    # 5. 其它 cat → 维持现有"没有专属攻略页"文案
     lines = [
         "=== 字典匹配 ===",
         f"  中文: {res['cn']}",
@@ -318,14 +395,8 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
         f"  ID:   {res['id']}",
         f"  类别: {res['cat']}",
         "",
+        f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
     ]
-    cat = res["cat"]
-    if cat == "Character":
-        num_id = res["id"].split(".")[1]
-        lines.append(f"=== 角色攻略 (stelladb /trekker/{num_id}) ===")
-        lines.append(strip_game_markup(replacer.replace(st_fetcher.fetch_trekker(num_id))))
-    else:
-        lines.append(f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。")
     return _fit_lines(lines, max_length)
 
 
