@@ -69,6 +69,10 @@ _TERM_CN = {
     "Mechanic": "机制",
 }
 
+# 当期联合讨伐机制明细渲染上限：单条描述截断字符数 / 每 boss 最多机制条数
+_MAX_MECH_DESC = 120
+_MAX_MECHANIC_COUNT = 8
+
 
 def _term_cn(s: str) -> str:
     """讨伐术语 → 中文：先精确命中 _TERM_CN，否则做区分大小写的子串级替换。
@@ -361,6 +365,9 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     elif route == "leaderboard":
         text, _ = _build_leaderboard_material(st_fetcher, lookup)
         return _fit_lines(text.splitlines(), max_length)
+    elif route == "blitz":
+        text, _ = _build_blitz_material(st_fetcher, lookup)
+        return _fit_lines(text.splitlines(), max_length)
     elif route == "disc":
         text, _ = _build_disc_list_material(st_fetcher, lookup)
         return _fit_lines(text.splitlines(), max_length)
@@ -373,6 +380,10 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
             text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
             if ok and text:
                 return _fit_lines(text.splitlines(), max_length)
+        # 当期联合讨伐 boss 名兜底（中/英文名直接命中当期赛季 boss）
+        if _match_blitz_boss(term, st_fetcher, lookup):
+            text, _ = _build_blitz_material(st_fetcher, lookup)
+            return _fit_lines(text.splitlines(), max_length)
         return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
 
     # res 存在且 cat == "MonsterManual"
@@ -389,6 +400,11 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
             text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
             if ok and text:
                 return _fit_lines(text.splitlines(), max_length)
+
+        # 当期联合讨伐 boss 名兜底（MonsterManual 命中但 raid 找不到时的链接形态）
+        if _match_blitz_boss(term, st_fetcher, lookup):
+            text, _ = _build_blitz_material(st_fetcher, lookup)
+            return _fit_lines(text.splitlines(), max_length)
 
         # 若该兜底 _match_monster 返回 None → 落入 step 5 的"没有专属攻略页"文案
         lines = [
@@ -1550,6 +1566,7 @@ def _route_what_keywords(term: str) -> Optional[str]:
 
     banner: 卡池 / 池子 / up池 / UP池
     leaderboard: 排行榜 / 榜单 / 赛季
+    blitz: 联合讨伐 / 当期讨伐 / 讨伐 / boss / blitz（先排除 raid 意图）
     disc: 秘纹 / 旋律（严格排除纹章——那是 how 侧词汇）
     其它: None
     """
@@ -1562,7 +1579,12 @@ def _route_what_keywords(term: str) -> Optional[str]:
     # 2. leaderboard 关键词
     if any(k in lower_term for k in ("排行榜", "榜单", "赛季")):
         return "leaderboard"
-    # 3. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
+    # 3. blitz 关键词（当期联合讨伐）。boss/blitz 等词也会出现在终焉绝响（FE raid）
+    #    语境中，命中判定前先排除 raid 意图——那些查询应落入首领怪物路由而非讨伐意图
+    if not any(k in lower_term for k in ("终焉", "绝响", "raid")):
+        if any(k in lower_term for k in ("联合讨伐", "当期讨伐", "讨伐", "boss", "blitz")):
+            return "blitz"
+    # 4. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
     if "纹章" in lower_term:
         return None
     if any(k in lower_term for k in ("秘纹", "旋律")):
@@ -1948,4 +1970,269 @@ def _build_monster_material(
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
     return clean_text, True
+
+
+def _normalize(s: str) -> str:
+    """名称归一化（boss 名匹配用）：去除非字母数字（保留中英文字符与数字），转小写。"""
+    return re.sub(r"[\W_]+", "", s.lower(), flags=re.UNICODE)
+
+
+def _resolve_current_blitz(st: StelladbFetcher) -> Optional[Tuple[str, dict]]:
+    """定位当期联合讨伐（Boss Blitz）赛季键与其 floor 数据块。
+
+    返回 (bb_key, floor_dict)；无当期赛季时返回 None。bb_key 缺失时从
+    fetch_leaderboard_meta 键表取 ^bb\\d+$ 且 NN 最大者离线降级（仅降级读取，
+    不写数据库）。
+    """
+    if not st:
+        return None
+    meta = st.fetch_leaderboard_meta()
+    if not meta or not isinstance(meta, dict):
+        return None
+
+    season = st.fetch_leaderboard_season()
+    bb_key = (season or {}).get("BB_SEASON")
+    if bb_key is None or bb_key not in meta:
+        candidates = sorted(
+            (k for k in meta if re.match(r"^bb\d+$", k)),
+            key=lambda k: int(k[2:]),
+            reverse=True,
+        )
+        bb_key = candidates[0] if candidates else None
+    if bb_key is None:
+        return None
+
+    block = meta.get(bb_key)
+    if not isinstance(block, dict):
+        return None
+    floors = block.get("floor")
+    if not isinstance(floors, dict) or not floors:
+        return None
+    return bb_key, floors
+
+
+def _build_blitz_material(
+    st: StelladbFetcher,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染当期联合讨伐 boss 资料（两 boss 一次输出，紧凑两段式结构）。
+
+    先输出【当期联合讨伐】header 与各 boss 概览行（序号/名称/类型/弱点/抗性/
+    单分伤害），再逐 boss 输出【机制】明细（stat 摘要 + 机制列表）。
+    boss 名与 meta floor name 不一致时以 meta 名为准并标注机制数据可能滞后、
+    省略机制明细。返回 (material_text, True)；无当期赛季或 blitz dataset 缺失
+    返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    resolved = _resolve_current_blitz(st)
+    if not resolved:
+        return "", False
+    bb_key, floors = resolved
+
+    dataset = st.fetch_ssdata_dataset("blitz")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    # 当期 floor 数字升序排列
+    def _floor_sort_key(k: Any) -> int:
+        try:
+            return int(k)
+        except (ValueError, TypeError):
+            return 0
+
+    ordered_floors = sorted(floors.keys(), key=_floor_sort_key)
+    season_num = bb_key[2:] if bb_key.startswith("bb") else bb_key
+
+    # 先统一计算每个 floor 的展示名与数据滞后标记（概览行与明细共用）
+    entries: list[dict] = []
+    for fl in ordered_floors:
+        fl_info = floors[fl]
+        fl_name = fl_info.get("name", "") if isinstance(fl_info, dict) else ""
+        boss = dataset.get(str(fl)) or dataset.get(fl)
+        entry: dict = {
+            "floor": fl,
+            "meta_name": fl_name,
+            "boss": boss if isinstance(boss, dict) else None,
+            "display_en": fl_name,
+            "lagging": False,
+            "en_name": "",
+        }
+        if entry["boss"] is not None:
+            en_name = entry["boss"].get("name", "") or ""
+            entry["en_name"] = en_name
+            # 名称为空时退用 blitz 数据源名称展示
+            entry["display_en"] = fl_name if fl_name else en_name
+            # oracle M4：blitz 名与 meta floor name 一致性校验，不一致时机制数据视为滞后
+            norm_boss = _normalize(en_name)
+            norm_meta = _normalize(fl_name)
+            if norm_boss and norm_meta and norm_boss != norm_meta:
+                entry["lagging"] = True
+                entry["display_en"] = fl_name
+        entries.append(entry)
+
+    lines: list[str] = [f"【当期联合讨伐 · 第{season_num}赛季】"]
+
+    # 1. boss 概览行（序号/名称/类型/弱点/抗性/单分伤害）
+    for idx, e in enumerate(entries, start=1):
+        display_en = e["display_en"]
+        cn_name = _cn_by_en(lookup, display_en)
+        if cn_name and cn_name != display_en:
+            name_str = f"{cn_name}（{display_en}）"
+        else:
+            name_str = cn_name or display_en
+
+        overview_parts = [f"  {idx}. {name_str}"]
+        if e["boss"] is not None:
+            m_type = _term_cn(e["boss"].get("type", ""))
+            if m_type:
+                overview_parts.append(f"类型：{m_type}")
+            weak_to = e["boss"].get("weakTo", [])
+            weak_str = (
+                "、".join(_ELEMENT_CN.get(w, w) for w in weak_to)
+                if isinstance(weak_to, list) and weak_to
+                else "无"
+            )
+            resist_to = e["boss"].get("resistTo")
+            if isinstance(resist_to, list):
+                resist_str = "、".join(_ELEMENT_CN.get(r, r) for r in resist_to) if resist_to else "无"
+            elif resist_to:
+                resist_str = _ELEMENT_CN.get(resist_to, resist_to)
+            else:
+                resist_str = "无"
+            dps = e["boss"].get("damagePerScore")
+            if dps:
+                overview_parts.append(f"单分伤害：{dps}")
+            overview_parts.append(f"弱点：{weak_str}")
+            overview_parts.append(f"抗性：{resist_str}")
+        else:
+            # boss 缺失但 meta floor 存在：仅输出名称 + 暂无详细机制标注
+            overview_parts.append("暂无详细机制")
+        if e["lagging"]:
+            overview_parts.append("（机制数据可能滞后）")
+        lines.append("｜".join(overview_parts))
+
+    # 2. 逐 boss【机制】明细（stat 摘要 + 机制列表）
+    detail_lines: list[str] = []
+    for idx, e in enumerate(entries, start=1):
+        boss = e["boss"]
+        if boss is None:
+            continue
+        display_en = e["display_en"]
+        cn_name = _cn_by_en(lookup, display_en)
+        if cn_name and cn_name != display_en:
+            name_str = f"{cn_name}（{display_en}）"
+        else:
+            name_str = cn_name or display_en
+        detail_lines.append(f"【机制】{idx}. {name_str}")
+
+        # stat 摘要：复用 _build_monster_material 的抽取模式（嵌套 dict/list 兼容），
+        # 键经 _term_cn 翻译，每 boss 最多 3 项关键值
+        stat_entries = boss.get("stat", [])
+        stat_dict: dict = {}
+        if isinstance(stat_entries, list) and stat_entries:
+            first = stat_entries[0]
+            if isinstance(first, list) and first and isinstance(first[0], dict):
+                stat_dict = first[0]
+            elif isinstance(first, dict):
+                stat_dict = first
+        stats_parts: list[str] = []
+        for k in ["HP", "ATK", "DEF"]:
+            if k in stat_dict:
+                label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
+                stats_parts.append(f"{label} {stat_dict[k]}")
+        if not stats_parts:
+            for k, v in stat_dict.items():
+                if k not in ("Type", "HP Bar", "Score", "Max Score"):
+                    stats_parts.append(f"{_term_cn(k)} {v}")
+                    if len(stats_parts) >= 3:
+                        break
+        if stats_parts:
+            detail_lines.append(f"  - {' | '.join(stats_parts)}")
+
+        # 机制列表：名称 _term_cn + descCN（缺则 desc 经 _term_cn），单条截断、
+        # 每 boss 上限 _MAX_MECHANIC_COUNT 条；数据滞后时省略机制明细
+        if e["lagging"]:
+            continue
+        mechanics = boss.get("mechanic", [])
+        if not isinstance(mechanics, list) or not mechanics:
+            continue
+        rendered_count = 0
+        for m in mechanics:
+            if not isinstance(m, dict):
+                continue
+            if rendered_count >= _MAX_MECHANIC_COUNT:
+                detail_lines.append("  - （其余机制略，可具体询问）")
+                break
+            m_name = m.get("name", "")
+            m_name_cn = _term_cn(m_name) if m_name else ""
+            desc = m.get("descCN") or ""
+            if not desc:
+                desc = _term_cn(m.get("desc", ""))
+            if not desc:
+                detail_lines.append(f"  - {m_name_cn or m_name}")
+                rendered_count += 1
+                continue
+            if len(desc) > _MAX_MECH_DESC:
+                desc = desc[:_MAX_MECH_DESC] + "…"
+            detail_lines.append(f"  - {m_name_cn or m_name}：{desc}")
+            rendered_count += 1
+
+    if detail_lines:
+        lines.append("")
+        lines.extend(detail_lines)
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _match_blitz_boss(
+    term: str,
+    st: StelladbFetcher,
+    lookup: Any,
+) -> bool:
+    """当期联合讨伐 boss 名兜底匹配（签名含 lookup，支持中/英文名）。
+
+    对当期 floor 的 meta floor name 与 blitz[floor]["name"] 做大小写不敏感
+    子串/精确匹配（经 _normalize），并镜像 _match_monster 的中文反查——
+    命中"其中一个 boss 名（中/英）"即返回 True。
+    """
+    if not term or not st:
+        return False
+    resolved = _resolve_current_blitz(st)
+    if not resolved:
+        return False
+    _bb_key, floors = resolved
+
+    dataset = st.fetch_ssdata_dataset("blitz")
+    if not dataset or not isinstance(dataset, dict):
+        return False
+
+    norm_term = _normalize(term.strip())
+    if not norm_term:
+        return False
+
+    for fl, fl_info in floors.items():
+        if not isinstance(fl_info, dict):
+            continue
+        fl_name = fl_info.get("name", "")
+        names = [fl_name]
+        boss = dataset.get(str(fl)) or dataset.get(fl)
+        if isinstance(boss, dict) and boss.get("name"):
+            names.append(boss["name"])
+        for name in names:
+            if not name:
+                continue
+            norm_name = _normalize(name)
+            if norm_term == norm_name or (norm_name and norm_term in norm_name):
+                return True
+            # 镜像 _match_monster 的中文反查：中文名子串命中
+            if lookup:
+                cn_name = _cn_by_en(lookup, name)
+                if cn_name and cn_name != name:
+                    norm_cn = _normalize(cn_name)
+                    if norm_term == norm_cn or (norm_cn and norm_term in norm_cn):
+                        return True
+    return False
 
