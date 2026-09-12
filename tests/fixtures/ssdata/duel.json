@@ -23,18 +23,23 @@
         "Umbra DMG": "100%"
       },
       "mechanic": [
-        {
-          "affix": [
-            {
-              "name": "Full-auto Fire",
-              "desc": "Enhanced Assault Mode: continuously fires at the nearest Trekker, damage scales with ATK."
-            },
-            {
-              "name": "Volley Formation",
-              "desc": "Launches a volley of Aqua projectiles at the target area."
-            }
-          ]
-        },
+        [
+          {
+            "name": "Full-auto Fire",
+            "desc": "Enhanced Assault Mode: continuously fires at the nearest Trekker, damage scales with ATK.",
+            "diff": 5
+          },
+          {
+            "name": "Volley Formation",
+            "desc": "Launches a volley of Aqua projectiles at the target area.",
+            "diff": 5
+          },
+          {
+            "name": "Furious Kitty",
+            "desc": "Fires more Kitty Bullets during Kitty Barrage.",
+            "diff": 5
+          }
+        ],
         {
           "affix": [
             {

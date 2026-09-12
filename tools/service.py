@@ -2057,17 +2057,23 @@ def _build_monster_material(
     else:
         lines.append(f"{_RESIST_LABEL}：无")
 
-    # mechanic 区块：raid/blitz 平铺机制列表；duel 分组列表（每组含 affix，
-    # 组序渲染、affix 合并输出）；机制全量输出不截断
+    # mechanic 区块：raid/blitz 平铺机制列表；duel 分组列表（组序渲染、affix 合并
+    # 输出）；机制全量输出不截断
     if modules is None or "mechanic" in modules:
         mechanics = monster.get("mechanic", [])
         if isinstance(mechanics, list) and mechanics:
             lines.append("【首领机制】")
             if source == "duel":
                 for group in mechanics:
-                    if not isinstance(group, dict):
+                    # 真实 ss-data duel schema：每组为「裸列表」（同一 affix 族按
+                    # diff 的多个变体）；同时兼容 {"affix": [...]} 包装形态
+                    # （测试 fixture 形态），两种形态并存的 schema 演进不丢组
+                    if isinstance(group, dict):
+                        affixes = group.get("affix", [])
+                    elif isinstance(group, list):
+                        affixes = group
+                    else:
                         continue
-                    affixes = group.get("affix", [])
                     for a in affixes:
                         if not isinstance(a, dict):
                             continue

@@ -2567,7 +2567,8 @@ def test_disc_module_material() -> None:
 
 def test_monster_module_material() -> None:
     """O19: _build_monster_material 模块定向——raid {'overview'} 无机制/难度区块、
-    {'stats','mechanic'} 齐全；duel 源（id "1"）含 霸主/弱点/分组 affix 机制。"""
+    {'stats','mechanic'} 齐全；duel 源（id "1"）含 霸主/弱点/分组 affix 机制
+    （裸 list 分组与 {"affix": [...]} 包装两种 schema 均须渲染）。"""
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
@@ -2582,16 +2583,22 @@ def test_monster_module_material() -> None:
     p2_ok = ok_sm and "【首领机制】" in mat_sm and "【难度与属性】" in mat_sm and "弱点" in mat_sm
 
     # 3. duel 源（Overlord 类型/平铺 stat/分组 affix/抗性"无"）：affix 名走
-    #    mock lookup_term 保证确定性，不依赖真实字典翻译
+    #    mock lookup_term 保证确定性，不依赖真实字典翻译。fixture 同时覆盖
+    #    duel 两种分组 schema：裸 list 分组（真实 ss-data 形态，含
+    #    "Furious Kitty"）与 {"affix": [...]} 包装分组（兼容形态）；
+    #    "Furious Kitty" 专属译名用于断言裸 list 分组确实被渲染
     def _fake_lookup(t: str, **_kw) -> dict:
         if t in ("Full-auto Fire", "Volley Formation", "Dark Ray"):
             return {"id": "X", "cat": "MonsterManual", "cn": "固定机制词条"}
+        if t == "Furious Kitty":
+            return {"id": "X", "cat": "MonsterManual", "cn": "裸分组机制词条"}
         return lookup.lookup_term(t, **_kw)
 
     with unittest.mock.patch.object(lookup, "lookup_term", side_effect=_fake_lookup):
         mat_duel, ok_duel = service._build_monster_material(st_fix, "1", lookup, modules={"stats", "mechanic"})
     p3_ok = ok_duel and "类型：霸主" in mat_duel and "弱点：水" in mat_duel and "抗性：无" in mat_duel \
-        and "【首领机制】" in mat_duel and "固定机制词条" in mat_duel and "【面板数值】" in mat_duel
+        and "【首领机制】" in mat_duel and "固定机制词条" in mat_duel and "裸分组机制词条" in mat_duel \
+        and "【面板数值】" in mat_duel
 
     check("O19 首领怪物模块定向（raid overview/stats+mechanic 与 duel 分区渲染）",
           p1_ok and p2_ok and p3_ok)
