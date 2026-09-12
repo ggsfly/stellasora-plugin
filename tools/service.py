@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Collection, Dict, Optional, Set, Tuple
 
 import json
 import logging
@@ -1288,10 +1288,14 @@ def _build_character_material(
     st: StelladbFetcher,
     num_id: str,
     lookup: Any,
+    modules: Optional[Collection[str]] = None,
 ) -> Tuple[str, bool]:
     """渲染角色官方中文资料（来源于 ss-data 的 character.json）。
 
     返回 (material_text, True)；若 dataset 缺失或对应 id 不存在则返回 ("", False)。
+    modules 给定（模块化查询）时只渲染 overview（恒出）+ modules 命中的区块，
+    overview 在模块化模式下补 风格/势力/CV/生日/获取途径，并附带 details 面板
+    与升级材料、talents 天赋轶闻；modules=None 保持既有全量输出逐字节不变。
     """
     if not st:
         return "", False
@@ -1304,6 +1308,8 @@ def _build_character_material(
         return "", False
 
     lines: list[str] = []
+
+    # overview：名称/星级/属性/职业 恒渲染；模块化查询时补 风格/势力/CV/生日/获取途径
     en_name = char.get("name", "")
     cn_name = _cn_by_en(lookup, en_name)
     if en_name and en_name != cn_name:
@@ -1325,96 +1331,158 @@ def _build_character_material(
     if cls_cn:
         lines.append(f"职业：{cls_cn}")
 
+    if modules is not None:
+        # 模块化 overview 扩展字段（缺失省略；style/force/source 经字典反查中文名）
+        style = char.get("style", "")
+        if style:
+            lines.append(f"风格：{_cn_by_en(lookup, style)}")
+        force = char.get("force", "")
+        if force:
+            lines.append(f"势力：{_cn_by_en(lookup, force)}")
+        cv = char.get("cnCv") or char.get("jpCv", "")
+        if cv:
+            lines.append(f"CV：{cv}")
+        birthday = char.get("birthday", "")
+        if birthday:
+            lines.append(f"生日：{birthday}")
+        source = char.get("source", [])
+        if isinstance(source, list) and source:
+            source_cn = [_cn_by_en(lookup, s) for s in source if s]
+            if source_cn:
+                lines.append(f"获取途径：{'、'.join(source_cn)}")
+
+    # details 模块（仅模块化路径新增）：面板数值（stat 取首尾等级，不取 fixedStat）
+    # + 升级材料（upgrade）
+    if modules is not None and "details" in modules:
+        stat_list = char.get("stat", [])
+        if isinstance(stat_list, list) and stat_list:
+            lines.append("【面板数值】")
+            shown_indexes: set[int] = set()
+            for idx in (0, len(stat_list) - 1):
+                if idx in shown_indexes:
+                    continue
+                shown_indexes.add(idx)
+                s = stat_list[idx]
+                if not isinstance(s, dict):
+                    continue
+                parts = []
+                for k in ("HP", "ATK", "DEF"):
+                    if k in s:
+                        label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
+                        parts.append(f"{label} {s[k]}")
+                if not parts:
+                    parts = [f"{_cn_by_en(lookup, k)} {v}" for k, v in s.items()]
+                    parts = parts[:3]
+                lv = s.get("Level", idx + 1)
+                lines.append(f"  {lv}级：{' | '.join(parts)}")
+        upgrade = char.get("upgrade", [])
+        if isinstance(upgrade, list) and upgrade:
+            lines.append("【升级材料】")
+            for idx, item in enumerate(upgrade, start=1):
+                if isinstance(item, dict):
+                    parts = [f"{_cn_by_en(lookup, k)}: {v}" for k, v in item.items()]
+                    lines.append(f"  阶段{idx}：{'、'.join(parts)}")
+
     # 技能块：normalAtk / skill / supportSkill / ultimate
-    skill_configs = [
-        ("normalAtk", "普攻"),
-        ("skill", "主控技能"),
-        ("supportSkill", "援护技能"),
-        ("ultimate", "绝招"),
-    ]
-    for sk_key, sk_label in skill_configs:
-        sk = char.get(sk_key)
-        if sk and isinstance(sk, dict):
-            sk_name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
-            sk_desc = sk.get("descCN") or sk.get("desc", "")
-            lines.append(f"【{sk_label}】{sk_name}")
-            if sk_desc:
-                lines.append(f"描述：{sk_desc}")
-            params = sk.get("params")
-            if params:
-                if isinstance(params, list):
-                    lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
-                else:
-                    lines.append(f"数值表：{params}")
+    if modules is None or "skills" in modules:
+        skill_configs = [
+            ("normalAtk", "普攻"),
+            ("skill", "主控技能"),
+            ("supportSkill", "援护技能"),
+            ("ultimate", "绝招"),
+        ]
+        for sk_key, sk_label in skill_configs:
+            sk = char.get(sk_key)
+            if sk and isinstance(sk, dict):
+                sk_name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
+                sk_desc = sk.get("descCN") or sk.get("desc", "")
+                lines.append(f"【{sk_label}】{sk_name}")
+                if sk_desc:
+                    lines.append(f"描述：{sk_desc}")
+                params = sk.get("params")
+                if params:
+                    if isinstance(params, list):
+                        lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+                    else:
+                        lines.append(f"数值表：{params}")
 
     # 潜能：potential.mainCore / mainNormal / common / supportCore / supportNormal
-    pot = char.get("potential")
-    if pot and isinstance(pot, dict):
-        pot_configs = [
-            ("mainCore", "主控核心潜能"),
-            ("mainNormal", "主控普通潜能"),
-            ("common", "通用潜能"),
-            ("supportCore", "援护核心潜能"),
-            ("supportNormal", "援护普通潜能"),
-        ]
-        for pk_key, pk_label in pot_configs:
-            pot_list = pot.get(pk_key)
-            if pot_list and isinstance(pot_list, list):
-                lines.append(f"【{pk_label}】")
-                for item in pot_list:
-                    if isinstance(item, dict):
-                        p_name = item.get("nameCN") or _cn_by_en(lookup, item.get("name", ""))
-                        p_desc = item.get("descCN") or item.get("desc", "")
-                        if p_name or p_desc:
-                            lines.append(f"  {p_name}：{p_desc}")
+    if modules is None or "potentials" in modules:
+        pot = char.get("potential")
+        if pot and isinstance(pot, dict):
+            pot_configs = [
+                ("mainCore", "主控核心潜能"),
+                ("mainNormal", "主控普通潜能"),
+                ("common", "通用潜能"),
+                ("supportCore", "援护核心潜能"),
+                ("supportNormal", "援护普通潜能"),
+            ]
+            for pk_key, pk_label in pot_configs:
+                pot_list = pot.get(pk_key)
+                if pot_list and isinstance(pot_list, list):
+                    lines.append(f"【{pk_label}】")
+                    for item in pot_list:
+                        if isinstance(item, dict):
+                            p_name = item.get("nameCN") or _cn_by_en(lookup, item.get("name", ""))
+                            p_desc = item.get("descCN") or item.get("desc", "")
+                            if p_name or p_desc:
+                                lines.append(f"  {p_name}：{p_desc}")
 
-    # 天赋：talent
-    talents = char.get("talent")
-    if talents and isinstance(talents, list):
-        lines.append("【天赋】")
-        for t in talents:
-            if isinstance(t, dict):
-                if t.get("nameCN") or t.get("descCN"):
-                    t_name = t.get("nameCN") or _cn_by_en(lookup, t.get("name", ""))
-                    t_desc = t.get("descCN") or t.get("desc", "")
-                    lines.append(f"  {t_name}：{t_desc}")
-                elif t.get("boost") and isinstance(t["boost"], list):
-                    for b in t["boost"]:
-                        if isinstance(b, dict) and (b.get("nameCN") or b.get("descCN")):
-                            b_name = b.get("nameCN") or _cn_by_en(lookup, b.get("name", ""))
-                            b_desc = b.get("descCN") or b.get("desc", "")
-                            lines.append(f"  {b_name}：{b_desc}")
+    # 天赋：talent；模块化查询时追加天赋轶闻（Item.{num_id}.3 命中且含 cn 才输出）
+    if modules is None or "talents" in modules:
+        talents = char.get("talent")
+        if talents and isinstance(talents, list):
+            lines.append("【天赋】")
+            for t in talents:
+                if isinstance(t, dict):
+                    if t.get("nameCN") or t.get("descCN"):
+                        t_name = t.get("nameCN") or _cn_by_en(lookup, t.get("name", ""))
+                        t_desc = t.get("descCN") or t.get("desc", "")
+                        lines.append(f"  {t_name}：{t_desc}")
+                    elif t.get("boost") and isinstance(t["boost"], list):
+                        for b in t["boost"]:
+                            if isinstance(b, dict) and (b.get("nameCN") or b.get("descCN")):
+                                b_name = b.get("nameCN") or _cn_by_en(lookup, b.get("name", ""))
+                                b_desc = b.get("descCN") or b.get("desc", "")
+                                lines.append(f"  {b_name}：{b_desc}")
+        if modules is not None:
+            # 天赋轶闻：查询失败不兜底造数据，命中且含中文才追加
+            flavor = lookup.lookup_term(f"Item.{num_id}.3")
+            if flavor and isinstance(flavor, dict) and flavor.get("cn"):
+                lines.append(f"天赋轶闻：{flavor['cn']}")
 
     # 礼物：loveGift / hateGift
-    love_gifts = char.get("loveGift", [])
-    if isinstance(love_gifts, list) and love_gifts:
-        love_cn = [_cn_by_en(lookup, g) for g in love_gifts if g]
-        if love_cn:
-            lines.append(f"喜好礼物：{'、'.join(love_cn)}")
-    hate_gifts = char.get("hateGift", [])
-    if isinstance(hate_gifts, list) and hate_gifts:
-        hate_cn = [_cn_by_en(lookup, g) for g in hate_gifts if g]
-        if hate_cn:
-            lines.append(f"厌恶礼物：{'、'.join(hate_cn)}")
+    if modules is None or "gifts" in modules:
+        love_gifts = char.get("loveGift", [])
+        if isinstance(love_gifts, list) and love_gifts:
+            love_cn = [_cn_by_en(lookup, g) for g in love_gifts if g]
+            if love_cn:
+                lines.append(f"喜好礼物：{'、'.join(love_cn)}")
+        hate_gifts = char.get("hateGift", [])
+        if isinstance(hate_gifts, list) and hate_gifts:
+            hate_cn = [_cn_by_en(lookup, g) for g in hate_gifts if g]
+            if hate_cn:
+                lines.append(f"厌恶礼物：{'、'.join(hate_cn)}")
 
     # 约会分支：date
-    dates = char.get("date", [])
-    if isinstance(dates, list) and dates:
-        lines.append("【约会分支】")
-        for d in dates:
-            if isinstance(d, dict):
-                d_name = _cn_by_en(lookup, d.get("name", ""))
-                d_clue = _cn_by_en(lookup, d.get("clue", ""))
-                d_choice = _cn_by_en(lookup, d.get("secondChoice", ""))
-                parts = []
-                if d_name:
-                    parts.append(f"事件：{d_name}")
-                if d_clue:
-                    parts.append(f"解锁线索：{d_clue}")
-                if d_choice:
-                    parts.append(f"分支选择：{d_choice}")
-                if parts:
-                    lines.append(f"  {' | '.join(parts)}")
+    if modules is None or "dates" in modules:
+        dates = char.get("date", [])
+        if isinstance(dates, list) and dates:
+            lines.append("【约会分支】")
+            for d in dates:
+                if isinstance(d, dict):
+                    d_name = _cn_by_en(lookup, d.get("name", ""))
+                    d_clue = _cn_by_en(lookup, d.get("clue", ""))
+                    d_choice = _cn_by_en(lookup, d.get("secondChoice", ""))
+                    parts = []
+                    if d_name:
+                        parts.append(f"事件：{d_name}")
+                    if d_clue:
+                        parts.append(f"解锁线索：{d_clue}")
+                    if d_choice:
+                        parts.append(f"分支选择：{d_choice}")
+                    if parts:
+                        lines.append(f"  {' | '.join(parts)}")
 
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
@@ -1551,7 +1619,9 @@ _MODULE_KEYWORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     },
     "monster": {
         "stats": ("数值", "面板", "血量", "生命", "攻击", "防御", "stats", "属性值"),
-        "mechanic": ("机制", "打法", "怎么打", "攻略", "技能", "难点", "核心机制"),
+        # 注意：不得含"怎么打/攻略/打法"——那是 how 工具（stellasora_how 配队/打法）
+        # 的意图词，加入会造成 what/how 意图竞争、误路由到怪物机制
+        "mechanic": ("机制", "技能", "难点", "核心机制"),
     },
 }
 

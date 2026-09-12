@@ -12,6 +12,81 @@
       "attackType": "Ranged",
       "style": "Collector",
       "force": "New Star Guild",
+      "cnCv": "Si Bai",
+      "jpCv": "Yuuki Takada",
+      "birthday": "August 8th",
+      "source": [
+        "Permanent",
+        "Standard",
+        "Recruit",
+        "Gacha",
+        "Banner",
+        "f2p"
+      ],
+      "stat": [
+        {
+          "Level": 1,
+          "HP": 700,
+          "ATK": 100,
+          "DEF": 190,
+          "Crit Rate": "5%",
+          "Crit DMG": "150%",
+          "Resilience Break Efficiency": "100%",
+          "VUL Exploit": "0%"
+        },
+        {
+          "Level": 40,
+          "HP": 11200,
+          "ATK": 1600,
+          "DEF": 1900,
+          "Crit Rate": "5%",
+          "Crit DMG": "150%",
+          "Resilience Break Efficiency": "100%",
+          "VUL Exploit": "0%"
+        }
+      ],
+      "upgrade": [
+        {
+          "Count's Rewards": 5,
+          "Dorra": 7900
+        },
+        {
+          "Count's Rewards": 5,
+          "Count's Cellaring": 10,
+          "Dorra": 19800
+        },
+        {
+          "Count's Rewards": 10,
+          "Count's Cellaring": 15,
+          "Dorra": 44400
+        },
+        {
+          "Count's Rewards": 15,
+          "Count's Cellaring": 25,
+          "Dorra": 66600
+        },
+        {
+          "Count's Rewards": 20,
+          "Count's Cellaring": 40,
+          "Dorra": 146100
+        },
+        {
+          "Count's Rewards": 30,
+          "Count's Cellaring": 55,
+          "Count's Gift": 20,
+          "Dorra": 291600
+        },
+        {
+          "Count's Cellaring": 75,
+          "Count's Gift": 30,
+          "Dorra": 560200
+        },
+        {
+          "Count's Cellaring": 95,
+          "Count's Gift": 50,
+          "Dorra": 1121300
+        }
+      ],
       "tag": [
         "Vanguard",
         "Collector",
