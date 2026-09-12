@@ -2370,10 +2370,11 @@ def test_monster_match_and_material() -> None:
     mat, ok = service._build_monster_material(st_fix, m_id, lookup)
     p1_ok = (m_id == "51002" and ok and ("弱" in mat or "弱点" in mat) and "机制" in mat)
 
-    # 2. MonsterManual dict 路径（防死分支回归）
+    # 2. MonsterManual dict 路径（防死分支回归）：question="机制" 命中
+    #    模块化选段的 mechanic 区块，断言内容保持既有语义不变
     with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.51002.1", "cat": "MonsterManual", "cn": "歌剧魅影", "en": "Opera Ghost"}):
         with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, None)):
-            q_res = service.query_what("某怪名", cache_dir=fixtures_dir)
+            q_res = service.query_what("某怪名", cache_dir=fixtures_dir, question="某怪名的机制")
             p2_ok = ("弱" in q_res or "弱点" in q_res) and "机制" in q_res and "没有专属攻略页" not in q_res
 
     # 3. 降级路径：lookup_term 命中 absent id，_match_monster 降级命中真实键
@@ -2400,12 +2401,12 @@ def test_query_what_fallback() -> None:
 
 
 def test_query_what_disc_route() -> None:
-    """O10: 端到端 disc 路由——query_what('朝霭') 含 强音·主调。"""
+    """O10: 端到端 disc 路由——query_what('朝霭', question='朝霭的旋律') 含 强音·主调。"""
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
     with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
-        res = service.query_what("朝霭", cache_dir=fixtures_dir)
+        res = service.query_what("朝霭", cache_dir=fixtures_dir, question="朝霭的旋律")
         check("O10 端到端 disc 路由渲染含强音·主调",
               "强音·主调" in res and "<color" not in res)
 
@@ -2490,6 +2491,149 @@ def test_term_cn_map() -> None:
     check("O15 术语映射（11 项 + Damage Per Score + Raid）", n_ok and dps_ok and raid_ok)
 
 
+def test_what_module_detection() -> None:
+    """O16: _detect_what_modules 模块检测——命座→talents、培养材料→details、
+    空→overview、monster「机制」→mechanic、跨类型「技能」隔离。"""
+    from service import _detect_what_modules  # noqa: E402
+
+    ok_talents = _detect_what_modules("琥珀的命座", "character") == {"overview", "talents"}
+    ok_details = _detect_what_modules("培养材料", "character") == {"overview", "details"}
+    ok_empty = _detect_what_modules("", "character") == {"overview"}
+    ok_mechanic = _detect_what_modules("这个boss的机制", "monster") == {"overview", "mechanic"}
+    # 跨类型「技能」隔离：character→skills / disc→melody / monster→mechanic
+    ok_skill_char = _detect_what_modules("技能", "character") == {"overview", "skills"}
+    ok_skill_disc = _detect_what_modules("技能的旋律", "disc") == {"overview", "melody"}
+    ok_skill_mon = _detect_what_modules("技能", "monster") == {"overview", "mechanic"}
+    ok_stats = _detect_what_modules("血量", "monster") == {"overview", "stats"}
+    check("O16 what 模块检测（命座/培养材料/空/机制/技能隔离/stats）",
+          ok_talents and ok_details and ok_empty and ok_mechanic
+          and ok_skill_char and ok_skill_disc and ok_skill_mon and ok_stats)
+
+
+def test_character_module_material() -> None:
+    """O17: _build_character_material 模块定向——skills 含【普攻】无【约会分支】、
+    talents 含【天赋】+天赋轶闻（mock lookup_term 保证确定性）、details 含面板数值/
+    升级材料、modules=None 全量含【约会分支】。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    # 1. 技能模块：含【普攻】，不含【约会分支】
+    mat_s, ok_s = service._build_character_material(st_fix, "103", lookup, modules={"overview", "skills"})
+    p1_ok = ok_s and "【普攻】" in mat_s and "二重奏" in mat_s and "约会分支" not in mat_s
+
+    # 2. 天赋模块：含【天赋】与天赋轶闻；lookup_term("Item.103.3") 走 mock，
+    #    不依赖真实字典内容保证确定性
+    def _fake_lookup(t: str, **_kw) -> dict:
+        if t == "Item.103.3":
+            return {"id": "Item.103.3", "cat": "Item", "cn": "测试用天赋轶闻"}
+        return lookup.lookup_term(t, **_kw)
+
+    with unittest.mock.patch.object(lookup, "lookup_term", side_effect=_fake_lookup):
+        mat_t, ok_t = service._build_character_material(st_fix, "103", lookup, modules={"overview", "talents"})
+    p2_ok = ok_t and "【天赋】" in mat_t and "天赋轶闻：测试用天赋轶闻" in mat_t and "约会分支" not in mat_t
+
+    # 3. details 模块：面板数值（首尾等级）+ 升级材料
+    mat_d, ok_d = service._build_character_material(st_fix, "103", lookup, modules={"overview", "details"})
+    p3_ok = ok_d and "【面板数值】" in mat_d and "1级" in mat_d and "40级" in mat_d and "【升级材料】" in mat_d
+
+    # 4. modules=None 全量路径：保留既有逐字节输出，含【约会分支】
+    mat_full, ok_full = service._build_character_material(st_fix, "103", lookup)
+    p4_ok = ok_full and "【约会分支】" in mat_full and "【普攻】" in mat_full and "【天赋】" in mat_full
+
+    check("O17 角色资料模块定向（skills/talents+轶闻/details/全量约会分支）",
+          p1_ok and p2_ok and p3_ok and p4_ok)
+
+
+def test_disc_module_material() -> None:
+    """O18: _build_disc_material 模块定向——melody 含强音·主调不含升级消耗；
+    details 含升级消耗不含强音·主调。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    # 1. melody 模块：主技能 + 支援旋律，不含升级消耗/潜能加成
+    mat_m, ok_m = service._build_disc_material(st_fix, "211001", lookup, modules={"overview", "melody"})
+    p1_ok = ok_m and "【主技能】" in mat_m and "强音·主调" in mat_m and "【支援旋律】" in mat_m \
+        and "升级消耗" not in mat_m and "潜能加成" not in mat_m
+
+    # 2. details 模块：面板数值 + 潜能加成 + 升级消耗，不含主技能
+    mat_d, ok_d = service._build_disc_material(st_fix, "211001", lookup, modules={"overview", "details"})
+    p2_ok = ok_d and "【面板数值】" in mat_d and "【潜能加成】" in mat_d and "【升级消耗】" in mat_d \
+        and "强音·主调" not in mat_d
+
+    check("O18 秘纹资料模块定向（melody 无升级消耗/details 有升级消耗）", p1_ok and p2_ok)
+
+
+def test_monster_module_material() -> None:
+    """O19: _build_monster_material 模块定向——raid {'overview'} 无机制/难度区块、
+    {'stats','mechanic'} 齐全；duel 源（id "1"）含 霸主/弱点/分组 affix 机制。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    # 1. raid 51002 仅 overview：无【首领机制】/【难度与属性】
+    mat_ov, ok_ov = service._build_monster_material(st_fix, "51002", lookup, modules={"overview"})
+    p1_ok = ok_ov and "【首领】" in mat_ov and "弱点" in mat_ov \
+        and "【首领机制】" not in mat_ov and "【难度与属性】" not in mat_ov
+
+    # 2. raid 51002 stats+mechanic 定向：两个区块齐全
+    mat_sm, ok_sm = service._build_monster_material(st_fix, "51002", lookup, modules={"stats", "mechanic"})
+    p2_ok = ok_sm and "【首领机制】" in mat_sm and "【难度与属性】" in mat_sm and "弱点" in mat_sm
+
+    # 3. duel 源（Overlord 类型/平铺 stat/分组 affix/抗性"无"）：affix 名走
+    #    mock lookup_term 保证确定性，不依赖真实字典翻译
+    def _fake_lookup(t: str, **_kw) -> dict:
+        if t in ("Full-auto Fire", "Volley Formation", "Dark Ray"):
+            return {"id": "X", "cat": "MonsterManual", "cn": "固定机制词条"}
+        return lookup.lookup_term(t, **_kw)
+
+    with unittest.mock.patch.object(lookup, "lookup_term", side_effect=_fake_lookup):
+        mat_duel, ok_duel = service._build_monster_material(st_fix, "1", lookup, modules={"stats", "mechanic"})
+    p3_ok = ok_duel and "类型：霸主" in mat_duel and "弱点：水" in mat_duel and "抗性：无" in mat_duel \
+        and "【首领机制】" in mat_duel and "固定机制词条" in mat_duel and "【面板数值】" in mat_duel
+
+    check("O19 首领怪物模块定向（raid overview/stats+mechanic 与 duel 分区渲染）",
+          p1_ok and p2_ok and p3_ok)
+
+
+def test_what_end_to_end_modules() -> None:
+    """O20: 端到端模块化——query_what('琥珀', question='琥珀的命座') 含【天赋】无
+    【约会分支】；question='' 仅 overview 基底；概念页（当期讨伐）不受模块影响。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+        # 1. 问题定向到天赋模块：含【天赋】+天赋轶闻，无【约会分支】/【普攻】
+        r_tal = service.query_what("琥珀", cache_dir=fixtures_dir, question="琥珀的命座")
+        p1_ok = "【天赋】" in r_tal and "约会分支" not in r_tal and "【普攻】" not in r_tal
+
+        # 2. 空问题仅 overview 基底：三个区块均不输出
+        r_ov = service.query_what("琥珀", cache_dir=fixtures_dir, question="")
+        p2_ok = "【天赋】" not in r_ov and "约会分支" not in r_ov and "【普攻】" not in r_ov
+
+        # 3. 概念页（当期讨伐）不经过模块检测，整页输出含两 boss 名
+        r_blitz = service.query_what("当期讨伐boss", cache_dir=fixtures_dir, question="当期讨伐boss的机制")
+        p3_ok = "Furious Stomper Crab" in r_blitz and "Forbidden Beauty" in r_blitz
+
+    check("O20 端到端模块化（命座定向/空问题概述/概念页不受影响）", p1_ok and p2_ok and p3_ok)
+
+
+def test_no_truncation() -> None:
+    """O21: 超长 descCN 整条输出——blitz fixture floor24 Bounty: Nimble Dodge 的
+    descCN（199 字符含 <color> 标签）全量渲染：含完整「共计5400分」句尾、无
+    <color/</colo 断片、无「资料因长度限制被截断」标记。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mat, ok = service._build_blitz_material(st_fix, lookup)
+    check("O21 超长 descCN 整条输出无截断无断片",
+          ok
+          and "成功完成躲避即获得675技巧得分，最多触发8次，共计5400分" in mat
+          and "资料因长度限制被截断" not in mat
+          and "<color" not in mat and "</colo" not in mat and "</color" not in mat)
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2506,6 +2650,12 @@ def run_section_o() -> None:
     test_luming_alias_routes_to_disc()
     test_blitz_current_bosses()
     test_term_cn_map()
+    test_what_module_detection()
+    test_character_module_material()
+    test_disc_module_material()
+    test_monster_module_material()
+    test_what_end_to_end_modules()
+    test_no_truncation()
 
 
 # ===== 汇总入口 =====
