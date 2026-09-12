@@ -1,0 +1,414 @@
+{
+  "url": "",
+  "name": "character",
+  "timestamp": 1,
+  "data": {
+    "103": {
+      "id": 103,
+      "name": "Amber",
+      "star": 4,
+      "element": "Ignis",
+      "class": "Vanguard",
+      "attackType": "Ranged",
+      "style": "Collector",
+      "force": "New Star Guild",
+      "tag": [
+        "Vanguard",
+        "Collector",
+        "New Star Guild"
+      ],
+      "loveGift": [
+        "Card Photo Capturer",
+        "Reflective Photo Capturer",
+        "Ultra-Precision Photo Capturer",
+        "Rising Star",
+        "Emerging Talent",
+        "Shining Star"
+      ],
+      "hateGift": [],
+      "date": [
+        {
+          "id": 103301,
+          "name": "The Kitten Encounter",
+          "clue": "Visit the Port to unlock",
+          "secondChoice": "How about doing some night fishing?"
+        }
+      ],
+      "normalAtk": {
+        "id": 10310000,
+        "name": "Duet",
+        "nameCN": "二重奏",
+        "nameJP": "デュアルファイア",
+        "nameKR": "2중주",
+        "energyLimit": 25.56,
+        "desc": "Fires both pistols. Each shot deals <color=#fb8037>&Param1&</color> of ATK as Ignis Auto Attack DMG. Magazine holds 12 ammo.",
+        "descCN": "双枪连射，每次造成攻击力<color=#fb8037>&Param1&</color>的火系普攻伤害，弹匣容量为12。",
+        "descJP": "双銃で連射し、それぞれ攻撃力の<color=#fb8037>&Param1&</color>の火属性の通常攻撃ダメージを与える。装填上限は12発。",
+        "descKR": "쌍권총이 연사하여, 매회 공격력 <color=#fb8037>&Param1&</color>의 불 속성 일반 공격 피해를 입힌다. 탄창 용량은 12발이다.",
+        "damageType": [
+          "Auto Attack (0.71e, from Normal attack, scale with Normal attack)"
+        ],
+        "effectType": [],
+        "addAttrType": [],
+        "effectData": [],
+        "buffIcon": [],
+        "params": [
+          "9.9%/10.9%/11.8%/14.8%/15.8%/16.8%/18.8%/19.7%/20.7%/22.7%/23.7%/24.7%/25.7%"
+        ],
+        "paramsTooltips": [
+          {
+            "damageType": "Auto Attack (0.71e, from Normal attack, scale with Normal attack)"
+          }
+        ],
+        "icon": "10301_Normal"
+      },
+      "skill": {
+        "id": 10331000,
+        "name": "Fireworks Jam",
+        "nameCN": "烟火摇滚",
+        "nameJP": "アークブラスト",
+        "nameKR": "로큰롤 불꽃",
+        "cooldown": "8s",
+        "energyLimit": 23.1,
+        "desc": "Fires both pistols in a sweeping motion, dealing <color=#fb8037>&Param1& x2</color> and <color=#fb8037>&Param2& x4</color> of ATK as AoE Ignis Skill DMG, and increasing Auto Attack DMG by &Param4& for &Param5&s.\u000bFireworks Jam (Main Skill) can trigger ##Ignis Mark: Sacred Flame#2013# and inflict Incineration, dealing &Param3& of ATK as AoE Ignis Mark DMG.",
+        "descCN": "双枪扫射，先后造成攻击力<color=#fb8037>&Param1&x2</color>、<color=#fb8037>&Param2&x4</color>的大范围火系技能伤害，并且使普攻伤害提升&Param4&，持续&Param5&秒。\u000b主控技「烟火摇滚」可触发##火系印记：圣焰#2013#，产生「超燃」：造成攻击力&Param3&的范围火系印记伤害。",
+        "descJP": "双銃で掃射し、広範囲に攻撃力の<color=#fb8037>&Param1&x2</color>、<color=#fb8037>&Param2&x4</color>の火属性のスキルダメージを与える。さらに、&Param5&秒間、通常攻撃ダメージが&Param4&増加する。\u000b主力スキルは##火属性の印：聖炎#2013#を発動させることができる。発動させると、超燃を発生させ、範囲内に攻撃力の&Param3&の火属性の印ダメージを与える。",
+        "descKR": "쌍권총으로 난사하여 각각 공격력 <color=#fb8037>&Param1&x2</color>, <color=#fb8037>&Param2&x4</color>의 큰 범위 불 속성 스킬 피해를 입히고, 일반 공격 피해가 &Param4& 증가한다. &Param5&초간 지속된다. \u000b메인 스킬 「로큰롤 불꽃」이 ##불 속성 표식: 성염#2013#을 발동할 수 있고, 「초연」을 생성해 공격력 &Param3&의 불 속성 범위 표식 피해를 입힌다.",
+        "damageType": [
+          "Skill (5.78e, from Skill, scale with Skill)",
+          "Skill (2.89e, from Skill, scale with Skill)",
+          "Mark"
+        ],
+        "effectType": [
+          "Auto Attack DMG (base)"
+        ],
+        "addAttrType": [],
+        "effectData": [],
+        "buffIcon": [
+          "Icon_CommonBuff_AttackUp"
+        ],
+        "params": [
+          "46%/51%/55%/69%/73%/78%/87%/92%/96%/106%/110%/115%/119%",
+          "3.3%/3.6%/3.9%/4.9%/5.3%/5.6%/6.2%/6.6%/6.9%/7.6%/7.9%/8.2%/8.6%",
+          "54%/65%/76%/87%/98%/109%/120%/131%/142%",
+          "25%",
+          10
+        ],
+        "paramsTooltips": [
+          {
+            "damageType": "Skill (5.78e, from Skill, scale with Skill)"
+          },
+          {
+            "damageType": "Skill (2.89e, from Skill, scale with Skill)"
+          },
+          {
+            "damageType": "Mark"
+          },
+          {
+            "effectType": "Auto Attack DMG (base)",
+            "buffIcon": "Icon_CommonBuff_AttackUp"
+          },
+          {
+            "buffIcon": "Icon_CommonBuff_AttackUp"
+          }
+        ],
+        "icon": "10301_Skill_Main_1"
+      },
+      "supportSkill": {
+        "id": 10332000,
+        "name": "Bullet Waltz",
+        "nameCN": "枪弹圆舞",
+        "nameJP": "ファイアロンド",
+        "nameKR": "탄환원무",
+        "cooldown": "14s",
+        "desc": "Charges forward swiftly, dealing <color=#fb8037>&Param1&</color> of ATK as AoE Ignis Skill DMG.\u000bBullet Waltz (Support Skill) can trigger ##Ignis Mark: Sacred Flame#2013# and inflict Incineration, dealing &Param2& of ATK as AoE Ignis Mark DMG.",
+        "descCN": "快速突进，造成攻击力<color=#fb8037>&Param1&</color>的范围火系技能伤害。\u000b援护技「枪弹圆舞」可触发##火系印记：圣焰#2013#，产生「超燃」：造成攻击力&Param2&的范围火系印记伤害。",
+        "descJP": "素早く突進し、範囲内に攻撃力の<color=#fb8037>&Param1&</color>の火属性のスキルダメージを与える。\u000b支援スキルは##火属性の印：聖炎#2013#を発動させることができる。発動させると、超燃を発生させ、範囲内に攻撃力の&Param2&の火属性の印ダメージを与える。",
+        "descKR": "빠르게 돌진하여 공격력 <color=#fb8037>&Param1&</color>의 불 속성 범위 스킬 피해를 입힌다. \u000b지원 스킬 「탄환원무」가 ##불 속성 표식: 성염#2013#을 발동할 수 있고, 「초연」을 생성해 공격력 &Param2&의 불 속성 범위 표식 피해를 입힌다.",
+        "damageType": [
+          "Skill (from Skill, scale with Skill)",
+          "Mark"
+        ],
+        "effectType": [],
+        "addAttrType": [],
+        "effectData": [],
+        "buffIcon": [],
+        "params": [
+          "30%/33%/36%/44%/47%/50%/56%/59%/62%/68%/71%/74%/77%",
+          "54%/65%/76%/87%/98%/109%/120%/131%/142%"
+        ],
+        "paramsTooltips": [
+          {
+            "damageType": "Skill (from Skill, scale with Skill)"
+          },
+          {
+            "damageType": "Mark"
+          }
+        ],
+        "icon": "10301_Skill_Support"
+      },
+      "ultimate": {
+        "id": 10340000,
+        "name": "Spark of Finality",
+        "nameCN": "究极火花",
+        "nameJP": "アルティメットバーン",
+        "nameKR": "궁극의 불꽃",
+        "cooldown": "20s",
+        "energy": 190,
+        "desc": "Shoots a beam at the target, dealing <color=#fb8037>&Param1&</color> of ATK as AoE Ignis Ultimate DMG.\u000bSpark of Finality (Ultimate) can trigger ##Ignis Mark: Sacred Flame#2013# and inflict Incineration, dealing &Param2& of ATK as AoE Ignis Mark DMG.",
+        "descCN": "向目标发射光束，对前方造成攻击力<color=#fb8037>&Param1&</color>的范围火系绝招伤害。\u000b绝招「究极火花」可触发##火系印记：圣焰#2013#，产生「超燃」：造成攻击力&Param2&的范围火系印记伤害。",
+        "descJP": "前方に光線を発射し、範囲内に攻撃力の<color=#fb8037>&Param1&</color>の火属性の必殺技ダメージを与える。\u000b必殺技は##火属性の印：聖炎#2013#を発動させることができる。発動させると、超燃を発生させ、範囲内に攻撃力の&Param2&の火属性の印ダメージを与える。",
+        "descKR": "목표에게 광선을 발사하여, 전방에 공격력 <color=#fb8037>&Param1&</color>의 불 속성 범위 필살기 피해를 입힌다. \u000b필살기 「궁극의 불꽃」이 ##불 속성 표식: 성염#2013#을 발동할 수 있고, 「초연」을 생성해 공격력 &Param2&의 불 속성 범위 표식 피해를 입힌다.",
+        "damageType": [
+          "Ultimate (from Ultimate, scale with Ultimate)",
+          "Mark"
+        ],
+        "effectType": [],
+        "addAttrType": [],
+        "effectData": [],
+        "buffIcon": [],
+        "params": [
+          "479%/527%/574%/718%/766%/814%/910%/957%/1005%/1101%/1149%/1197%/1245%",
+          "54%/65%/76%/87%/98%/109%/120%/131%/142%"
+        ],
+        "paramsTooltips": [
+          {
+            "damageType": "Ultimate (from Ultimate, scale with Ultimate)"
+          },
+          {
+            "damageType": "Mark"
+          }
+        ],
+        "icon": "10301_Ultra"
+      },
+      "potential": {
+        "mainCore": [
+          {
+            "id": 510301,
+            "name": "Dominant Firepower",
+            "nameCN": "优势火力",
+            "nameJP": "超火力",
+            "nameKR": "압도적인 화력",
+            "desc": "After casting Fireworks Jam (Main Skill), immediately reloads <color=#0abec5>36</color> rounds in the magazine. \u000bIncreases Auto Attack DMG by <color=#0abec5>&Param1&</color> before the magazine is depleted.",
+            "descCN": "施放主控技「烟火摇滚」后立即装填弹药<color=#0abec5>36</color>发。\u000b在弹匣用尽前普攻伤害提升<color=#0abec5>&Param1&</color>。",
+            "descJP": "主力スキル発動後、弾丸を<color=#0abec5>36</color>発装填するようになる。\u000b弾倉が空になるまで、通常攻撃ダメージが<color=#0abec5>&Param1&</color>増加する。",
+            "descKR": "메인 스킬 「로큰롤 불꽃」 시전 후 탄약 <color=#0abec5>36</color>발을 즉시 장전한다. \u000b탄창을 다 사용할 때까지 일반 공격 피해가 <color=#0abec5>&Param1&</color> 증가한다.",
+            "damageType": [],
+            "effectType": [
+              "Auto Attack DMG (base)"
+            ],
+            "addAttrType": [],
+            "effectData": [],
+            "buffIcon": [],
+            "params": [
+              "50%"
+            ],
+            "paramsTooltips": [
+              {
+                "effectType": "Auto Attack DMG (base)"
+              }
+            ],
+            "hiddenParams": [],
+            "hiddenParamsTooltips": [],
+            "icon": "10301_Potential_01",
+            "rarity": "core"
+          }
+        ],
+        "mainNormal": [
+          {
+            "id": 510305,
+            "name": "Greed Gunfire",
+            "nameCN": "贪婪枪火",
+            "nameJP": "貪欲銃火",
+            "nameKR": "탐욕의 총화",
+            "desc": "When Amber lands &Param4& Crit Hits, immediately fully reloads the magazine, and increases Auto Attack DMG by <color=#ec6d21>&Param1&</color> for &Param2&s.\u000bThis effect can only be triggered once every &Param3&s.",
+            "descCN": "琥珀累计暴击&Param4&次时，立刻装满弹匣，并使普攻伤害提升<color=#ec6d21>&Param1&</color>，持续&Param2&秒。\u000b该效果每&Param3&秒最多触发1次。",
+            "descJP": "コハクの会心が累計&Param4&回発生時、弾丸を最大まで装填する。さらに、&Param2&秒間、通常攻撃ダメージが<color=#ec6d21>&Param1&</color>増加する。\u000bこの効果は&Param3&秒ごとに1回まで発動する。",
+            "descKR": "코하쿠의 치명타 &Param4&회 누적 시 극한 회피 후 탄창을 즉시 가득 채우고, 일반 공격 피해가 <color=#ec6d21>&Param1&</color> 증가한다. &Param2&초간 지속된다. \u000b해당 효과는 &Param3&초마다 최대 1회 발동한다.",
+            "damageType": [],
+            "effectType": [
+              "Auto Attack DMG (base)"
+            ],
+            "addAttrType": [],
+            "effectData": [],
+            "buffIcon": [
+              "Icon_CommonBuff_AttackUp"
+            ],
+            "params": [
+              "13%/21%/29%/37%/45%/53%/61%/69%/76%",
+              10,
+              14,
+              7
+            ],
+            "paramsTooltips": [
+              {
+                "effectType": "Auto Attack DMG (base)",
+                "buffIcon": "Icon_CommonBuff_AttackUp"
+              },
+              {},
+              {},
+              {}
+            ],
+            "hiddenParams": [],
+            "hiddenParamsTooltips": [],
+            "icon": "10301_Potential_01",
+            "corner": "Diamond",
+            "rarity": "common"
+          }
+        ],
+        "common": [
+          {
+            "id": 510341,
+            "name": "Bursting Spark",
+            "nameCN": "绽焰火花",
+            "nameJP": "烈火の華",
+            "nameKR": "피어오르는 불꽃",
+            "desc": "After casting Spark of Finality (Ultimate), increases Amber's &Param3& by <color=#ec6d21>&Param1&</color> for &Param2&s.",
+            "descCN": "施放绝招「究极火花」后，琥珀的&Param3&提升<color=#ec6d21>&Param1&</color>，持续&Param2&秒。",
+            "descJP": "コハクの必殺技発動後の&Param2&秒間、コハクの&Param3&が<color=#ec6d21>&Param1&</color>上昇する。",
+            "descKR": "필살기 「궁극의 불꽃」 시전 후 코하쿠의 &Param3&이 <color=#ec6d21>&Param1&</color> 증가한다. &Param2&초간 지속된다.",
+            "damageType": [],
+            "effectType": [
+              "ATK (%)"
+            ],
+            "addAttrType": [],
+            "effectData": [],
+            "buffIcon": [
+              "Icon_CommonBuff_AttackUp"
+            ],
+            "params": [
+              "21%/34%/46%/59%/71%/84%/97%/109%/122%",
+              14,
+              "ATK"
+            ],
+            "paramsTooltips": [
+              {
+                "effectType": "ATK (%)",
+                "buffIcon": "Icon_CommonBuff_AttackUp"
+              },
+              {
+                "buffIcon": "Icon_CommonBuff_AttackUp"
+              },
+              {
+                "effectType": "ATK (%)",
+                "buffIcon": "Icon_CommonBuff_AttackUp"
+              }
+            ],
+            "hiddenParams": [],
+            "hiddenParamsTooltips": [],
+            "icon": "10301_Potential_41",
+            "corner": "Diamond",
+            "rarity": "common"
+          }
+        ],
+        "supportCore": [
+          {
+            "id": 510321,
+            "name": "Hunting Waltz",
+            "nameCN": "追猎舞步",
+            "nameJP": "追尾の舞",
+            "nameKR": "추적의 춤",
+            "desc": "While casting Bullet Waltz (Support Skill), Amber <color=#0abec5>follows</color> the target, dealing <color=#0abec5>&Param1& of ATK</color> as Ignis Skill DMG for 6s.",
+            "descCN": "援护技「枪弹圆舞」变为<color=#0abec5>追击</color>目标，造成攻击力<color=#0abec5>&Param1&</color>的火系技能伤害，持续6秒。",
+            "descJP": "コハクの支援スキルは敵を<color=#0abec5>追撃</color>し、6秒間、攻撃力の<color=#0abec5>&Param1&</color>の火属性のスキルダメージを与えるようになる。",
+            "descKR": "지원 스킬 「탄환원무」가 목표를 <color=#0abec5>추격</color>하는 것으로 변경되어, 공격력 <color=#0abec5>&Param1&</color>의 불 속성 스킬 피해를 입힌다. 6초간 지속된다.",
+            "damageType": [
+              "Skill (from Skill, scale with Skill)"
+            ],
+            "effectType": [],
+            "addAttrType": [],
+            "effectData": [],
+            "buffIcon": [],
+            "params": [
+              "22.5%/24.7%/27%/33.7%/35.9%/38.2%/42.7%/44.9%/47.2%/51.7%/53.9%/56.2%/58.4%"
+            ],
+            "paramsTooltips": [
+              {
+                "damageType": "Skill (from Skill, scale with Skill)"
+              }
+            ],
+            "hiddenParams": [],
+            "hiddenParamsTooltips": [],
+            "icon": "10301_Potential_21",
+            "rarity": "core"
+          }
+        ],
+        "supportNormal": [
+          {
+            "id": 510325,
+            "name": "Nimble Catwalk",
+            "nameCN": "灵动猫步",
+            "nameJP": "黒猫の気配",
+            "nameKR": "민첩한 캣스텝",
+            "desc": "Increases the Attack Range of Bullet Waltz (Support Skill), as well as its DMG Multiplier by <color=#ec6d21>&Param1&</color>.",
+            "descCN": "援护技「枪弹圆舞」的攻击范围提升，伤害倍率提升<color=#ec6d21>&Param1&</color>。",
+            "descJP": "コハクの支援スキルは攻撃範囲が拡大し、ダメージ倍率が<color=#ec6d21>&Param1&</color>増加する。",
+            "descKR": "지원 스킬 「탄환원무」의 공격 범위가 증가하고, 피해 배율이 <color=#ec6d21>&Param1&</color> 증가한다.",
+            "damageType": [],
+            "effectType": [],
+            "addAttrType": [
+              "DMG multiplier (base)"
+            ],
+            "effectData": [],
+            "buffIcon": [],
+            "params": [
+              "8%/12%/17%/22%/26%/31%/35%/40%/45%"
+            ],
+            "paramsTooltips": [
+              {
+                "addAttrType": "DMG multiplier (base)"
+              }
+            ],
+            "hiddenParams": [],
+            "hiddenParamsTooltips": [],
+            "icon": "10301_Potential_21",
+            "corner": "Diamond",
+            "rarity": "rare"
+          }
+        ]
+      },
+      "talent": [
+        {
+          "name": "A Dance with Bullets",
+          "boost": [
+            {
+              "name": "A Dance with Bullets",
+              "nameCN": "枪弹的轮舞",
+              "nameJP": "銃弾のロンド",
+              "nameKR": "총탄의 윤무",
+              "desc": "When Amber deals DMG to a target, her Skill DMG is increased by <color=#0abec5>&Param1&</color> for &Param2&s, stacking up to &Param3& times.",
+              "descCN": "琥珀对目标造成伤害后，技能伤害提升<color=#0abec5>&Param1&</color>，持续&Param2&秒，可叠加&Param3&层。",
+              "descJP": "コハクが敵にダメージを与えた後の&Param2&秒間、自身のスキルダメージが<color=#0abec5>&Param1&</color>増加する。この効果は&Param3&回重複できる。",
+              "descKR": "코하쿠가 목표에게 피해를 입힌 후 스킬 피해가 <color=#0abec5>&Param1&</color> 증가한다. &Param2&초간 지속되며, 최대 &Param3&스택 중첩된다.",
+              "effectType": [
+                "Skill DMG (base)"
+              ],
+              "addAttrType": [],
+              "effectData": [],
+              "buffIcon": [
+                "No Icon"
+              ],
+              "params": [
+                "1.6%",
+                10,
+                10
+              ],
+              "paramsTooltips": [
+                {
+                  "effectType": "Skill DMG (base)",
+                  "buffIcon": "No Icon"
+                },
+                {
+                  "buffIcon": "No Icon"
+                },
+                {
+                  "buffIcon": "No Icon"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

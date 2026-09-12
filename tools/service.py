@@ -38,6 +38,19 @@ _INFODOCS_DIR = Path(__file__).resolve().parents[1] / "data" / "offline" / "info
 _team_table_cache: Optional[Dict[str, Any]] = None
 _team_table_cache_mtime: Optional[float] = None
 
+# 元素与战斗弱抗常量（what 扩展 / 角色 / 秘纹 / boss 渲染）
+_ELEMENT_CN = {
+    "Ignis": "火",
+    "Aqua": "水",
+    "Terra": "地",
+    "Ventus": "风",
+    "Lux": "光",
+    "Umbra": "暗",
+    "None": "无",
+}
+_WEAK_LABEL = "弱点"
+_RESIST_LABEL = "抗性"
+
 # 模块级单例（按数据目录缓存，避免每次调用重载 8.8MB 字典）；
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
 # cache_dir 变化时仅重建两个 fetcher，lookup 与 replacer 全进程复用
@@ -1134,3 +1147,283 @@ def check_permission(
     if mode == "blacklist":
         return target not in blacklist
     return False
+
+
+# =====================================================================
+# ss-data 数据集 material 渲染器与中文反查
+# =====================================================================
+
+def _cn_by_en(lookup: Any, en_name: str) -> str:
+    """用 lookup.lookup_term(en_name) 反查中文名；查不到原样返回 en_name。"""
+    if not en_name:
+        return ""
+    if not isinstance(en_name, str):
+        return str(en_name)
+    if lookup is None:
+        return en_name
+    try:
+        res = lookup.lookup_term(en_name)
+        if res and isinstance(res, dict) and res.get("cn"):
+            return res["cn"]
+        # 兜底直接查 names.json 索引
+        if hasattr(lookup, "_name_index") and hasattr(lookup, "_main_dict"):
+            lookup._load()
+            if lookup._name_index and lookup._main_dict:
+                key = lookup._name_index.get(en_name)
+                if not key and getattr(lookup, "_lowercase_index", None):
+                    key = lookup._lowercase_index.get(en_name.lower())
+                if key and key in lookup._main_dict:
+                    cn = lookup._main_dict[key].get("cn")
+                    if cn:
+                        return cn
+    except Exception:
+        pass
+    return en_name
+
+
+def _build_character_material(
+    st: StelladbFetcher,
+    num_id: str,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染角色官方中文资料（来源于 ss-data 的 character.json）。
+
+    返回 (material_text, True)；若 dataset 缺失或对应 id 不存在则返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    dataset = st.fetch_ssdata_dataset("character")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    char = dataset.get(num_id) or dataset.get(str(num_id))
+    if not char or not isinstance(char, dict):
+        return "", False
+
+    lines: list[str] = []
+    en_name = char.get("name", "")
+    cn_name = _cn_by_en(lookup, en_name)
+    if en_name and en_name != cn_name:
+        lines.append(f"【角色】{cn_name}（{en_name}）")
+    else:
+        lines.append(f"【角色】{cn_name or en_name}")
+
+    star = char.get("star")
+    if star:
+        lines.append(f"星级：{star}星")
+
+    elem = char.get("element", "")
+    elem_cn = _ELEMENT_CN.get(elem, elem)
+    if elem_cn:
+        lines.append(f"属性：{elem_cn}")
+
+    cls = char.get("class", "")
+    cls_cn = _cn_by_en(lookup, cls)
+    if cls_cn:
+        lines.append(f"职业：{cls_cn}")
+
+    # 技能块：normalAtk / skill / supportSkill / ultimate
+    skill_configs = [
+        ("normalAtk", "普攻"),
+        ("skill", "主控技能"),
+        ("supportSkill", "援护技能"),
+        ("ultimate", "绝招"),
+    ]
+    for sk_key, sk_label in skill_configs:
+        sk = char.get(sk_key)
+        if sk and isinstance(sk, dict):
+            sk_name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
+            sk_desc = sk.get("descCN") or sk.get("desc", "")
+            lines.append(f"【{sk_label}】{sk_name}")
+            if sk_desc:
+                lines.append(f"描述：{sk_desc}")
+            params = sk.get("params")
+            if params:
+                if isinstance(params, list):
+                    lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+                else:
+                    lines.append(f"数值表：{params}")
+
+    # 潜能：potential.mainCore / mainNormal / common / supportCore / supportNormal
+    pot = char.get("potential")
+    if pot and isinstance(pot, dict):
+        pot_configs = [
+            ("mainCore", "主控核心潜能"),
+            ("mainNormal", "主控普通潜能"),
+            ("common", "通用潜能"),
+            ("supportCore", "援护核心潜能"),
+            ("supportNormal", "援护普通潜能"),
+        ]
+        for pk_key, pk_label in pot_configs:
+            pot_list = pot.get(pk_key)
+            if pot_list and isinstance(pot_list, list):
+                lines.append(f"【{pk_label}】")
+                for item in pot_list:
+                    if isinstance(item, dict):
+                        p_name = item.get("nameCN") or _cn_by_en(lookup, item.get("name", ""))
+                        p_desc = item.get("descCN") or item.get("desc", "")
+                        if p_name or p_desc:
+                            lines.append(f"  {p_name}：{p_desc}")
+
+    # 天赋：talent
+    talents = char.get("talent")
+    if talents and isinstance(talents, list):
+        lines.append("【天赋】")
+        for t in talents:
+            if isinstance(t, dict):
+                if t.get("nameCN") or t.get("descCN"):
+                    t_name = t.get("nameCN") or _cn_by_en(lookup, t.get("name", ""))
+                    t_desc = t.get("descCN") or t.get("desc", "")
+                    lines.append(f"  {t_name}：{t_desc}")
+                elif t.get("boost") and isinstance(t["boost"], list):
+                    for b in t["boost"]:
+                        if isinstance(b, dict) and (b.get("nameCN") or b.get("descCN")):
+                            b_name = b.get("nameCN") or _cn_by_en(lookup, b.get("name", ""))
+                            b_desc = b.get("descCN") or b.get("desc", "")
+                            lines.append(f"  {b_name}：{b_desc}")
+
+    # 礼物：loveGift / hateGift
+    love_gifts = char.get("loveGift", [])
+    if isinstance(love_gifts, list) and love_gifts:
+        love_cn = [_cn_by_en(lookup, g) for g in love_gifts if g]
+        if love_cn:
+            lines.append(f"喜好礼物：{'、'.join(love_cn)}")
+    hate_gifts = char.get("hateGift", [])
+    if isinstance(hate_gifts, list) and hate_gifts:
+        hate_cn = [_cn_by_en(lookup, g) for g in hate_gifts if g]
+        if hate_cn:
+            lines.append(f"厌恶礼物：{'、'.join(hate_cn)}")
+
+    # 约会分支：date
+    dates = char.get("date", [])
+    if isinstance(dates, list) and dates:
+        lines.append("【约会分支】")
+        for d in dates:
+            if isinstance(d, dict):
+                d_name = _cn_by_en(lookup, d.get("name", ""))
+                d_clue = _cn_by_en(lookup, d.get("clue", ""))
+                d_choice = _cn_by_en(lookup, d.get("secondChoice", ""))
+                parts = []
+                if d_name:
+                    parts.append(f"事件：{d_name}")
+                if d_clue:
+                    parts.append(f"解锁线索：{d_clue}")
+                if d_choice:
+                    parts.append(f"分支选择：{d_choice}")
+                if parts:
+                    lines.append(f"  {' | '.join(parts)}")
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+
+
+def _build_disc_material(
+    st: StelladbFetcher,
+    num_id: str,
+    lookup: Any,
+) -> Tuple[str, bool]:
+    """渲染秘纹官方中文资料（来源于 ss-data 的 disc.json）。
+
+    返回 (material_text, True)；若 dataset 缺失或对应 id 不存在则返回 ("", False)。
+    """
+    if not st:
+        return "", False
+    dataset = st.fetch_ssdata_dataset("disc")
+    if not dataset or not isinstance(dataset, dict):
+        return "", False
+
+    disc = dataset.get(num_id) or dataset.get(str(num_id))
+    if not disc or not isinstance(disc, dict):
+        return "", False
+
+    lines: list[str] = []
+    en_name = disc.get("name", "")
+    cn_name = _cn_by_en(lookup, en_name)
+    if en_name and en_name != cn_name:
+        lines.append(f"【秘纹】{cn_name}（{en_name}）")
+    else:
+        lines.append(f"【秘纹】{cn_name or en_name}")
+
+    star = disc.get("star")
+    if star:
+        lines.append(f"星级：{star}星")
+
+    elem = disc.get("element", "")
+    elem_cn = _ELEMENT_CN.get(elem, elem)
+    if elem_cn:
+        lines.append(f"属性：{elem_cn}")
+
+    tags = disc.get("tag", [])
+    if isinstance(tags, list) and tags:
+        tag_cn = [_cn_by_en(lookup, t) for t in tags if t]
+        if tag_cn:
+            lines.append(f"标签：{'、'.join(tag_cn)}")
+
+    chars = disc.get("char", [])
+    if isinstance(chars, list) and chars:
+        char_cn = [_cn_by_en(lookup, c) for c in chars if c]
+        if char_cn:
+            lines.append(f"适配角色：{'、'.join(char_cn)}")
+
+    main_skill = disc.get("mainSkill")
+    if main_skill and isinstance(main_skill, dict):
+        ms_name = main_skill.get("nameCN") or _cn_by_en(lookup, main_skill.get("name", ""))
+        ms_desc = main_skill.get("descCN") or main_skill.get("desc", "")
+        lines.append(f"【主技能】{ms_name}")
+        if ms_desc:
+            lines.append(f"描述：{ms_desc}")
+        params = main_skill.get("params")
+        if params:
+            if isinstance(params, list):
+                lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+            else:
+                lines.append(f"数值表：{params}")
+
+    has_secondary = False
+    for sec_key, sec_label in [("secondarySkill1", "副技能1"), ("secondarySkill2", "副技能2")]:
+        sec_skill = disc.get(sec_key)
+        if sec_skill and isinstance(sec_skill, dict):
+            has_secondary = True
+            sec_name = sec_skill.get("nameCN") or _cn_by_en(lookup, sec_skill.get("name", ""))
+            sec_desc = sec_skill.get("descCN") or sec_skill.get("desc", "")
+            lines.append(f"【{sec_label}】{sec_name}")
+            if sec_desc:
+                lines.append(f"描述：{sec_desc}")
+            params = sec_skill.get("params")
+            if params:
+                if isinstance(params, list):
+                    lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+                else:
+                    lines.append(f"数值表：{params}")
+
+    if not has_secondary:
+        dupe = disc.get("dupe")
+        if dupe and isinstance(dupe, list):
+            lines.append("【潜能加成】")
+            for idx, item in enumerate(dupe, start=1):
+                if isinstance(item, dict):
+                    parts = [f"{_cn_by_en(lookup, k)} +{v}" for k, v in item.items()]
+                    lines.append(f"  第{idx}层：{'、'.join(parts)}")
+        upgrade = disc.get("upgrade")
+        if upgrade and isinstance(upgrade, list):
+            lines.append("【升级消耗】")
+            for idx, item in enumerate(upgrade, start=1):
+                if isinstance(item, dict):
+                    parts = [f"{_cn_by_en(lookup, k)}: {v}" for k, v in item.items()]
+                    lines.append(f"  阶段{idx}：{'、'.join(parts)}")
+
+    support_notes = disc.get("supportNote")
+    if support_notes and isinstance(support_notes, list):
+        lines.append("【支援旋律】")
+        for item in support_notes:
+            if isinstance(item, dict):
+                parts = [f"{_cn_by_en(lookup, k)} (等级 {v})" for k, v in item.items()]
+                lines.append(f"  {'、'.join(parts)}")
+            elif isinstance(item, str):
+                lines.append(f"  {_cn_by_en(lookup, item)}")
+
+    raw_text = "\n".join(lines)
+    clean_text = strip_game_markup(raw_text)
+    return clean_text, True
+

@@ -1,0 +1,131 @@
+{
+  "url": "",
+  "name": "disc",
+  "timestamp": 1,
+  "data": {
+    "211001": {
+      "id": 211001,
+      "name": "Crisp Morning",
+      "star": 3,
+      "element": "None",
+      "tag": [
+        "Verse"
+      ],
+      "char": [
+        "Noya"
+      ],
+      "mainSkill": {
+        "id": 1001,
+        "name": "Fortissimo: Main Theme",
+        "nameCN": "强音·主调",
+        "nameJP": "フォルティシモ",
+        "nameKR": "포르테·멜로디",
+        "desc": "Increases the main Trekker's ATK by <color=#ec6d21>{1}</color>.",
+        "descCN": "主控角色攻击力提升<color=#ec6d21>{1}</color>。",
+        "descJP": "主力巡遊者の攻撃力が<color=#ec6d21>{1}</color>上昇する。",
+        "descKR": "메인 캐릭터의 공격력이 <color=#ec6d21>{1}</color> 증가한다.",
+        "effectType": [
+          "ATK (%)"
+        ],
+        "addAttrType": [],
+        "effectData": [
+          "NOTHING, SELF, SELF_BE_MAINCONTROL | SELF, DEFAULT | SELF, DEFAULT"
+        ],
+        "buffIcon": [],
+        "params": "7%/8.4%/9.8%/11.2%/12.6%/14%",
+        "icon": "DiscSkill_1",
+        "iconBg": "db_DiscSkill_1"
+      },
+      "secondarySkill1": null,
+      "secondarySkill2": null,
+      "supportNote": [
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        },
+        {
+          "Melody of Pummel": 3
+        }
+      ],
+      "dupe": [
+        {
+          "ATK": 46
+        },
+        {
+          "ATK": 91
+        },
+        {
+          "ATK": 137
+        },
+        {
+          "ATK": 182
+        },
+        {
+          "ATK": 228
+        }
+      ],
+      "upgrade": [
+        {
+          "Faint Light Breath": 1,
+          "Dorra": 2700
+        },
+        {
+          "Faint Light Breath": 1,
+          "Emberflies Soul": 3,
+          "Dorra": 6800
+        },
+        {
+          "Faint Light Breath": 3,
+          "Emberflies Soul": 5,
+          "Dorra": 15200
+        },
+        {
+          "Faint Light Breath": 5,
+          "Emberflies Soul": 8,
+          "Dorra": 22900
+        },
+        {
+          "Faint Light Breath": 6,
+          "Emberflies Soul": 13,
+          "Dorra": 50200
+        },
+        {
+          "Faint Light Breath": 10,
+          "Emberflies Soul": 18,
+          "Evernight Essence": 6,
+          "Dorra": 100300
+        },
+        {
+          "Emberflies Soul": 25,
+          "Evernight Essence": 10,
+          "Dorra": 192800
+        },
+        {
+          "Emberflies Soul": 32,
+          "Evernight Essence": 16,
+          "Dorra": 386000
+        }
+      ]
+    }
+  }
+}
