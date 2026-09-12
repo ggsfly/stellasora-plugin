@@ -327,6 +327,8 @@ class StelladbFetcher:
     def fetch_ssdata_dataset(self, name: str, force_update: bool = False) -> Optional[dict]:
         """获取 ss-data 数据集（character, disc, gacha, raid, item, word 等），本地优先。"""
         offline_file = self.offline_dir / "ssdata" / f"{name}.json" if self.offline_dir else None
+        if offline_file and not offline_file.is_file() and (self.offline_dir / f"{name}.json").is_file():
+            offline_file = self.offline_dir / f"{name}.json"
         if not force_update and offline_file:
             offline_data = _read_offline_dataset(offline_file, name)
             if offline_data is not None:
@@ -359,6 +361,8 @@ class StelladbFetcher:
     def fetch_leaderboard_meta(self, force_update: bool = False) -> Optional[dict]:
         """获取 ssleaderboard 元数据，本地优先。"""
         offline_file = self.offline_dir / "ssleaderboard" / "meta.json" if self.offline_dir else None
+        if offline_file and not offline_file.is_file() and (self.offline_dir / "ssleaderboard_meta.json").is_file():
+            offline_file = self.offline_dir / "ssleaderboard_meta.json"
         if not force_update and offline_file:
             offline_data = _read_offline_dataset(offline_file, "leaderboard")
             if offline_data is not None:
