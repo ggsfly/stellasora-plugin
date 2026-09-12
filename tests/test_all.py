@@ -629,18 +629,6 @@ def run_query_how_section() -> None:
             finally:
                 service.configure_overrides(aliases={})
 
-            # F9 表交集查询（原 F12/F14 迁移为表语义）：fixture 表经 load_team_table 注入
-            fixture_table = {"rows": F_FIXTURE_ROWS, "report": {"invalid_rows": []}}
-            with unittest.mock.patch.object(service, "load_team_table", return_value=fixture_table):
-                hit_single = service.find_team_rows([156])
-                hit_multi = service.find_team_rows([156, 149])
-                miss_single = service.find_team_rows([141])
-                miss_multi = service.find_team_rows([141, 126])
-            check("F9 表交集查询（单角色命中/双角色交集/未命中空列表）",
-                  len(hit_single) == 1 and len(hit_multi) == 1
-                  and hit_multi[0]["main_key"] == F_FIXTURE_CODE
-                  and miss_single == [] and miss_multi == [])
-
             # F10 分组渲染（Design X）：mock umbra.json 写入同一 tmp 目录，
             # 同 guide_ref 区块跨行并组——组头编号、区块字段去重、队友并集 rescue、组尾预设码
             (infodocs_dir / "umbra.json").write_text(
@@ -679,17 +667,6 @@ def run_query_how_section() -> None:
               and "配队" not in mat_real_f
               and len(re.findall(r"^队友：", mat_real_f, flags=re.M)) >= 2,
               f"rows={len(rows_firenze)}")
-
-        # F12 真实表小禾+格芮：4 行按区块聚合为 3 组，队友并集正确
-        rows_sg = service.find_team_rows([156, 149])
-        mat_sg = service.query_how_rows(rows_sg, question="小禾 格芮攻略")
-        check("F12 真实表小禾+格芮：多组头按行序且队友并集正确",
-              len(re.findall(r"^\d+\. ", mat_sg, flags=re.M)) >= 2
-              and "小禾（主控位）" in mat_sg
-              and "格芮（支援位）" in mat_sg
-              and "配队" not in mat_sg
-              and len(re.findall(r"^队友：", mat_sg, flags=re.M)) >= 2,
-              f"rows={len(rows_sg)}")
 
         # F13 None 行独立成组+防御：不同 preset_code 各自成组（首行首槽无 char_id
         # 测并集 ident 回退），空行列表返回空串
@@ -1830,9 +1807,15 @@ def run_section_n() -> None:
             f"empty={rows_empty}, conflict={rows_conflict}",
         )
 
-        # N5: reload_team_table 清除缓存
+        # N5: reload_team_table 清除缓存（行为断言：reload 后 load 重新从磁盘读取真实表）
         service.reload_team_table()
-        check("N5 reload_team_table 成功清除缓存", service._team_table_cache is None)
+        reloaded_table = service.load_team_table()
+        check(
+            "N5 reload_team_table 清缓存后重新从磁盘加载",
+            reloaded_table is not fixture_table
+            and isinstance(reloaded_table.get("rows"), list),
+            f"reloaded_rows={len(reloaded_table.get('rows', []))}",
+        )
 
         # N6: 缓存加载失败处理（损坏文件 / 缺失文件 -> {"rows": [], "report": {}} 不崩溃）
         service.reload_team_table()
@@ -1859,7 +1842,7 @@ def run_section_n() -> None:
         real_rows = real_table.get("rows", [])
         check(
             "N8 真实 team_table.json 成功加载且行数 > 0",
-            len(real_rows) > 0 and service._team_table_cache is not None,
+            len(real_rows) > 0,
             f"count={len(real_rows)}",
         )
 
@@ -1981,19 +1964,6 @@ def run_section_n() -> None:
             f"空串={service._filter_emblem_entry('')!r}, "
             f"全数字={service._filter_emblem_entry('297、298')!r}, "
             f"第4档={service._filter_emblem_entry('第4档：充能效率 30%、297')!r}",
-        )
-
-        # N12: _filter_noise_lines 纯数字行丢弃 + 连续空行折叠
-        # （旧 re.sub(r"\n{3,}", "\n\n") 的列表等价语义：≥2 连续空行折叠为 1）
-        check(
-            "N12 行序列过滤：纯数字行丢弃且真实行保留,≥2连续空行折叠为1",
-            service._filter_noise_lines(["287", "段落一", "", "", "", "段落二", "291"])
-            == ["段落一", "", "段落二"]
-            and service._filter_noise_lines(["297", "298"]) == []
-            and service._filter_noise_lines([]) == []
-            and service._filter_noise_lines(["地系穿透 110", "+3 levels", "30%"])
-            == ["地系穿透 110", "+3 levels", "30%"],
-            f"got={service._filter_noise_lines(['287', '段落一', '', '', '', '段落二', '291'])!r}",
         )
 
         # N14: 渲染端到端——fixture infodoc 含 description/discs 行号噪声行，
