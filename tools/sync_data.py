@@ -55,8 +55,8 @@ def sync_offline_data(
     """核心同步函数：抓取离线数据并持久化到本地。
 
     Args:
-        element: 单一元素名（ignis/aqua/terra/lux/umbra/ventus，或 index/presets）
-        sync_all: 是否执行全量同步（六大元素 + index + presets）
+        element: 单一元素名（ignis/aqua/terra/lux/umbra/ventus，或 index/presets/blitz/blitz_season）
+        sync_all: 是否执行全量同步（六大元素 + index + presets + blitz/blitz_season）
         cache_dir: 网络缓存目录（默认 data/.cache）
         offline_dir: 离线数据存储目录（默认 data/offline）
         proxy: 代理地址，如 "http://127.0.0.1:7890"。
@@ -88,7 +88,7 @@ def sync_offline_data(
     # 确定待同步项目列表
     items_to_sync: List[str] = []
     if sync_all:
-        items_to_sync = list(ELEMENTS) + ["index", "presets"]
+        items_to_sync = list(ELEMENTS) + ["index", "presets", "blitz", "blitz_season"]
     elif element:
         cleaned = element.strip().lower()
         items_to_sync = [cleaned]
@@ -127,15 +127,28 @@ def sync_offline_data(
             elif item == "presets":
                 target_file = target_offline_dir / "presets" / "presets.txt"
                 fetch_func = lambda: gd_fetcher.fetch_presets(force_update=True)
+            elif item == "blitz":
+                target_file = target_offline_dir / "ssdata" / "blitz.json"
+                fetch_func = lambda: st_fetcher.fetch_ssdata_dataset("blitz", force_update=True)
+            elif item == "blitz_season":
+                target_file = target_offline_dir / "ssleaderboard" / "season.json"
+                fetch_func = lambda: st_fetcher.fetch_leaderboard_season(force_update=True)
             else:
-                error_msg = f"未知同步项 '{item}'。支持的元素: {', '.join(ELEMENTS)}，以及 index, presets"
+                error_msg = f"未知同步项 '{item}'。支持的元素: {', '.join(ELEMENTS)}，以及 index, presets, blitz, blitz_season"
 
             if fetch_func and target_file:
                 mtime_before = target_file.stat().st_mtime_ns if target_file.is_file() else None
                 res = fetch_func()
                 mtime_after = target_file.stat().st_mtime_ns if target_file.is_file() else None
 
-                if res and not res.startswith("Error fetching") and mtime_after is not None and mtime_after != mtime_before:
+                if isinstance(res, dict):
+                    # dict 返回（blitz/season 数据集）：以文件更新时间判定是否写盘生效，
+                    # 字符数按 JSON 序列化长度统计（len(dict) 只统计 key 数，报告失真）
+                    success = bool(res) and mtime_after is not None and mtime_after != mtime_before
+                    char_count = len(json.dumps(res, ensure_ascii=False)) if success else 0
+                    if not success:
+                        error_msg = "网络拉取失败或更新未生效（已保留本地现有离线数据）"
+                elif res and not res.startswith("Error fetching") and mtime_after is not None and mtime_after != mtime_before:
                     success = True
                     char_count = len(res)
                 else:
@@ -252,13 +265,13 @@ def main() -> int:
         "--element",
         type=str,
         default=None,
-        help="同步指定元素攻略数据 (ignis/aqua/terra/lux/umbra/ventus) 或 index/presets",
+        help="同步指定元素攻略数据 (ignis/aqua/terra/lux/umbra/ventus) 或 index/presets/blitz/blitz_season",
     )
     parser.add_argument(
         "--all",
         dest="sync_all",
         action="store_true",
-        help="全量同步六大元素 infodoc、索引页 index 及 Google Docs 预设码",
+        help="全量同步 10 项离线数据：六大元素 infodoc、索引页 index、Google Docs 预设码及 blitz/赛季数据",
     )
     parser.add_argument(
         "--proxy",
