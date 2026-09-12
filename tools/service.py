@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import json
 import logging
@@ -1529,6 +1529,48 @@ def _build_disc_material(
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
     return clean_text, True
+
+
+# what 模块词表：路由 = 查哪类（_route_what_keywords 先于实体解析决定走哪条
+# 渲染链路，banner/blitz/disc 概念列表整页输出）；模块 = 问哪块（本词表 + 下方
+# _detect_what_modules），实体确定后按问句命中哪些模块区块。二者正交，模块检测
+# 不反向影响路由。"属性/弱点"等泛览类词天然归 overview（overview 无触发词、
+# 恒在返回集），不设为任何模块触发词。
+_MODULE_KEYWORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "character": {
+        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "培养材料", "升满", "满级", "毕业"),
+        "skills": ("技能", "普攻", "大招", "绝招", "必杀", "援护", "主控", "奥义", "技能升级"),
+        "potentials": ("潜能", "核心潜能", "共鸣"),
+        "talents": ("天赋", "命座", "命之座", "被动特性"),
+        "gifts": ("礼物", "喜好", "喜欢", "厌恶", "讨厌", "赠送", "送什么"),
+        "dates": ("约会", "邀约", "剧情", "好感", "分支", "攻略线"),
+    },
+    "disc": {
+        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "升满", "满级"),
+        "melody": ("旋律", "主旋律", "音符", "支援音符", "曲调", "技能"),
+    },
+    "monster": {
+        "stats": ("数值", "面板", "血量", "生命", "攻击", "防御", "stats", "属性值"),
+        "mechanic": ("机制", "打法", "怎么打", "攻略", "技能", "难点", "核心机制"),
+    },
+}
+
+
+def _detect_what_modules(question: str, entity_type: str) -> Set[str]:
+    """检测问句命中的 what 渲染模块集合（overview 常驻基底）。
+
+    按 entity_type 查 _MODULE_KEYWORDS 词表：对每个模块的触发词做 question.lower()
+    子串匹配（大小写不敏感），同类型内多模块命中取并集；overview 无触发词、
+    恒在返回集；空问句、零命中或未知 entity_type → 仅 {"overview"}。
+    """
+    modules: Set[str] = {"overview"}
+    if not question:
+        return modules
+    lowered = question.lower()
+    for module_name, keywords in _MODULE_KEYWORDS.get(entity_type, {}).items():
+        if any(kw.lower() in lowered for kw in keywords):
+            modules.add(module_name)
+    return modules
 
 
 def _route_what_keywords(term: str) -> Optional[str]:
