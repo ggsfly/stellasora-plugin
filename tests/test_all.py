@@ -2021,7 +2021,7 @@ def run_section_n() -> None:
 
         # N15a 2 角色（问句第一个=小禾）：仅小禾详述，格芮/缇莉娅等进队友并集行
         # （真实数据中共 3 支队伍同时包含小禾与格芮：2 支地系印记 + 1 支格芮普攻）
-        mat_a = service.query_how_rows(rows_156_149, False, None, "小禾 格芮攻略")
+        mat_a = service.query_how_rows(rows_156_149, False, "小禾 格芮攻略")
         check(
             "N15a 详略策略2角色：多组头+仅首问询角色详述+未详述成员进并集行",
             len(re.findall(r"^\d+\. ", mat_a, flags=re.M)) >= 2
@@ -2032,7 +2032,7 @@ def run_section_n() -> None:
         )
 
         # N15b 反序（问句第一个=格芮）：格芮详述、小禾进并集行（保序决胜）
-        mat_b = service.query_how_rows(rows_156_149, False, None, "格芮 小禾攻略")
+        mat_b = service.query_how_rows(rows_156_149, False, "格芮 小禾攻略")
         check(
             "N15b 详略策略反序：格芮详述+小禾进并集行",
             "格芮（支援位）" in mat_b
@@ -2043,7 +2043,7 @@ def run_section_n() -> None:
 
         # N15c 3 角色全详述：TMA 组 3 成员 × 3 等级 = 9 行纹章（同 N13）
         rows_tma15 = [row_tma]
-        mat_c = service.query_how_rows(rows_tma15, False, None, "小禾 格芮 缇莉娅攻略")
+        mat_c = service.query_how_rows(rows_tma15, False, "小禾 格芮 缇莉娅攻略")
         check(
             "N15c 详略策略3角色全员详述：emblem 行数==9",
             sum(1 for ln in mat_c.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
@@ -2051,7 +2051,7 @@ def run_section_n() -> None:
         )
 
         # N15d 触发词（2 角色 + "完整"）→ 全员详述：emblem 行数==9
-        mat_d15 = service.query_how_rows(rows_tma15, False, None, "小禾 格芮完整攻略")
+        mat_d15 = service.query_how_rows(rows_tma15, False, "小禾 格芮完整攻略")
         check(
             "N15d 详略策略触发词全员详述：emblem 行数==9",
             sum(1 for ln in mat_d15.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
@@ -2059,7 +2059,7 @@ def run_section_n() -> None:
         )
 
         # N15e 空角色集回退：不设限全详述，不崩且 emblem 行数==9
-        mat_e = service.query_how_rows(rows_tma15, False, None, "攻略")
+        mat_e = service.query_how_rows(rows_tma15, False, "攻略")
         check(
             "N15e 详略策略空角色集回退全详述：emblem 行数==9",
             sum(1 for ln in mat_e.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
@@ -2078,7 +2078,7 @@ def run_section_n() -> None:
         # N15g 字段筛选触发词（详略词表扩展锁定）：字段问法（纹章）命中触发词表
         # →detail_ens=None→各成员字段齐全（prompt 4b-4e 的"各成员"语义）——
         # 双问询角色（小禾/格芮）的纹章行都进 material，不丢第二角色字段
-        mat_g15 = service.query_how_rows(rows_tma15, False, None, "小禾 格芮 纹章")
+        mat_g15 = service.query_how_rows(rows_tma15, False, "小禾 格芮 纹章")
         seg_by_member: dict = {}
         cur_member: str | None = None
         for ln in mat_g15.split("\n"):
@@ -2467,9 +2467,10 @@ def test_blitz_current_bosses() -> None:
           ok and "Furious Stomper Crab" in mat and "Forbidden Beauty" in mat
           and "弱点" in mat and "机制" in mat
           and "<color" not in mat and "&Param" not in mat)
-    # 2b. 截断伪影回归：长 descCN 截断后不得残留未闭合颜色标签断片
-    # （fixture floor24 Bounty: Nimble Dodge 的 descCN >120 字符且含 <color> 标签）
-    check("O14 descCN 截断无 <color/</color 断片残留",
+    # 2b. 渲染伪影回归：整条 descCN 全量输出、markup 先清理后渲染，
+    # 不得残留未闭合颜色标签断片（fixture floor24 Bounty: Nimble Dodge 的
+    # descCN 含 <color> 标签；截断已删除，标签随 strip_game_markup 完整清除）
+    check("O14 descCN 全量渲染无 <color/</color 断片残留",
           "<color" not in mat and "</color" not in mat and "</colo" not in mat)
 
     # 3. 端到端：mock _get_services 后 query_what 走 blitz 路由

@@ -69,10 +69,6 @@ _TERM_CN = {
     "Mechanic": "机制",
 }
 
-# 当期联合讨伐机制明细渲染上限：单条描述截断字符数 / 每 boss 最多机制条数
-_MAX_MECH_DESC = 120
-_MAX_MECHANIC_COUNT = 8
-
 
 def _term_cn(s: str) -> str:
     """讨伐术语 → 中文：先精确命中 _TERM_CN，否则做区分大小写的子串级替换。
@@ -332,28 +328,7 @@ def find_character_names_ordered(text: str) -> list:
     return [name for _idx, name in sorted(_scan_character_hits(text), key=lambda t: t[0])]
 
 
-def _fit_lines(lines: list, max_length: Optional[int]) -> str:
-    """把行列表拼成文本，超长时按行边界截断并标注（绝不切在行中间）。
-
-    how 路径的 material = trekker 页 + infodoc 全文，可达 40K+ 字符，
-    旧的字符串硬切片会把最后一行切成残句。
-    """
-    text = "\n".join(lines)
-    if max_length is None or len(text) <= max_length:
-        return text
-    kept: list = []
-    total = 0
-    for line in lines:
-        if total + len(line) + 1 > max_length:
-            break
-        kept.append(line)
-        total += len(line) + 1
-    kept.append("……")
-    kept.append("[资料因长度限制被截断，需要后半部分请缩小问题范围或分段询问]")
-    return "\n".join(kept)
-
-
-def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> str:
+def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
 
@@ -361,13 +336,13 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     route = _route_what_keywords(term)
     if route == "banner":
         text, _ = _build_banner_material(st_fetcher, lookup)
-        return _fit_lines(text.splitlines(), max_length)
+        return text
     elif route == "blitz":
         text, _ = _build_blitz_material(st_fetcher, lookup)
-        return _fit_lines(text.splitlines(), max_length)
+        return text
     elif route == "disc":
         text, _ = _build_disc_list_material(st_fetcher, lookup)
-        return _fit_lines(text.splitlines(), max_length)
+        return text
 
     # 2. 查词与首领怪物路由
     res = lookup.lookup_term(term)
@@ -376,11 +351,11 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
         if monster_id:
             text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
             if ok and text:
-                return _fit_lines(text.splitlines(), max_length)
+                return text
         # 当期联合讨伐 boss 名兜底（中/英文名直接命中当期赛季 boss）
         if _match_blitz_boss(term, st_fetcher, lookup):
             text, _ = _build_blitz_material(st_fetcher, lookup)
-            return _fit_lines(text.splitlines(), max_length)
+            return text
         return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
 
     # res 存在且 cat == "MonsterManual"
@@ -396,12 +371,12 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
         if monster_id:
             text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
             if ok and text:
-                return _fit_lines(text.splitlines(), max_length)
+                return text
 
         # 当期联合讨伐 boss 名兜底（MonsterManual 命中但 raid 找不到时的链接形态）
         if _match_blitz_boss(term, st_fetcher, lookup):
             text, _ = _build_blitz_material(st_fetcher, lookup)
-            return _fit_lines(text.splitlines(), max_length)
+            return text
 
         # 若该兜底 _match_monster 返回 None → 落入 step 5 的"没有专属攻略页"文案
         lines = [
@@ -413,7 +388,7 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
             "",
             f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
         ]
-        return _fit_lines(lines, max_length)
+        return "\n".join(lines)
 
     # 3. 角色路由（优先 ssdata descCN，失败回退 trekker HTML 攻略）
     if res["cat"] == "Character":
@@ -421,7 +396,7 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
         num_id = parts[1] if len(parts) > 1 else res["id"]
         text, ok = _build_character_material(st_fetcher, num_id, lookup)
         if ok and text:
-            return _fit_lines(text.splitlines(), max_length)
+            return text
 
         # 回退现有 fetch_trekker(num_id) 路径（strip_game_markup + replacer.replace，维持现在输出）
         lines = [
@@ -434,7 +409,7 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
             f"=== 角色攻略 (stelladb /trekker/{num_id}) ===",
             strip_game_markup(replacer.replace(st_fetcher.fetch_trekker(num_id))),
         ]
-        return _fit_lines(lines, max_length)
+        return "\n".join(lines)
 
     # 4. 秘纹（disc）路由——按数字 id 成员判断，不按 cat 字符串
     parts = res["id"].split(".")
@@ -443,7 +418,7 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     if num_id in disc_dataset:
         text, ok = _build_disc_material(st_fetcher, num_id, lookup)
         if ok and text:
-            return _fit_lines(text.splitlines(), max_length)
+            return text
 
     # 5. 其它 cat → 维持现有"没有专属攻略页"文案
     lines = [
@@ -455,7 +430,7 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
         "",
         f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
     ]
-    return _fit_lines(lines, max_length)
+    return "\n".join(lines)
 
 
 # 区块锚点行内的导航片段：'⏏ Back to Top ⏏'（含前后空格），行内队名保留
@@ -1042,7 +1017,6 @@ def _filter_emblem_entry(entry: str) -> str:
 def query_how_rows(
     rows: list[dict],
     with_presets: bool = False,
-    max_length: Optional[int] = None,
     question: str = "",
 ) -> str:
     """how 桶（表驱动新链路）：命中行按 guide_ref 区块归组，逐组抓取 infodoc 区块输出。
@@ -1061,7 +1035,6 @@ def query_how_rows(
         rows: find_team_rows 命中的统一队伍-槽位表行列表
            （含 slots/team_name_*/guide_ref/rotation/preset_code 字段）
         with_presets: 是否在每组尾附加预设码行（码原文保真）
-        max_length: 输出文本最大字符数限制（None 表示不限制）
         question: 用户原话——用于推导问询角色（问句命中角色排成员首位）
 
     Returns:
@@ -1244,7 +1217,7 @@ def query_how_rows(
                 lines.append(f"预设码：{strip_game_markup(replacer.replace(code))}（{members_desc}）")
                 lines.append("")
 
-    return _fit_lines(lines, max_length)
+    return "\n".join(lines)
 
 
 def check_permission(
@@ -2077,20 +2050,16 @@ def _build_blitz_material(
         if stats_parts:
             detail_lines.append(f"  - {' | '.join(stats_parts)}")
 
-        # 机制列表：名称 _term_cn + descCN（缺则 desc 经 _term_cn），单条截断、
-        # 每 boss 上限 _MAX_MECHANIC_COUNT 条；数据滞后时省略机制明细
+        # 机制列表：名称 _term_cn + descCN（缺则 desc 经 _term_cn），全量输出；
+        # 数据滞后时省略机制明细
         if e["lagging"]:
             continue
         mechanics = boss.get("mechanic", [])
         if not isinstance(mechanics, list) or not mechanics:
             continue
-        rendered_count = 0
         for m in mechanics:
             if not isinstance(m, dict):
                 continue
-            if rendered_count >= _MAX_MECHANIC_COUNT:
-                detail_lines.append("  - （其余机制略，可具体询问）")
-                break
             m_name = m.get("name", "")
             m_name_cn = _term_cn(m_name) if m_name else ""
             desc = m.get("descCN") or ""
@@ -2098,15 +2067,10 @@ def _build_blitz_material(
                 desc = _term_cn(m.get("desc", ""))
             if not desc:
                 detail_lines.append(f"  - {m_name_cn or m_name}")
-                rendered_count += 1
                 continue
-            # 先清理游戏标记再截断：若先截断，<color> 闭合标签可能被切断成
-            # </colo 断片，后续 strip_game_markup 的正则无法匹配残缺标签
+            # 先清理游戏标记再输出：<color> 等闭合标签完整保留，杜绝 </colo 断片
             desc = strip_game_markup(desc)
-            if len(desc) > _MAX_MECH_DESC:
-                desc = desc[:_MAX_MECH_DESC] + "…"
             detail_lines.append(f"  - {m_name_cn or m_name}：{desc}")
-            rendered_count += 1
 
     if detail_lines:
         lines.append("")

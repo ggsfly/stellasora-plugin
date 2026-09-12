@@ -583,7 +583,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         prompt = prompt_template.format(
             persona_block=persona_block,
             question=question,
-            material=material,  # service._fit_lines 已按 max_length 截断，此处不再硬切片
+            material=material,  # service 已不再按 max_length 截断，资料全量交由 LLM 加工
         )
         llm_model = (self.config.query.llm_model or "").strip()
 
@@ -738,7 +738,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             query_what,
             query,
             self._cache_dir_ready(),
-            max_length=int(self.config.query.default_max_length),
         )
         # 未找到时不走 LLM 加工，直接返回
         if "未在字典中找到" in text:
@@ -845,7 +844,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             query_how_rows,
             rows,
             bool(presets),
-            int(self.config.query.default_max_length),
             effective_question,
         )
         return await self._send_or_relay(text, effective_question, presets, **kwargs)
