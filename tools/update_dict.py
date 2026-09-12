@@ -42,7 +42,7 @@ from build_dict import (  # noqa: E402
     write_json,
 )
 
-REPO_URL = "https://github.com/AutumnVN/StellaSoraData.git"
+REPO_URL = "https://github.com/AutumnVN/ss-data.git"
 
 # 默认代理地址
 _DEFAULT_PROXY = "http://127.0.0.1:7890"

@@ -49,7 +49,7 @@ if "%~1"=="--direct" (
 rem ---- locate local StellaSoraData clone ---------------------
 rem first positional arg after optional --direct
 set "LOCAL_DATA=%~1"
-if not defined LOCAL_DATA set LOCAL_DATA=..\StellaSoraData
+if not defined LOCAL_DATA set LOCAL_DATA=..\ss-data
 
 if exist "%LOCAL_DATA%\EN\language\en_US" (
     if exist "%LOCAL_DATA%\.git" (
