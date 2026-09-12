@@ -391,3 +391,37 @@ class StelladbFetcher:
             if offline_data is not None:
                 return offline_data
         return None
+
+    def fetch_leaderboard_season(self, force_update: bool = False) -> Optional[dict]:
+        """获取 ssleaderboard 赛季数据，本地优先。"""
+        offline_file = self.offline_dir / "ssleaderboard" / "season.json" if self.offline_dir else None
+        if offline_file and not offline_file.is_file() and (self.offline_dir / "ssleaderboard_season.json").is_file():
+            offline_file = self.offline_dir / "ssleaderboard_season.json"
+        if not force_update and offline_file:
+            offline_data = _read_offline_dataset(offline_file, "season")
+            if offline_data is not None:
+                return offline_data
+
+        url = f"{_SS_LB_BASE}/season.json"
+        res = self._fetch_json_from_url(url)
+        if res is not None:
+            if offline_file:
+                payload = {
+                    "url": url,
+                    "name": "season",
+                    "timestamp": int(time.time()),
+                    "data": res,
+                }
+                try:
+                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+                    mtime = offline_file.stat().st_mtime
+                    _ssdata_cache[(offline_file.resolve(), "season")] = (mtime, res)
+                except Exception:
+                    pass
+            return res
+
+        if offline_file:
+            offline_data = _read_offline_dataset(offline_file, "season")
+            if offline_data is not None:
+                return offline_data
+        return None

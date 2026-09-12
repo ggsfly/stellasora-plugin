@@ -1,0 +1,74 @@
+{
+  "url": "https://raw.githubusercontent.com/AutumnVN/ss-data/refs/heads/main/blitz.json",
+  "name": "blitz",
+  "timestamp": 1,
+  "data": {
+    "24": {
+      "id": 6310220,
+      "name": "Furious Stomper Crab",
+      "season": 11,
+      "icon": "boss_Tachie_15",
+      "type": "Blitz",
+      "weakTo": ["Ventus"],
+      "resistTo": ["Ignis"],
+      "damagePerScore": 22807,
+      "stat": [
+        {
+          "Level": 1,
+          "HP": 1926284,
+          "Cumulative HP": 1926284,
+          "Estimated Score Damage": "0 - 84",
+          "ATK": 4800,
+          "DEF": 500,
+          "Hit Rate": "100%",
+          "Attack Speed": "100%",
+          "Aqua DMG": "100%",
+          "Ignis DMG": "100%",
+          "Terra DMG": "100%",
+          "Ventus DMG": "100%",
+          "Lux DMG": "100%",
+          "Umbra DMG": "100%",
+          "Resilience": 210000000
+        }
+      ],
+      "mechanic": [
+        {
+          "name": "Bounty: Nimble Dodge",
+          "desc": "During each round of bullet volleys or coordinated water sprays from the Fresh-Keeper Octopus, successfully dodging grants 675 Technique Score, up to 8 times, totaling 5400 points.",
+          "descCN": "每轮「保鲜八爪」进行子弹齐射或协同喷水时，成功完成躲避即获得675技巧得分，最多触发8次，共计5400分"
+        },
+        {
+          "name": "Shell-Breaking Pursuit",
+          "desc": "When a Support Trekker deals Ultimate DMG to the boss target, the boss target's Ultimate DMG Taken intensified by 3.75% for 4s, stacking up to 10 times.",
+          "descCN": "援护角色对首领目标造成绝招伤害时，首领目标受到的绝招伤害强度提升"
+        }
+      ]
+    },
+    "25": {
+      "id": 6310050,
+      "name": "Forbidden Beauty",
+      "season": 11,
+      "icon": "boss_Tachie_09",
+      "type": "Blitz",
+      "weakTo": ["Aqua"],
+      "resistTo": [],
+      "damagePerScore": 20100,
+      "stat": [
+        {
+          "Level": 1,
+          "HP": 1800000,
+          "Cumulative HP": 1800000,
+          "Estimated Score Damage": "0 - 71",
+          "ATK": 4500,
+          "DEF": 500
+        }
+      ],
+      "mechanic": [
+        {
+          "name": "Bounty: Blower Bane",
+          "descCN": "每当首领敌人释放附带「龙卷风」的技能期间，不被龙卷风命中可获得540技巧得分，最多触发10次"
+        }
+      ]
+    }
+  }
+}
