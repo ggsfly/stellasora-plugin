@@ -126,6 +126,58 @@
           "Dorra": 386000
         }
       ]
+    },
+    "214015": {
+      "id": 214015,
+      "name": "Deer's Song",
+      "star": 5,
+      "element": "Ventus",
+      "tag": [
+        "Verse"
+      ],
+      "char": [
+        "Nazuka"
+      ],
+      "mainSkill": {
+        "id": 401506,
+        "name": "Deer's Song",
+        "nameCN": "鹿鸣",
+        "nameJP": "鹿鳴",
+        "nameKR": "사슴울음",
+        "desc": "Increases the main Trekker's ATK by <color=#ec6d21>{1}</color>.",
+        "descCN": "主控角色攻击力提升<color=#ec6d21>{1}</color>。",
+        "descJP": "主力巡遊者の攻撃力が<color=#ec6d21>{1}</color>上昇する。",
+        "descKR": "메인 캐릭터의 공격력이 <color=#ec6d21>{1}</color> 증가한다.",
+        "effectType": [
+          "ATK (%)"
+        ],
+        "addAttrType": [],
+        "effectData": [
+          "NOTHING, SELF, SELF_BE_MAINCONTROL | SELF, DEFAULT | SELF, DEFAULT"
+        ],
+        "buffIcon": [],
+        "params": "7%/8.4%/9.8%/11.2%/12.6%/14%",
+        "icon": "DiscSkill_1",
+        "iconBg": "db_DiscSkill_1"
+      },
+      "secondarySkill1": null,
+      "secondarySkill2": null,
+      "supportNote": [
+        {
+          "Melody of Pummel": 3
+        }
+      ],
+      "dupe": [
+        {
+          "ATK": 46
+        }
+      ],
+      "upgrade": [
+        {
+          "Faint Light Breath": 1,
+          "Dorra": 2700
+        }
+      ]
     }
   }
 }

@@ -2432,6 +2432,69 @@ def test_disc_list_concept_route() -> None:
           r_disc and r_crest and ok and "【秘纹列表" in mat and "朝霭" in mat)
 
 
+def test_luming_alias_routes_to_disc() -> None:
+    """O13: 鹿鸣别名（overrides.json 底层修正）经真实单例路由到秘纹 214015。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    # oracle M5：先归一化别名状态（清空 config 侧别名），消除对 B/D/F 节
+    # 前序状态的隐式依赖——即便前序配置过 custom_aliases，merged 也只剩
+    # overrides.json 底层别名，保证后续断言只验证 todo1 修复本身
+    service.configure_overrides(aliases={})
+    # 走真实 _get_services 构建的模块级单例 lookup（key=_DATA_DIR，构建时
+    # 注入 _merged_alias_map）：鹿鸣应路由到 Item.214015.1 而非同名主技能
+    res = service.lookup_term("鹿鸣")
+    check("O13 lookup_term('鹿鸣') 走真实单例路由到 Item.214015.1",
+          res.get("id") == "Item.214015.1")
+
+    # 复用含 merged 别名的真实单例 lookup，fixture 驱动端到端 disc 路由：
+    # query_what('鹿鸣') 应渲染秘纹资料，而非 MainSkill 类词条的兜底文案
+    lookup, _last, _st, _gd, _replacer = service._get_services(DATA_DIR / ".cache")
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+        q_res = service.query_what("鹿鸣", cache_dir=fixtures_dir)
+    check("O13 query_what('鹿鸣') 渲染秘纹鹿鸣且无兜底残渣",
+          "【秘纹】" in q_res and "鹿鸣" in q_res
+          and "没有专属攻略页" not in q_res and "MainSkill" not in q_res)
+
+
+def test_blitz_current_bosses() -> None:
+    """O14: 当期联合讨伐路由、两 boss 材质渲染与端到端查询。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    # 1. 路由断言：讨伐意图统一落到 blitz，秘纹排他，终焉（raid）意图被排除
+    r_join = (service._route_what_keywords("当期联合讨伐boss") == "blitz")
+    r_en = (service._route_what_keywords("blitz") == "blitz")
+    r_slash = (service._route_what_keywords("讨伐boss") == "blitz")
+    r_disc = (service._route_what_keywords("秘纹") == "disc")
+    r_raid_excl = (service._route_what_keywords("终焉boss") != "blitz")
+    check("O14 blitz 路由（含 raid 排他）",
+          r_join and r_en and r_slash and r_disc and r_raid_excl)
+
+    # 2. 材质渲染：两 boss 名 + 弱点 + 机制，无 markup 残渣
+    mat, ok = service._build_blitz_material(st_fix, lookup)
+    check("O14 当期讨伐渲染含两 boss 与弱点机制且无 markup",
+          ok and "Furious Stomper Crab" in mat and "Forbidden Beauty" in mat
+          and "弱点" in mat and "机制" in mat
+          and "<color" not in mat and "&Param" not in mat)
+
+    # 3. 端到端：mock _get_services 后 query_what 走 blitz 路由
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+        q_res = service.query_what("当期讨伐boss", cache_dir=fixtures_dir)
+    check("O14 query_what('当期讨伐boss') 含两 boss 名",
+          "Furious Stomper Crab" in q_res and "Forbidden Beauty" in q_res)
+
+
+def test_term_cn_map() -> None:
+    """O15: 讨伐术语中文常量全量 11 项及代表性映射。"""
+    from service import _TERM_CN, _term_cn  # noqa: E402
+
+    n_ok = len(_TERM_CN) == 11
+    dps_ok = _term_cn("Damage Per Score") == "单分伤害"
+    raid_ok = _term_cn("Raid") == "终焉绝响"
+    check("O15 术语映射（11 项 + Damage Per Score + Raid）", n_ok and dps_ok and raid_ok)
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2446,6 +2509,9 @@ def run_section_o() -> None:
     test_query_what_disc_route()
     test_leaderboard_material()
     test_disc_list_concept_route()
+    test_luming_alias_routes_to_disc()
+    test_blitz_current_bosses()
+    test_term_cn_map()
 
 
 # ===== 汇总入口 =====
