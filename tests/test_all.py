@@ -2338,11 +2338,11 @@ def test_disc_material() -> None:
 
 
 def test_keyword_routes() -> None:
-    """O6: 关键词路由测试。"""
+    """O6: 关键词路由测试（排行榜已删除，不再命中）。"""
     r_banner = service._route_what_keywords("当前卡池") == "banner"
-    r_lb = service._route_what_keywords("赛季排行榜") == "leaderboard"
+    r_lb_none = service._route_what_keywords("赛季排行榜") is None
     r_none = service._route_what_keywords("夏花") is None
-    check("O6 what 关键词路由", r_banner and r_lb and r_none)
+    check("O6 what 关键词路由", r_banner and r_lb_none and r_none)
 
 
 def test_banner_material() -> None:
@@ -2408,16 +2408,6 @@ def test_query_what_disc_route() -> None:
         res = service.query_what("朝霭", cache_dir=fixtures_dir)
         check("O10 端到端 disc 路由渲染含强音·主调",
               "强音·主调" in res and "<color" not in res)
-
-
-def test_leaderboard_material() -> None:
-    """O11: fixture ssleaderboard_meta.json → 渲染含 Boss Blitz S 与 Finale Echoing S。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mat, ok = service._build_leaderboard_material(st_fix, lookup)
-    check("O11 排行榜元数据资料含 Boss Blitz S 与 Finale Echoing S",
-          ok and "Boss Blitz S" in mat and "Finale Echoing S" in mat)
 
 
 def test_disc_list_concept_route() -> None:
@@ -2511,7 +2501,6 @@ def run_section_o() -> None:
     test_monster_match_and_material()
     test_query_what_fallback()
     test_query_what_disc_route()
-    test_leaderboard_material()
     test_disc_list_concept_route()
     test_luming_alias_routes_to_disc()
     test_blitz_current_bosses()

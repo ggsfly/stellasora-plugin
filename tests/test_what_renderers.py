@@ -10,7 +10,6 @@ from fetcher_stelladb import StelladbFetcher
 from service import (
     _build_banner_material,
     _build_disc_list_material,
-    _build_leaderboard_material,
     _build_monster_material,
     _match_monster,
     _route_what_keywords,
@@ -28,10 +27,6 @@ def test_what_renderers():
     assert _route_what_keywords("这期池子抽什么") == "banner", "Failed on 池子"
     assert _route_what_keywords("最新up池") == "banner", "Failed on up池"
     assert _route_what_keywords("最新UP池") == "banner", "Failed on UP池"
-
-    assert _route_what_keywords("排行榜") == "leaderboard", "Failed on 排行榜"
-    assert _route_what_keywords("最新榜单") == "leaderboard", "Failed on 榜单"
-    assert _route_what_keywords("当前赛季") == "leaderboard", "Failed on 赛季"
 
     assert _route_what_keywords("秘纹") == "disc", "Failed on 秘纹"
     assert _route_what_keywords("旋律推荐") == "disc", "Failed on 旋律"
@@ -51,25 +46,14 @@ def test_what_renderers():
     assert "&Param" not in banner_text, "Found markup &Param"
     print("✓ _build_banner_material tests passed")
 
-    print("\n=== 3. Test _build_leaderboard_material ===")
-    lb_text, lb_ok = _build_leaderboard_material(st, lookup)
-    assert lb_ok is True, f"Leaderboard fetch failed: {lb_text}"
-    assert "Boss Blitz S11" in lb_text, f"Missing Boss Blitz S11 in {lb_text}"
-    assert "Finale Echoing S6" in lb_text, f"Missing Finale Echoing S6 in {lb_text}"
-    assert "违规封禁统计" in lb_text, f"Missing ban stats in {lb_text}"
-    assert "もんえ" not in lb_text, "Leaked player name in leaderboard output"
-    assert "308383893" not in lb_text, "Leaked player QQ/ID in leaderboard output"
-    assert "<color=" not in lb_text, "Found markup tag <color="
-    print("✓ _build_leaderboard_material tests passed")
-
-    print("\n=== 4. Test _build_disc_list_material ===")
+    print("\n=== 3. Test _build_disc_list_material ===")
     disc_list_text, disc_list_ok = _build_disc_list_material(st, lookup)
     assert disc_list_ok is True, f"Disc list fetch failed: {disc_list_text}"
     assert "【秘纹列表" in disc_list_text, f"Missing header: {disc_list_text}"
     assert "<color=" not in disc_list_text, "Found markup tag <color="
     print("✓ _build_disc_list_material tests passed")
 
-    print("\n=== 5. Test _match_monster ===")
+    print("\n=== 4. Test _match_monster ===")
     # Exact ID
     assert _match_monster("51002", lookup, st) == "51002"
     # Substring Opera Ghost
@@ -82,7 +66,7 @@ def test_what_renderers():
     assert _match_monster("UnknownMonsterXYZ", lookup, st) is None
     print("✓ _match_monster tests passed")
 
-    print("\n=== 6. Test _build_monster_material ===")
+    print("\n=== 5. Test _build_monster_material ===")
     m_text, m_ok = _build_monster_material(st, "51002", lookup)
     assert m_ok is True, f"Monster fetch failed: {m_text}"
     assert "火" in m_text and "风" in m_text, f"Missing elemental weakness in {m_text}"

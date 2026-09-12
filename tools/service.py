@@ -357,13 +357,10 @@ def query_what(term: str, cache_dir: Path, max_length: Optional[int] = None) -> 
     """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
 
-    # 1. 关键词概念路由（banner / leaderboard / disc 概念列表）
+    # 1. 关键词概念路由（banner / disc 概念列表；blitz 当期讨伐整页）
     route = _route_what_keywords(term)
     if route == "banner":
         text, _ = _build_banner_material(st_fetcher, lookup)
-        return _fit_lines(text.splitlines(), max_length)
-    elif route == "leaderboard":
-        text, _ = _build_leaderboard_material(st_fetcher, lookup)
         return _fit_lines(text.splitlines(), max_length)
     elif route == "blitz":
         text, _ = _build_blitz_material(st_fetcher, lookup)
@@ -1565,7 +1562,6 @@ def _route_what_keywords(term: str) -> Optional[str]:
     """根据关键词路由 what 查询意图。
 
     banner: 卡池 / 池子 / up池 / UP池
-    leaderboard: 排行榜 / 榜单 / 赛季
     blitz: 联合讨伐 / 当期讨伐 / 讨伐 / boss / blitz（先排除 raid 意图）
     disc: 秘纹 / 旋律（严格排除纹章——那是 how 侧词汇）
     其它: None
@@ -1576,15 +1572,12 @@ def _route_what_keywords(term: str) -> Optional[str]:
     # 1. banner 关键词
     if any(k in lower_term for k in ("卡池", "池子", "up池")):
         return "banner"
-    # 2. leaderboard 关键词
-    if any(k in lower_term for k in ("排行榜", "榜单", "赛季")):
-        return "leaderboard"
-    # 3. blitz 关键词（当期联合讨伐）。boss/blitz 等词也会出现在终焉绝响（FE raid）
+    # 2. blitz 关键词（当期联合讨伐）。boss/blitz 等词也会出现在终焉绝响（FE raid）
     #    语境中，命中判定前先排除 raid 意图——那些查询应落入首领怪物路由而非讨伐意图
     if not any(k in lower_term for k in ("终焉", "绝响", "raid")):
         if any(k in lower_term for k in ("联合讨伐", "当期讨伐", "讨伐", "boss", "blitz")):
             return "blitz"
-    # 4. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
+    # 3. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
     if "纹章" in lower_term:
         return None
     if any(k in lower_term for k in ("秘纹", "旋律")):
@@ -1699,72 +1692,6 @@ def _build_banner_material(
                         item_descs.append(f"{i_cn}")
                 if item_descs:
                     lines.append(f"  - {star_label}：{'、'.join(item_descs)}")
-
-    raw_text = "\n".join(lines)
-    clean_text = strip_game_markup(raw_text)
-    return clean_text, True
-
-
-def _build_leaderboard_material(
-    st: StelladbFetcher,
-    lookup: Any,
-) -> Tuple[str, bool]:
-    """渲染排行榜与赛季资讯。
-
-    返回 (material_text, True)；若 meta 为空返回 ("", False)。
-    """
-    if not st:
-        return "", False
-    meta = st.fetch_leaderboard_meta()
-    if not meta or not isinstance(meta, dict):
-        return "", False
-
-    raid_dataset = st.fetch_ssdata_dataset("raid") or {}
-
-    lines: list[str] = ["【排行榜与赛季资讯】"]
-    for s_key, s_val in meta.items():
-        if not isinstance(s_val, dict):
-            continue
-        if s_key.startswith("bb"):
-            s_title = f"Boss Blitz S{s_key[2:]}"
-        elif s_key.startswith("fe"):
-            s_title = f"Finale Echoing S{s_key[2:]}"
-        else:
-            s_title = s_key
-
-        lines.append(f"【{s_title}】")
-        floors = s_val.get("floor", {})
-        if isinstance(floors, dict) and floors:
-            boss_lines = []
-            for fl_id, fl_info in floors.items():
-                if not isinstance(fl_info, dict):
-                    continue
-                fl_name = fl_info.get("name", "")
-                raid_info = raid_dataset.get(str(fl_id), {}) if isinstance(raid_dataset, dict) else {}
-                raid_name = raid_info.get("name") or fl_name
-                cn_name = _cn_by_en(lookup, raid_name)
-                if cn_name == raid_name and raid_name != fl_name:
-                    cn_name = _cn_by_en(lookup, fl_name)
-                if cn_name == fl_name or cn_name == raid_name:
-                    boss_display = f"{fl_name}（暂无中文译名）"
-                else:
-                    boss_display = f"{cn_name}（{fl_name}）"
-                boss_lines.append(f"层级 {fl_id}：{boss_display}")
-            if boss_lines:
-                lines.append("  首领信息：")
-                for bl in boss_lines:
-                    lines.append(f"    - {bl}")
-
-        removed = s_val.get("removed", {})
-        if isinstance(removed, dict):
-            counts = {
-                r: len(removed.get(r, [])) if isinstance(removed.get(r), list) else 0
-                for r in ["all", "cn", "en", "jp", "kr", "tw"]
-            }
-            lines.append(
-                f"  违规封禁统计：全服 {counts['all']} 人 | 国服(cn) {counts['cn']} 人 | 国际服(en) {counts['en']} 人 | "
-                f"日服(jp) {counts['jp']} 人 | 韩服(kr) {counts['kr']} 人 | 台服(tw) {counts['tw']} 人"
-            )
 
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
