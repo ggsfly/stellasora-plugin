@@ -86,6 +86,18 @@ def _get_overrides_json_aliases() -> Dict[str, str]:
     return _cached_overrides_aliases
 
 
+def _merged_alias_map() -> Dict[str, str]:
+    """合并别名来源：overrides.json 别名打底，config 别名覆盖同名。
+
+    供 DictLookup 构建/热更新 custom_aliases 使用——保证插件启动时即便
+    config 未配置别名，overrides.json 中的人工底层修正（如「鹿鸣」→
+    Item.214015.1）也不会被空 config 覆盖而丢失，避免秘纹/词条错位。
+    """
+    merged = dict(_get_overrides_json_aliases())
+    merged.update(_pending_aliases)
+    return merged
+
+
 def configure_overrides(
     aliases: Optional[Dict[str, str]] = None,
 ) -> None:
@@ -103,7 +115,7 @@ def configure_overrides(
         if key in _instances:
             lookup, _last, _st, _gd, _replacer = _instances[key]
             if aliases is not None:
-                lookup.set_custom_aliases(_pending_aliases)
+                lookup.set_custom_aliases(_merged_alias_map())
 
 
 def _get_services(cache_dir: Path) -> tuple:
@@ -115,7 +127,7 @@ def _get_services(cache_dir: Path) -> tuple:
     key = str(_DATA_DIR)
     with _init_lock:
         if key not in _instances:
-            lookup = DictLookup(_DATA_DIR, custom_aliases=_pending_aliases)
+            lookup = DictLookup(_DATA_DIR, custom_aliases=_merged_alias_map())
             # 先显式完成字典加载，再基于 _main_dict 构建替换器——不依赖
             # "构建 TermReplacer 隐含触发 _load" 的顺序假设，避免 preloaded_dict
             # 传到 None（【双审 SH-6】）。锁释放前 _main_dict/_name_index/
