@@ -4,7 +4,7 @@
 全字段字典更新脚本
 
 两种模式：
-  --mode local   从本地 StellaSoraData 仓库读取（需 --source 参数；建议先对本地仓库 git pull）
+  --mode local   从本地 ss-data 仓库读取（需 --source 参数；仍兼容旧 StellaSoraData 布局；建议先对本地仓库 git pull）
   --mode remote  直接从 GitHub 拉取最新语言文件（git sparse clone，只下载 EN/language 与
                  CN/language 两个目录，需要本机安装 Git 并加入 PATH）
 
@@ -76,7 +76,7 @@ def load_current(dict_path: Path) -> Dict[str, Dict[str, str]]:
 
 
 def fetch_from_root(data_root: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """从 StellaSoraData 根目录加载 EN/CN 全字段文本。"""
+    """从 ss-data 根目录加载 EN/CN 全字段文本（兼容旧 StellaSoraData 布局）。"""
     _en_bin, en_lang = collect_language_subdirs(data_root, "en")
     _cn_bin, cn_lang = collect_language_subdirs(data_root, "cn")
     if not en_lang.is_dir() or not cn_lang.is_dir():
@@ -118,7 +118,7 @@ def fetch_remote(tmp_root: Path, proxy: Optional[str] = None) -> Tuple[Dict[str,
         git_env.pop("HTTPS_PROXY", None)
         git_env.pop("HTTP_PROXY", None)
 
-    repo_dir = tmp_root / "StellaSoraData"
+    repo_dir = tmp_root / "ss-data"
     print(f"[info] sparse clone {REPO_URL}")
     subprocess.run(
         [git, "clone", "--depth", "1", "--filter=blob:none", "--sparse",
@@ -155,7 +155,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["local", "remote"], default="local",
                         help="local=本地仓库（需 --source）；remote=GitHub 直拉（需 Git）")
     parser.add_argument("--source", default=None,
-                        help="StellaSoraData 根目录（仅 local 模式需要）")
+                        help="ss-data 根目录（仅 local 模式需要；仍兼容旧 StellaSoraData 布局）")
     parser.add_argument("--output",
                         default=str(Path(__file__).resolve().parents[1] / "data"),
                         help="字典输出目录（含 dict.json / names.json）")
@@ -180,7 +180,7 @@ def main() -> int:
     # 1. 按模式获取最新语言数据
     if args.mode == "local":
         if not args.source:
-            print("[error] --mode local 需要 --source <StellaSoraData 根目录>", file=sys.stderr)
+            print("[error] --mode local 需要 --source <ss-data 根目录>", file=sys.stderr)
             return 1
         data_root = Path(args.source)
         if not data_root.is_dir():

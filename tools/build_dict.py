@@ -4,7 +4,7 @@
 全字段字典生成脚本
 
 职责：
-    读取 <StellaSoraData 根目录> 下 EN/language/en_US/ 与 CN/language/zh_CN/ 同名 JSON，
+    读取 <ss-data 根目录>（仍兼容旧 StellaSoraData 布局）下 EN/language/en_US/ 与 CN/language/zh_CN/ 同名 JSON，
     保留所有字段（.1 名字 + .2/.3 描述/效果/剧情文本等），按 ID 对齐合并后输出两个文件：
 
     - dict.json   : 主表，{ "<id>": {"en": "...", "cn": "...", "cat": "..."} }（全字段）
@@ -12,7 +12,7 @@
                     同名 id 出现多个 cat 时按 cat 顺序优先
 
 可选参数：
-    --source <path>   : 本地 StellaSoraData 根目录（必填）
+    --source <path>   : 本地 ss-data 根目录（必填；仍兼容旧 StellaSoraData 布局）
     --output <dir>    : 输出目录（默认 plugins/stellasora/data）
     --languages a,b   : 源语言目录列表（默认 en,cn）。JP/KR/TW 不提交进 dict，仅生成到 _archive/
     --archive-dir <d> : JP/KR/TW 归档目录（默认 _archive）
@@ -263,7 +263,7 @@ def main() -> int:
     parser.add_argument(
         "--source",
         default=None,
-        help="StellaSoraData 根目录路径（必填）",
+        help="ss-data 根目录路径（必填；仍兼容旧 StellaSoraData 布局）",
     )
     parser.add_argument(
         "--output",

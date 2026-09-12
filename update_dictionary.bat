@@ -1,12 +1,12 @@
 @echo off
 rem ============================================================
 rem  Stella Sora dictionary updater (CN-EN)
-rem  - If a local StellaSoraData git clone exists: git pull + local mode
+rem  - If a local ss-data git clone exists: git pull + local mode
 rem  - Otherwise: sparse-clone language dirs from GitHub (remote mode)
 rem  - Python: uses MaiBot root .venv (../../.venv, where maibot_sdk lives)
 rem  Requires: MaiBot root .venv; git on PATH (remote mode only)
 rem
-rem  Usage: update_dictionary.bat [path\to\StellaSoraData]
+rem  Usage: update_dictionary.bat [path\to\ss-data]
 rem         update_dictionary.bat --direct     (force direct connection)
 rem
 rem  Proxy: uses http://127.0.0.1:7890 by default; override with the
@@ -46,7 +46,7 @@ if "%~1"=="--direct" (
     shift
 )
 
-rem ---- locate local StellaSoraData clone ---------------------
+rem ---- locate local ss-data clone ---------------------
 rem first positional arg after optional --direct
 set "LOCAL_DATA=%~1"
 if not defined LOCAL_DATA set LOCAL_DATA=..\ss-data
