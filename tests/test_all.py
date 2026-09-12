@@ -35,6 +35,8 @@ import tempfile
 import threading
 import time
 import urllib.error
+import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2294,6 +2296,188 @@ Freesia (5★) | 1/1/1/1
     service.reload_team_table()
 
 
+# ===== 节 O：ss-data 数据源与 what 五类扩展 =====
+
+
+def test_ssdata_dataset_offline_read() -> None:
+    """O1: 手工写入 offline ssdata，断言 fetch_ssdata_dataset 读取包含该 data。"""
+    with tempfile.TemporaryDirectory(prefix="stellasora_o1_") as td:
+        tdp = Path(td)
+        ssdata_dir = tdp / "ssdata"
+        ssdata_dir.mkdir(parents=True, exist_ok=True)
+        gacha_file = ssdata_dir / "gacha.json"
+        payload = {
+            "url": "https://raw.githubusercontent.com/AutumnVN/ss-data/main/gacha.json",
+            "name": "gacha",
+            "timestamp": 12345678,
+            "data": {"banners": [{"id": 1, "name": "Standard"}]},
+        }
+        gacha_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        st_temp = StelladbFetcher(cache_dir=tdp, offline_dir=tdp, proxy="")
+        data = st_temp.fetch_ssdata_dataset("gacha")
+        check("O1 手工写入 offline ssdata 读取", data is not None and "banners" in data)
+
+
+def test_ssdata_dataset_missing_offline_and_netdown() -> None:
+    """O2: URL 指向 127.0.0.1:1/x.json，无离线 → 返回 None 不抛异常。"""
+    import fetcher_stelladb  # noqa: E402
+
+    with tempfile.TemporaryDirectory(prefix="stellasora_o2_") as td:
+        tdp = Path(td)
+        st_temp = StelladbFetcher(cache_dir=tdp, offline_dir=tdp, proxy="")
+        with unittest.mock.patch.object(fetcher_stelladb, "_SS_DATA_BASE", "http://127.0.0.1:1"):
+            res = st_temp.fetch_ssdata_dataset("x")
+            check("O2 无离线且网络断开返回 None 不抛异常", res is None)
+
+
+def test_element_cn_map() -> None:
+    """O3: 6元素及None映射完整性。"""
+    from service import _ELEMENT_CN  # noqa: E402
+
+    expected = {
+        "Ignis": "火",
+        "Aqua": "水",
+        "Terra": "地",
+        "Ventus": "风",
+        "Lux": "光",
+        "Umbra": "暗",
+        "None": "无",
+    }
+    ok = all(_ELEMENT_CN.get(k) == v for k, v in expected.items())
+    check("O3 元素全量映射（6元素+None）", ok)
+
+
+def test_character_material_uses_descCN() -> None:
+    """O4: fixture character.json (Amber 103) → 渲染含 二重奏，不含 <color 与 &Param。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mat, ok = service._build_character_material(st_fix, "103", lookup)
+    check("O4 角色资料使用 descCN 且无 markup",
+          ok and "二重奏" in mat and "<color" not in mat and "&Param" not in mat)
+
+
+def test_disc_material() -> None:
+    """O5: fixture disc.json (211001) → 渲染含 强音·主调。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mat, ok = service._build_disc_material(st_fix, "211001", lookup)
+    check("O5 秘纹资料渲染含强音·主调且无 markup",
+          ok and "强音·主调" in mat and "<color" not in mat and "&Param" not in mat)
+
+
+def test_keyword_routes() -> None:
+    """O6: 关键词路由测试。"""
+    r_banner = service._route_what_keywords("当前卡池") == "banner"
+    r_lb = service._route_what_keywords("赛季排行榜") == "leaderboard"
+    r_none = service._route_what_keywords("夏花") is None
+    check("O6 what 关键词路由", r_banner and r_lb and r_none)
+
+
+def test_banner_material() -> None:
+    """O7: fixture gacha.json (2期) → 断言输出含 2 期且 startTime 日期格式化。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mat, ok = service._build_banner_material(st_fix, lookup)
+    # 2 期时间戳均经格式化呈现（2026-09-08 与 2026-09-01），且含角色/秘纹卡池，无残余 markup
+    has_period_1 = "2026-09-08" in mat
+    has_period_2 = "2026-09-01" in mat
+    has_types = "【角色卡池】" in mat and "【秘纹卡池】" in mat
+    check("O7 卡池资讯渲染含2期且日期格式化",
+          ok and has_period_1 and has_period_2 and has_types and "<color" not in mat)
+
+
+def test_monster_match_and_material() -> None:
+    """O8: fixture raid.json → 覆盖子串路径、MonsterManual路径及降级路径。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    # 1. 子串/分词路径
+    m_id = service._match_monster("Opera Ghost", lookup, st_fix)
+    mat, ok = service._build_monster_material(st_fix, m_id, lookup)
+    p1_ok = (m_id == "51002" and ok and ("弱" in mat or "弱点" in mat) and "机制" in mat)
+
+    # 2. MonsterManual dict 路径（防死分支回归）
+    with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.51002.1", "cat": "MonsterManual", "cn": "歌剧魅影", "en": "Opera Ghost"}):
+        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, None)):
+            q_res = service.query_what("某怪名", cache_dir=fixtures_dir)
+            p2_ok = ("弱" in q_res or "弱点" in q_res) and "机制" in q_res and "没有专属攻略页" not in q_res
+
+    # 3. 降级路径：lookup_term 命中 absent id，_match_monster 降级命中真实键
+    with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.999999.1", "cat": "MonsterManual", "cn": "未知怪", "en": "Unknown"}):
+        fallback_id = service._match_monster("Opera Ghost", lookup, st_fix)
+        p3_ok = (fallback_id == "51002" and fallback_id != "999999")
+
+    check("O8 首领怪物匹配与资料（子串路径+MonsterManual路径+降级路径）",
+          p1_ok and p2_ok and p3_ok)
+
+
+def test_query_what_fallback() -> None:
+    """O9: monkeypatch _build_character_material 返回 ('', False) → 回退 fetch_trekker。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mock_trekker = unittest.mock.MagicMock(return_value="<div>Trekker HTML Guide</div>")
+    st_fix.fetch_trekker = mock_trekker
+    with unittest.mock.patch.object(service, "_build_character_material", return_value=("", False)):
+        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+            res = service.query_what("琥珀", cache_dir=fixtures_dir)
+            check("O9 角色资料失败回退 fetch_trekker 路径",
+                  mock_trekker.called and "角色攻略 (stelladb /trekker/103)" in res)
+
+
+def test_query_what_disc_route() -> None:
+    """O10: 端到端 disc 路由——query_what('朝霭') 含 强音·主调。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+        res = service.query_what("朝霭", cache_dir=fixtures_dir)
+        check("O10 端到端 disc 路由渲染含强音·主调",
+              "强音·主调" in res and "<color" not in res)
+
+
+def test_leaderboard_material() -> None:
+    """O11: fixture ssleaderboard_meta.json → 渲染含 Boss Blitz S 与 Finale Echoing S。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    mat, ok = service._build_leaderboard_material(st_fix, lookup)
+    check("O11 排行榜元数据资料含 Boss Blitz S 与 Finale Echoing S",
+          ok and "Boss Blitz S" in mat and "Finale Echoing S" in mat)
+
+
+def test_disc_list_concept_route() -> None:
+    """O12: 秘纹概念路由排他性与秘纹列表概要渲染。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    r_disc = (service._route_what_keywords("秘纹") == "disc")
+    r_crest = (service._route_what_keywords("纹章") is None)
+    mat, ok = service._build_disc_list_material(st_fix, lookup)
+    check("O12 秘纹概念路由排他性与秘纹列表渲染",
+          r_disc and r_crest and ok and "【秘纹列表" in mat and "朝霭" in mat)
+
+
+def run_section_o() -> None:
+    """节 O：ss-data 数据源与 what 五类扩展。"""
+    test_ssdata_dataset_offline_read()
+    test_ssdata_dataset_missing_offline_and_netdown()
+    test_element_cn_map()
+    test_character_material_uses_descCN()
+    test_disc_material()
+    test_keyword_routes()
+    test_banner_material()
+    test_monster_match_and_material()
+    test_query_what_fallback()
+    test_query_what_disc_route()
+    test_leaderboard_material()
+    test_disc_list_concept_route()
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -2312,10 +2496,11 @@ SECTIONS = {
     "M": ("统一队伍-槽位表构建器", run_section_m),
     "N": ("slot 查询服务", run_section_n),
     "P": ("热门优先级与属性泛查", run_section_p),
+    "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P"]
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P"}
 
 
