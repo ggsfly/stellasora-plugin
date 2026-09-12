@@ -1882,48 +1882,13 @@ def _build_disc_list_material(
     return clean_text, True
 
 
-def _match_monster(
-    term: str,
+def _match_in_dataset(
+    dataset: dict,
+    norm_term: str,
     lookup: Any,
-    st: StelladbFetcher,
 ) -> Optional[str]:
-    """匹配首领怪物 ID。
-
-    先通过 lookup 查 MonsterManual 且要求 id 存在于 raid 键集中；
-    若未命中或不在 raid 键集中，落入 raid.json 大小写不敏感子串/精确 id 匹配。
-    """
-    if not term or not st:
-        return None
-
-    raid_dataset = st.fetch_ssdata_dataset("raid")
-    if not raid_dataset or not isinstance(raid_dataset, dict):
-        return None
-
-    # 1. 尝试 lookup_term 反查 MonsterManual
-    if lookup:
-        res = lookup.lookup_term(term)
-        if res and isinstance(res, dict) and res.get("cat") == "MonsterManual":
-            raw_id = str(res.get("id", ""))
-            parts = raw_id.split(".")
-            if len(parts) > 1:
-                num_id = parts[1]
-                if num_id in raid_dataset:
-                    return num_id
-
-    # 2. raid.json 匹配
-    clean_term = term.strip()
-    if clean_term in raid_dataset:
-        return clean_term
-
-    def _normalize(s: str) -> str:
-        # 去除非字母数字（保留中英文字符与数字），转小写
-        return re.sub(r"[\W_]+", "", s.lower(), flags=re.UNICODE)
-
-    norm_term = _normalize(clean_term)
-    if not norm_term:
-        return None
-
-    for m_id, m_val in raid_dataset.items():
+    """在单个 ssdata 数据集内做归一化子串与中文反查匹配，返回命中 id 或 None。"""
+    for m_id, m_val in dataset.items():
         if not isinstance(m_val, dict):
             continue
         raw_name = m_val.get("name", "")
@@ -1938,7 +1903,59 @@ def _match_monster(
                 norm_cn = _normalize(cn_name)
                 if norm_term in norm_cn:
                     return str(m_id)
+    return None
 
+
+def _match_monster(
+    term: str,
+    lookup: Any,
+    st: StelladbFetcher,
+) -> Optional[str]:
+    """匹配首领怪物 ID（raid ∪ duel 两数据源）。
+
+    先通过 lookup 查 MonsterManual 且要求 id 存在于 raid/duel 任一键集；
+    若未命中或不在任一键集，落入 raid → duel 数据集的大小写不敏感子串/精确 id
+    匹配（blitz 当期讨伐由 _match_blitz_boss 单独兜底，不并入本函数）。
+    """
+    if not term or not st:
+        return None
+
+    raid_dataset = st.fetch_ssdata_dataset("raid")
+    if not raid_dataset or not isinstance(raid_dataset, dict):
+        return None
+    duel_dataset = st.fetch_ssdata_dataset("duel")
+    if not duel_dataset or not isinstance(duel_dataset, dict):
+        duel_dataset = {}
+
+    # 合并键集：MonsterManual 反查 / 精确 id 命中 raid/duel 任一即算命中
+    all_ids = set(raid_dataset) | set(duel_dataset)
+
+    # 1. 尝试 lookup_term 反查 MonsterManual
+    if lookup:
+        res = lookup.lookup_term(term)
+        if res and isinstance(res, dict) and res.get("cat") == "MonsterManual":
+            raw_id = str(res.get("id", ""))
+            parts = raw_id.split(".")
+            if len(parts) > 1:
+                num_id = parts[1]
+                if num_id in all_ids:
+                    return num_id
+
+    # 2. 精确 id 匹配（raid/duel 任一键集）
+    clean_term = term.strip()
+    if clean_term in all_ids:
+        return clean_term
+
+    norm_term = _normalize(clean_term)
+    if not norm_term:
+        return None
+
+    # 3. 归一化子串/中文反查匹配：先 raid（保持既有匹配语义），后 duel
+    hit = _match_in_dataset(raid_dataset, norm_term, lookup)
+    if hit is not None:
+        return hit
+    if duel_dataset:
+        return _match_in_dataset(duel_dataset, norm_term, lookup)
     return None
 
 
