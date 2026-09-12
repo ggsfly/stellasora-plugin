@@ -7,6 +7,13 @@
 ### 主要功能
 
 - **字典数据源迁移至 ss-data**：字典构建数据源从 `StellaSoraData` 切换至 `ss-data`（`AutumnVN/ss-data`），`update_dict.py` 的 `REPO_URL` 与 `update_dictionary.bat` 默认克隆路径同步更新；基于 ss-data 完整重建验证通过，字典条目数 48,854 条（不缩水），Character 条目 39 条，角色 CN 名（如「琥珀」）完整保留。
+- **stellasora_what 五类资料扩展**：基于 `ss-data` 权威数据集全面扩展资料查询能力，支持秘纹资料与列表（主调/强音效果）、卡池资讯（角色/秘纹卡池起止时间与格式化展示）、赛季排行榜（Boss Blitz 与 Finale Echoing 赛季资讯）以及首领怪物机制与弱点（首领图鉴与机制攻略）；角色资料未收录时平滑回退原 `stelladb` 攻略页能力。
+- **全量官方中文与游戏标记清理**：角色与装备描述全面采用官方中文字段（`descCN` / `nameCN`），新增 `strip_game_markup` 引擎级清洗，彻底剔除 `<color>`、`<style>`、`&Param...` 等游戏富文本占位标签，输出纯净自然的官方中文资料。
+
+### 细节与修复
+
+- **数据源获取与离线缓存增强**：新增 `fetch_ssdata_dataset` 与 `fetch_leaderboard_meta` 离线优先读取机制，支持 mtime 驱动的模块级缓存与网络断开优雅降级。
+- **回归测试扩充**：新增 O 节「ss-data 数据源与 what 五类扩展」（12 项断言），覆盖离线加载、降级容灾、元素映射、markup 清洗、五类资料渲染与端到端关键词路由验证。
 
 ## [1.1.1] - 2026-09-10
 
