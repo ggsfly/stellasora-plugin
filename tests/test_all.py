@@ -2477,6 +2477,10 @@ def test_blitz_current_bosses() -> None:
           ok and "Furious Stomper Crab" in mat and "Forbidden Beauty" in mat
           and "弱点" in mat and "机制" in mat
           and "<color" not in mat and "&Param" not in mat)
+    # 2b. 截断伪影回归：长 descCN 截断后不得残留未闭合颜色标签断片
+    # （fixture floor24 Bounty: Nimble Dodge 的 descCN >120 字符且含 <color> 标签）
+    check("O14 descCN 截断无 <color/</color 断片残留",
+          "<color" not in mat and "</color" not in mat and "</colo" not in mat)
 
     # 3. 端到端：mock _get_services 后 query_what 走 blitz 路由
     with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):

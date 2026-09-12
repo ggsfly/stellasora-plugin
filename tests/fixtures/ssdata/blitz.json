@@ -35,7 +35,7 @@
         {
           "name": "Bounty: Nimble Dodge",
           "desc": "During each round of bullet volleys or coordinated water sprays from the Fresh-Keeper Octopus, successfully dodging grants 675 Technique Score, up to 8 times, totaling 5400 points.",
-          "descCN": "每轮「保鲜八爪」进行子弹齐射或协同喷水时，成功完成躲避即获得675技巧得分，最多触发8次，共计5400分"
+          "descCN": "每轮「保鲜八爪」进行子弹齐射或协同喷水时，成功完成躲避即获得<color=#ec6d21>675</color>技巧得分，最多触发<color=#ec6d21>8</color>次，共计<color=#ec6d21>5400</color>分"
         },
         {
           "name": "Shell-Breaking Pursuit",
@@ -66,7 +66,7 @@
       "mechanic": [
         {
           "name": "Bounty: Blower Bane",
-          "descCN": "每当首领敌人释放附带「龙卷风」的技能期间，不被龙卷风命中可获得540技巧得分，最多触发10次"
+          "descCN": "每当首领敌人释放附带「龙卷风」的技能期间，不被龙卷风命中可获得<color=#ec6d21>540</color>技巧得分，最多触发<color=#ec6d21>10</color>次，共计<color=#ec6d21>5400</color>分"
         }
       ]
     }

@@ -2173,6 +2173,9 @@ def _build_blitz_material(
                 detail_lines.append(f"  - {m_name_cn or m_name}")
                 rendered_count += 1
                 continue
+            # 先清理游戏标记再截断：若先截断，<color> 闭合标签可能被切断成
+            # </colo 断片，后续 strip_game_markup 的正则无法匹配残缺标签
+            desc = strip_game_markup(desc)
             if len(desc) > _MAX_MECH_DESC:
                 desc = desc[:_MAX_MECH_DESC] + "…"
             detail_lines.append(f"  - {m_name_cn or m_name}：{desc}")
