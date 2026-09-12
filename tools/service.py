@@ -52,6 +52,39 @@ _ELEMENT_CN = {
 _WEAK_LABEL = "弱点"
 _RESIST_LABEL = "抗性"
 
+# 讨伐术语中文常量（用户审定 docs/term_cn_review.md v2 定稿）：what 渲染
+# blitz/raid 首领资料时，字典未收录的英文术语在此映射为中文。类职业
+# （class=Vanguard/Support/Versatile）已被字典 CharacterTag 覆盖，不需重复。
+_TERM_CN = {
+    "Damage Per Score": "单分伤害",
+    "Cumulative HP": "累计生命",
+    "Estimated Score Damage": "预估得分伤害",
+    "Hit Rate": "命中率",
+    "Attack Speed": "攻击速度",
+    "Final DMG Taken": "最终受到伤害",
+    "Blitz": "联合讨伐",
+    "Raid": "终焉绝响",
+    "Ranged": "远程",
+    "Melee": "近战",
+    "Mechanic": "机制",
+}
+
+
+def _term_cn(s: str) -> str:
+    """讨伐术语 → 中文：先精确命中 _TERM_CN，否则做区分大小写的子串级替换。
+
+    与 _resolve_key 第一步"精确别名优先"的定位语义一致：整体未命中再逐项
+    子串替换，覆盖 stat 键/type/mechanic 嵌词场景（如 "Cumulative HP: 5000"、
+    "Final DMG Taken (base)"）。无命中返回原串；空串直接返回。
+    """
+    if not s:
+        return s
+    if s in _TERM_CN:
+        return _TERM_CN[s]
+    for en, cn in _TERM_CN.items():
+        s = s.replace(en, cn)
+    return s
+
 # 模块级单例（按数据目录缓存，避免每次调用重载 8.8MB 字典）；
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
 # cache_dir 变化时仅重建两个 fetcher，lookup 与 replacer 全进程复用
