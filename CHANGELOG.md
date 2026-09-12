@@ -2,6 +2,12 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased]
+
+### 主要功能
+
+- **字典数据源迁移至 ss-data**：字典构建数据源从 `StellaSoraData` 切换至 `ss-data`（`AutumnVN/ss-data`），`update_dict.py` 的 `REPO_URL` 与 `update_dictionary.bat` 默认克隆路径同步更新；基于 ss-data 完整重建验证通过，字典条目数 48,854 条（不缩水），Character 条目 39 条，角色 CN 名（如「琥珀」）完整保留。
+
 ## [1.1.1] - 2026-09-10
 
 ### 主要功能
