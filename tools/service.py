@@ -69,6 +69,12 @@ _TERM_CN = {
     "Mechanic": "机制",
 }
 
+# 决斗（duel）首领类型局部映射：仅怪物渲染器内部消费，不得并入 _TERM_CN
+# （O15 硬断言 _TERM_CN 恒 11 项）
+_DUEL_TYPE_CN = {
+    "Overlord": "霸主",
+}
+
 
 def _term_cn(s: str) -> str:
     """讨伐术语 → 中文：先精确命中 _TERM_CN，否则做区分大小写的子串级替换。
@@ -1936,26 +1942,70 @@ def _match_monster(
     return None
 
 
+def _monster_stat_dict(boss: dict) -> dict:
+    """从首领数据解包面板数值（raid/duel/blitz 三源统一为平铺 dict）。
+
+    duel: stat 直接平铺 dict；blitz: stat list[平铺 dict]（取首项）；
+    raid: diff[].stat 两层嵌套（[[{...}]]，取首个难度的首组）。无可用数据
+    返回空 dict。
+    """
+    stat = boss.get("stat")
+    if isinstance(stat, dict):
+        return stat
+    if isinstance(stat, list) and stat:
+        first = stat[0]
+        if isinstance(first, dict):
+            return first
+        if isinstance(first, list) and first and isinstance(first[0], dict):
+            return first[0]
+    diff = boss.get("diff")
+    if isinstance(diff, list) and diff:
+        d0 = diff[0]
+        if isinstance(d0, dict):
+            entries = d0.get("stat", [])
+            if isinstance(entries, list) and entries:
+                first = entries[0]
+                if isinstance(first, list) and first and isinstance(first[0], dict):
+                    return first[0]
+                if isinstance(first, dict):
+                    return first
+    return {}
+
+
 def _build_monster_material(
     st: StelladbFetcher,
     num_id: str,
     lookup: Any,
+    modules: Optional[Collection[str]] = None,
 ) -> Tuple[str, bool]:
-    """渲染首领怪物官方中文资料。
+    """渲染首领怪物官方中文资料（raid/duel/blitz 三源）。
 
-    返回 (material_text, True)；若 dataset 缺失或对应 id 不存在返回 ("", False)。
+    返回 (material_text, True)；num_id 在 raid → duel → blitz 三个数据集中均不
+    存在返回 ("", False)。modules 给定（模块化查询）时渲染 overview（恒出）+
+    modules 命中的 stats/mechanic 区块；modules=None 保持既有全量输出（raid
+    fixture 输出逐字节不变，O8 兜底）。
     """
     if not st:
         return "", False
-    dataset = st.fetch_ssdata_dataset("raid")
-    if not dataset or not isinstance(dataset, dict):
-        return "", False
 
-    monster = dataset.get(num_id) or dataset.get(str(num_id))
-    if not monster or not isinstance(monster, dict):
+    # source 探测：依次查 raid → duel → blitz 数据集定位所在源
+    monster: Optional[dict] = None
+    source = ""
+    for src in ("raid", "duel", "blitz"):
+        dataset = st.fetch_ssdata_dataset(src)
+        if not dataset or not isinstance(dataset, dict):
+            continue
+        m = dataset.get(num_id) or dataset.get(str(num_id))
+        if isinstance(m, dict):
+            monster = m
+            source = src
+            break
+    if monster is None:
         return "", False
 
     lines: list[str] = []
+
+    # overview：名称/类型/弱点/抗性 恒渲染（duel 类型经 _DUEL_TYPE_CN 局部映射翻译）
     en_name = monster.get("name", "")
     cn_name = _cn_by_en(lookup, en_name)
     if en_name and en_name != cn_name:
@@ -1965,6 +2015,8 @@ def _build_monster_material(
 
     m_type = monster.get("type", "")
     if m_type:
+        if source == "duel":
+            m_type = _DUEL_TYPE_CN.get(m_type, m_type)
         lines.append(f"类型：{m_type}")
 
     weak_to = monster.get("weakTo", [])
@@ -1984,47 +2036,85 @@ def _build_monster_material(
     else:
         lines.append(f"{_RESIST_LABEL}：无")
 
-    mechanics = monster.get("mechanic", [])
-    if isinstance(mechanics, list) and mechanics:
-        lines.append("【首领机制】")
-        for m in mechanics:
-            if not isinstance(m, dict):
-                continue
-            m_name = _cn_by_en(lookup, m.get("name", ""))
-            m_desc = m.get("desc", "")
-            lines.append(f"  - {m_name}")
-            if m_desc:
-                lines.append(f"    描述：{m_desc}")
+    # mechanic 区块：raid/blitz 平铺机制列表；duel 分组列表（每组含 affix，
+    # 组序渲染、affix 合并输出）；机制全量输出不截断
+    if modules is None or "mechanic" in modules:
+        mechanics = monster.get("mechanic", [])
+        if isinstance(mechanics, list) and mechanics:
+            lines.append("【首领机制】")
+            if source == "duel":
+                for group in mechanics:
+                    if not isinstance(group, dict):
+                        continue
+                    affixes = group.get("affix", [])
+                    for a in affixes:
+                        if not isinstance(a, dict):
+                            continue
+                        a_name = _cn_by_en(lookup, a.get("name", ""))
+                        a_desc = a.get("desc", "")
+                        lines.append(f"  - {a_name}")
+                        if a_desc:
+                            lines.append(f"    描述：{a_desc}")
+            else:
+                for m in mechanics:
+                    if not isinstance(m, dict):
+                        continue
+                    m_name = _cn_by_en(lookup, m.get("name", ""))
+                    m_desc = m.get("desc", "")
+                    lines.append(f"  - {m_name}")
+                    if m_desc:
+                        lines.append(f"    描述：{m_desc}")
 
-    diff_list = monster.get("diff", [])
-    if isinstance(diff_list, list) and diff_list:
-        lines.append("【难度与属性】")
-        for d in diff_list:
-            if not isinstance(d, dict):
-                continue
-            d_name = d.get("name", "")
-            stat_entries = d.get("stat", [])
-            stat_dict = {}
-            if stat_entries and isinstance(stat_entries, list):
-                first = stat_entries[0]
-                if isinstance(first, list) and first and isinstance(first[0], dict):
-                    stat_dict = first[0]
-                elif isinstance(first, dict):
-                    stat_dict = first
+    # stats 区块：raid 按 diff 多难度渲染（既有两层解包）；duel/blitz 渲染平铺 stat
+    if modules is None or "stats" in modules:
+        if source == "raid":
+            diff_list = monster.get("diff", [])
+            if isinstance(diff_list, list) and diff_list:
+                lines.append("【难度与属性】")
+                for d in diff_list:
+                    if not isinstance(d, dict):
+                        continue
+                    d_name = d.get("name", "")
+                    stat_entries = d.get("stat", [])
+                    stat_dict = {}
+                    if stat_entries and isinstance(stat_entries, list):
+                        first = stat_entries[0]
+                        if isinstance(first, list) and first and isinstance(first[0], dict):
+                            stat_dict = first[0]
+                        elif isinstance(first, dict):
+                            stat_dict = first
 
-            stats_parts = []
-            for k in ["HP", "ATK", "DEF"]:
-                if k in stat_dict:
-                    label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
-                    stats_parts.append(f"{label} {stat_dict[k]}")
-            if not stats_parts:
-                for k, v in stat_dict.items():
-                    if k not in ("Type", "HP Bar", "Score", "Max Score"):
-                        stats_parts.append(f"{k} {v}")
-                        if len(stats_parts) >= 3:
-                            break
-            stat_str = " | ".join(stats_parts) if stats_parts else "无属性详情"
-            lines.append(f"  - {d_name}：{stat_str}")
+                    stats_parts = []
+                    for k in ["HP", "ATK", "DEF"]:
+                        if k in stat_dict:
+                            label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
+                            stats_parts.append(f"{label} {stat_dict[k]}")
+                    if not stats_parts:
+                        for k, v in stat_dict.items():
+                            if k not in ("Type", "HP Bar", "Score", "Max Score"):
+                                stats_parts.append(f"{k} {v}")
+                                if len(stats_parts) >= 3:
+                                    break
+                    stat_str = " | ".join(stats_parts) if stats_parts else "无属性详情"
+                    lines.append(f"  - {d_name}：{stat_str}")
+        else:
+            # duel/blitz：平铺 stat dict 渲染面板（键经 _term_cn 翻译）
+            stat_dict = _monster_stat_dict(monster)
+            if stat_dict:
+                lines.append("【面板数值】")
+                stats_parts = []
+                for k in ["HP", "ATK", "DEF"]:
+                    if k in stat_dict:
+                        label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
+                        stats_parts.append(f"{label} {stat_dict[k]}")
+                if not stats_parts:
+                    for k, v in stat_dict.items():
+                        if k not in ("Type", "HP Bar", "Score", "Max Score"):
+                            stats_parts.append(f"{_term_cn(k)} {v}")
+                            if len(stats_parts) >= 3:
+                                break
+                if stats_parts:
+                    lines.append(f"  {' | '.join(stats_parts)}")
 
     raw_text = "\n".join(lines)
     clean_text = strip_game_markup(raw_text)
@@ -2185,16 +2275,9 @@ def _build_blitz_material(
             name_str = cn_name or display_en
         detail_lines.append(f"【机制】{idx}. {name_str}")
 
-        # stat 摘要：复用 _build_monster_material 的抽取模式（嵌套 dict/list 兼容），
+        # stat 摘要：复用 _monster_stat_dict 三源解包（嵌套 dict/list 兼容），
         # 键经 _term_cn 翻译，每 boss 最多 3 项关键值
-        stat_entries = boss.get("stat", [])
-        stat_dict: dict = {}
-        if isinstance(stat_entries, list) and stat_entries:
-            first = stat_entries[0]
-            if isinstance(first, list) and first and isinstance(first[0], dict):
-                stat_dict = first[0]
-            elif isinstance(first, dict):
-                stat_dict = first
+        stat_dict = _monster_stat_dict(boss)
         stats_parts: list[str] = []
         for k in ["HP", "ATK", "DEF"]:
             if k in stat_dict:
