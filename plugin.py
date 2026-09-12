@@ -732,12 +732,16 @@ class StellaSoraPlugin(MaiBotPlugin):
         if not query:
             return {"name": "stellasora_what", "content": "缺少查询词。"}
         self.ctx.logger.info("what 查询: %s (group=%s user=%s)", query, kwargs.get("group_id", ""), kwargs.get("user_id", ""))
+        # effective_question（用户原话，question 缺失时回退 query）先于 query_what 计算：
+        # 供工具内部模块化选段（_detect_what_modules）与下方联合查询检测复用同一原话
+        effective_question = (question or "").strip() or query
         # Fix D：抓取+字典+替换是同步重活（urllib 网络 + 正则 CPU），放入线程池执行，
         # 避免 runner 事件循环被阻塞（async handler 直接 await 在 runner 循环上）
         text = await asyncio.to_thread(
             query_what,
             query,
             self._cache_dir_ready(),
+            effective_question,
         )
         # 未找到时不走 LLM 加工，直接返回
         if "未在字典中找到" in text:
@@ -745,7 +749,6 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer
         # 联合查询检测：用户原话命中 ≥2 个角色名时强制回传，planner 汇总后单条回复避免刷屏
         # count_character_names 内含正则匹配，同样为同步 CPU 重活，放入线程池
-        effective_question = (question or "").strip() or query
         direct = self.config.query.direct_send and (
             await asyncio.to_thread(count_character_names, effective_question)
         ) < 2

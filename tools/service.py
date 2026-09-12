@@ -355,7 +355,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     if not res:
         monster_id = _match_monster(term, lookup, st_fetcher)
         if monster_id:
-            text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
+            modules = _detect_what_modules(question, "monster")
+            text, ok = _build_monster_material(st_fetcher, monster_id, lookup, modules=modules)
             if ok and text:
                 return text
         # 当期联合讨伐 boss 名兜底（中/英文名直接命中当期赛季 boss）
@@ -375,7 +376,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
             monster_id = _match_monster(term, lookup, st_fetcher)
 
         if monster_id:
-            text, ok = _build_monster_material(st_fetcher, monster_id, lookup)
+            modules = _detect_what_modules(question, "monster")
+            text, ok = _build_monster_material(st_fetcher, monster_id, lookup, modules=modules)
             if ok and text:
                 return text
 
@@ -400,7 +402,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     if res["cat"] == "Character":
         parts = res["id"].split(".")
         num_id = parts[1] if len(parts) > 1 else res["id"]
-        text, ok = _build_character_material(st_fetcher, num_id, lookup)
+        modules = _detect_what_modules(question, "character")
+        text, ok = _build_character_material(st_fetcher, num_id, lookup, modules=modules)
         if ok and text:
             return text
 
@@ -422,7 +425,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     num_id = parts[1] if len(parts) > 1 else res["id"]
     disc_dataset = st_fetcher.fetch_ssdata_dataset("disc") or {}
     if num_id in disc_dataset:
-        text, ok = _build_disc_material(st_fetcher, num_id, lookup)
+        modules = _detect_what_modules(question, "disc")
+        text, ok = _build_disc_material(st_fetcher, num_id, lookup, modules=modules)
         if ok and text:
             return text
 
