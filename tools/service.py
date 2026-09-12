@@ -1890,8 +1890,14 @@ def _match_in_dataset(
     dataset: dict,
     norm_term: str,
     lookup: Any,
+    raw_term: str = "",
 ) -> Optional[str]:
-    """在单个 ssdata 数据集内做归一化子串与中文反查匹配，返回命中 id 或 None。"""
+    """在单个 ssdata 数据集内做归一化子串与中文反查匹配，返回命中 id 或 None。
+
+    raw_term 为原始查询词（未归一化），供 duel 首领同名???变体的原串级匹配：
+    归一化会吞掉全角？，无法区分「猫眼」与「猫眼？？？」，故内层名反查结果
+    必须回到原串级判定并带长度阈值，避免裸角色名劫持到 boss。
+    """
     for m_id, m_val in dataset.items():
         if not isinstance(m_val, dict):
             continue
@@ -1907,6 +1913,20 @@ def _match_in_dataset(
                 norm_cn = _normalize(cn_name)
                 if norm_term in norm_cn:
                     return str(m_id)
+            elif raw_term:
+                # duel 首领名形如 "[Cat-stle Siege] Chaton ???"：整名字典反查
+                # 落空，剥赛季前缀（[...]）取内层名 "Chaton ???" 二次反查官方中文
+                # 收录名「猫眼？？？」。原串级判定防误桥——「猫眼？？？」归一化
+                # 后与「猫眼」同形，故查询原串必须与中文收录名相等/包含它，反向
+                # 包含仅当查询长度 >=4（裸「猫眼」仅 2 字符直接拒绝）。
+                inner = re.sub(r"^\[[^\]]*\]\s*", "", raw_name)
+                if inner != raw_name:
+                    cn_full = _cn_by_en(lookup, inner)
+                    if cn_full != inner:
+                        clean_term = raw_term.strip()
+                        if cn_full == clean_term or cn_full in clean_term \
+                                or (clean_term in cn_full and len(clean_term) >= 4):
+                            return str(m_id)
     return None
 
 
@@ -1955,11 +1975,11 @@ def _match_monster(
         return None
 
     # 3. 归一化子串/中文反查匹配：先 raid（保持既有匹配语义），后 duel
-    hit = _match_in_dataset(raid_dataset, norm_term, lookup)
+    hit = _match_in_dataset(raid_dataset, norm_term, lookup, clean_term)
     if hit is not None:
         return hit
     if duel_dataset:
-        return _match_in_dataset(duel_dataset, norm_term, lookup)
+        return _match_in_dataset(duel_dataset, norm_term, lookup, clean_term)
     return None
 
 
@@ -2032,7 +2052,22 @@ def _build_monster_material(
     if en_name and en_name != cn_name:
         lines.append(f"【首领】{cn_name}（{en_name}）")
     else:
-        lines.append(f"【首领】{cn_name or en_name}")
+        # duel 首领全名（如 "[Cat-stle Siege] Chaton ???"）字典整名反查常落空：
+        # 剥赛季前缀取内层名 "Chaton ???" 二次反查官方中文收录名「猫眼？？？」，
+        # 命中即以 CN+括注原名展示；raid/blitz 无赛季前缀结构，行为零改动
+        display_cn = cn_name or en_name
+        display_en = ""
+        if source == "duel" and en_name:
+            inner = re.sub(r"^\[[^\]]*\]\s*", "", en_name)
+            if inner != en_name:
+                inner_cn = _cn_by_en(lookup, inner)
+                if inner_cn != inner:
+                    display_cn = inner_cn
+                    display_en = en_name
+        if display_en:
+            lines.append(f"【首领】{display_cn}（{display_en}）")
+        else:
+            lines.append(f"【首领】{display_cn or en_name}")
 
     m_type = monster.get("type", "")
     if m_type:

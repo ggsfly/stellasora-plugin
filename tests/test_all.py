@@ -2509,6 +2509,13 @@ def test_what_module_detection() -> None:
           ok_talents and ok_details and ok_empty and ok_mechanic
           and ok_skill_char and ok_skill_disc and ok_skill_mon and ok_stats)
 
+    # 防误桥：裸「猫眼」不得命中 duel boss「1」——同名???变体识别必须带长度阈值
+    # 拒绝裸名（「猫眼？？？」归一化后与「猫眼」同形，只能靠原串级长度判定区分）
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    dl_st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+    dl_bare = service._match_monster("猫眼", DictLookup(DATA_DIR), dl_st_fix)
+    check("O16 防误桥 裸名「猫眼」不得劫持 duel boss", dl_bare != "1")
+
 
 def test_character_module_material() -> None:
     """O17: _build_character_material 模块定向——skills 含【普攻】无【约会分支】、
@@ -2600,8 +2607,22 @@ def test_monster_module_material() -> None:
         and "【首领机制】" in mat_duel and "固定机制词条" in mat_duel and "裸分组机制词条" in mat_duel \
         and "【面板数值】" in mat_duel
 
+    # 4. duel 同名???变体识别（真实字典 lookup，不走 mock）：fixture boss「1」名字镜像
+    #    真实 schema "[Cat-stle Siege] Chaton ???"，剥赛季前缀后内层名 "Chaton ???" 在
+    #    data/dict.json 反查得官方中文「猫眼？？？」——全角问号查询须命中 duel 资料；
+    #    裸「猫眼」不得劫持（归一套吃全角？，原串级长度阈值 >=4 拒绝）
+    m_mao = service._match_monster("猫眼？？？", lookup, st_fix)
+    m_scene = service._match_monster("巅峰秀场猫眼？？？", lookup, st_fix)
+    p4_ok = (m_mao == "1") and (m_scene == "1")
+
+    # 5. duel 头部显示官方中文名：剥赛季前缀反查命中 → 「猫眼？？？(EN)」形态
+    mat_duel_ov, ok_duel_ov = service._build_monster_material(st_fix, "1", lookup, modules={"overview"})
+    p5_ok = ok_duel_ov and "猫眼？？？" in mat_duel_ov
+
     check("O19 首领怪物模块定向（raid overview/stats+mechanic 与 duel 分区渲染）",
           p1_ok and p2_ok and p3_ok)
+    check("O19 duel 同名???变体识别（猫眼？？？/场景词命中 + 头部官方中文名）",
+          p4_ok and p5_ok)
 
 
 def test_what_end_to_end_modules() -> None:
