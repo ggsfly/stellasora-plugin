@@ -222,6 +222,28 @@ def _get_lookup() -> DictLookup:
     return entry[0]
 
 
+def _get_replacer() -> Any:
+    """取共享 TermReplacer（服务元组第 5 位）；未初始化时先构建字典单例。"""
+    entry = _instances.get(str(_DATA_DIR))
+    if entry is None:
+        _get_lookup()
+        entry = _instances[str(_DATA_DIR)]
+    return entry[4]
+
+
+def _cn_full(lookup: Any, text: Any) -> str:
+    """整句/短语 → 官方中文：走 TermReplacer 全字段映射。
+
+    与 _cn_by_en 的区别：_cn_by_en 只查字典 .1 名字条目，整句（如约会
+    clue/secondChoice 的完整英文）无法命中；replacer 基于全字段字典 +
+    人工别名表，能整段译出（如 "Visit the Dessert Shop to unlock" →
+    「在甜品屋的话，或许会发现些什么……」）。未命中词保留原样。
+    """
+    if text is None:
+        return ""
+    return strip_game_markup(_get_replacer().replace(str(text)))
+
+
 def lookup_term(term: str, custom_aliases: Optional[Dict[str, str]] = None) -> Dict:
     """查词工具核心：术语 → {id, en, cn, cat} 或 {"not_found": True}。"""
     res = _get_lookup().lookup_term(term, custom_aliases=custom_aliases)
@@ -1709,16 +1731,17 @@ def _build_character_material(
             if hate_cn:
                 lines.append(f"厌恶礼物：{'、'.join(hate_cn)}")
 
-    # 约会分支：date
+    # 约会分支：date（name/clue/secondChoice 为整句英文，须走 replacer 全文
+    # 映射才能译为中文；_cn_by_en 只查 .1 名字条目，整句查不到）
     if modules is None or "dates" in modules:
         dates = char.get("date", [])
         if isinstance(dates, list) and dates:
             lines.append("【约会分支】")
             for d in dates:
                 if isinstance(d, dict):
-                    d_name = _cn_by_en(lookup, d.get("name", ""))
-                    d_clue = _cn_by_en(lookup, d.get("clue", ""))
-                    d_choice = _cn_by_en(lookup, d.get("secondChoice", ""))
+                    d_name = _cn_full(lookup, d.get("name", ""))
+                    d_clue = _cn_full(lookup, d.get("clue", ""))
+                    d_choice = _cn_full(lookup, d.get("secondChoice", ""))
                     parts = []
                     if d_name:
                         parts.append(f"事件：{d_name}")

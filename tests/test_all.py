@@ -2584,8 +2584,19 @@ def test_character_module_material() -> None:
     mat_full, ok_full = service._build_character_material(st_fix, "103", lookup)
     p4_ok = ok_full and "【约会分支】" in mat_full and "【普攻】" in mat_full and "【天赋】" in mat_full
 
+    # 5. 约会分支整句中文化（hotfix 回归）：name/clue/secondChoice 为整句英文，
+    #    须经 replacer 全文映射译为中文，不得经 _cn_by_en（只查 .1 名字条目，整句查不到）
+    p5_ok = (
+        "事件：偶遇猫咪" in mat_full
+        and "解锁线索：在港口的话，或许会发现些什么" in mat_full
+        and "分支选择：要不要现在来一场夜钓" in mat_full
+        and "The Kitten Encounter" not in mat_full
+        and "Visit the Port to unlock" not in mat_full
+        and "night fishing" not in mat_full
+    )
+
     check("O17 角色资料模块定向（skills/talents+轶闻/details/全量约会分支）",
-          p1_ok and p2_ok and p3_ok and p4_ok)
+          p1_ok and p2_ok and p3_ok and p4_ok and p5_ok)
 
 
 def test_disc_module_material() -> None:
