@@ -355,7 +355,7 @@ def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") 
     as_of：planner 传入的卡池时间锚点（ISO 日期，如 '2026-08-23'；可为空）。
     仅 banner 路由使用——planner 解析用户问句中的时间语义后直接传锚点。
     """
-    lookup, _last, st_fetcher, replacer = _get_services(cache_dir)
+    lookup, _last, st_fetcher, _replacer = _get_services(cache_dir)
 
     # 1. 实体优先保护：查询词若为「实体+概念词」混合形态（如「猫眼的秘纹」「鹿鸣秘纹」），
     #    先剥离概念词取出实体并改走实体路由，避免概念页抢占实体（原缺陷：问某角色的
