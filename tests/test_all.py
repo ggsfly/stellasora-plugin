@@ -2698,6 +2698,41 @@ def test_stat_level_cap() -> None:
           and "91级" not in char_rows and "98级" not in disc_rows)
 
 
+def test_param_fill() -> None:
+    """O23: 参数占位符回填（对齐 stelladb 站点默认滑块档位）。
+
+    - 角色 13 档 → 技能等级默认 10（索引 9）；
+    - 角色 9 档 → 技能类取突破档默认 8（索引 8）、潜能类取潜能等级默认 6（索引 5）；
+    - 无斜杠静态名/数值原样；
+    - 秘纹 params 为 'a/b/c' 字符串、占位符 {N} → dupe 默认 1（索引 0）；
+    - ss-data 追加式参数审计尾注（\\x0bParamN: 值 (内部类型枚举)）须剥除。
+    lookup 传 None 以保证确定性（_cn_by_en 原样返回，仅走属性名补充表）。
+    """
+    p13 = "/".join(f"{i}%" for i in range(1, 14))   # 13 档：索引 9 -> "10%"
+    p9 = "/".join(f"{i}%" for i in range(1, 10))    # 9 档：索引 8 -> "9%"
+    desc = "造成&Param1&伤害，持续&Param3&秒。\x0bParam5: 审计 (Effect,EffectTypeFirstSubtype)"
+    sk = {"nameCN": "测试技能", "descCN": desc, "params": [p13, "静态名", p9, 7, "3%"]}
+    skill_desc = service._render_skill_block(sk, "主控技能", None, "skill")[1]
+
+    pot_desc = service._fill_params(
+        "攻击力提升&Param1&", [p9], "potential", None
+    )
+    disc_main = service._fill_params(
+        "主控角色攻击力提升{1}", "7%/8%/9%", "disc_main", None
+    )
+    disc_sec = service._fill_params(
+        "全队风系伤害提升{1}", "5%/6%/7%", "disc_secondary", None
+    )
+
+    check("O23 参数占位符回填（站点默认档位 + 审计尾注剥离）",
+          skill_desc == "描述：造成10%伤害，持续9%秒。"
+          and "&Param" not in skill_desc and "审计" not in skill_desc
+          and "EffectTypeFirstSubtype" not in skill_desc
+          and pot_desc == "攻击力提升6%"                    # 9 档 + potential → 索引 5
+          and disc_main == "主控角色攻击力提升7%"            # dupe 默认 1 → 索引 0
+          and disc_sec == "全队风系伤害提升5%")              # harmony 默认 1 → 索引 0
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2721,6 +2756,7 @@ def run_section_o() -> None:
     test_what_end_to_end_modules()
     test_no_truncation()
     test_stat_level_cap()
+    test_param_fill()
 
 
 # ===== 汇总入口 =====

@@ -1294,6 +1294,112 @@ _STAT_LABELS: Tuple[Tuple[str, str], ...] = (("HP", "生命"), ("ATK", "攻击")
 _STAT_LABELS_HP_ATK: Tuple[Tuple[str, str], ...] = (("HP", "生命"), ("ATK", "攻击"))
 _STAT_SKIP_KEYS: Tuple[str, ...] = ("Type", "HP Bar", "Score", "Max Score")
 
+# ---- Param 占位符回填（对齐 stelladb 站点默认滑块档位）----
+# 站点（stelladb.pages.dev）用滑块选择档位展示数值；此处取站点各滑块的默认值，
+# 使插件渲染与站点默认视图一致。常量取值来自站点源码：
+#   skills 标签：#skill-level1/2 value=10（1-13）、#upgrade2 value=8（0-8）
+#   potentials 标签：#potential-level value=6（1-9）、#skill-level2 value=10（1-13）
+#   disc 主技能：#dupe2 value=1（1-6）；disc 副技能：#harmony-level value=1（1-5）
+_DEFAULT_SKILL_LEVEL = 10
+_DEFAULT_UPGRADE_TIER = 8
+_DEFAULT_POTENTIAL_LEVEL = 6
+_DEFAULT_DISC_DUPE = 1
+_DEFAULT_DISC_HARMONY = 1
+
+# 参数值中出现的属性名（字典未收录、站点亦原样显示英文）：补官方中文，
+# 避免「官方中文输出」夹带英文。仅覆盖实测残留项。
+_PARAM_ATTR_CN: Dict[str, str] = {
+    "Attack Speed": "攻击速度",
+    "Movement Speed": "移动速度",
+}
+
+# 角色占位符 &ParamN&（兼容站点正则的 &ParamN_xxx& 变体）；秘纹占位符 {N}
+_PARAM_AMP_RE = re.compile(r"&Param(\d+)(?:_[^&]*)?&")
+_PARAM_BRACE_RE = re.compile(r"\{(\d+)\}")
+# ss-data 生成器会把「描述未引用但数据存在的参数」以 \x0bParamN: 值 (内部类型枚举)
+# 形式**追加**到 desc 末尾（utils.js collectUnusedParamsFrom / collectPotentialHiddenParamsFrom）。
+# 该段是站点的数据审计注记（含 EffectTypeFirstSubtype 等内部枚举），非游戏文案，
+# 且占位符为 &ParamN&（已由本函数填充）——对 QQ 回答属噪声，统一剥除。
+_PARAM_AUDIT_RE = re.compile(r"\x0b(?:Param|HiddenParam)\d+:[^\x0b]*")
+
+
+def _pick_tier(value: str, index: int) -> str:
+    """从 'a/b/c' 档位串中取第 index 档（越界钳制到首/末档）。"""
+    parts = value.split("/")
+    if not parts:
+        return value
+    if index < 0:
+        index = 0
+    elif index >= len(parts):
+        index = len(parts) - 1
+    return parts[index]
+
+
+def _param_value_cn(value: str, lookup: Any) -> str:
+    """参数值 → 显示中文：先字典反查，未收录则查属性名补充表，仍无则原样。"""
+    if not isinstance(value, str):
+        value = str(value)
+    cn = _cn_by_en(lookup, value)
+    if cn == value:
+        return _PARAM_ATTR_CN.get(value.strip(), cn)
+    return cn
+
+
+def _resolve_char_param(value: Any, kind: str, lookup: Any) -> str:
+    """角色参数（技能/潜能/天赋）按站点默认档位取值，并反查名称类英文值的中文。
+
+    档位规则（与站点 replaceSkillParams / onPotentialsInput 一致）：
+      13 档 → 技能等级（默认 10，索引 9）；
+      9  档 → 技能类取突破档（默认 8，索引 8）、潜能类取潜能等级（默认 6，索引 5）；
+      无斜杠（静态名/数值）→ 原样。
+    取出的值可能是英文技能名（如 "Blitz Assault"）或属性名（如 "Attack Speed"），
+    经字典反查 / 属性名补充表译为官方中文。
+    """
+    s = str(value)
+    if "/" not in s:
+        return _param_value_cn(s, lookup)
+    tier_count = len(s.split("/"))
+    if tier_count == 13:
+        picked = _pick_tier(s, _DEFAULT_SKILL_LEVEL - 1)
+    elif tier_count == 9:
+        picked = _pick_tier(
+            s,
+            _DEFAULT_POTENTIAL_LEVEL - 1 if kind == "potential" else _DEFAULT_UPGRADE_TIER,
+        )
+    else:
+        picked = _pick_tier(s, 0)
+    return _param_value_cn(picked, lookup)
+
+
+def _fill_params(desc: str, params: Any, kind: str, lookup: Any) -> str:
+    """把 desc 中的参数占位符替换为站点默认档位的数值。
+
+    - 角色（params 为 list，占位符 &ParamN&）：逐项按档位取值后回填；
+    - 秘纹（params 为字符串 'a/b/c'，占位符 {N}）：按 dupe/harmony 取档后
+      以 ',' 拆分逐项回填（站点 disc 页逻辑）。
+    开头先剥除追加式参数审计尾注（见 _PARAM_AUDIT_RE）。
+    未匹配到的占位符保持原样，最终由 strip_game_markup 兜底清理。
+    """
+    if not isinstance(desc, str) or not desc:
+        return desc
+    desc = _PARAM_AUDIT_RE.sub("", desc)
+    if params is None:
+        return desc
+    if isinstance(params, list):
+        resolved = {
+            i + 1: _resolve_char_param(p, kind, lookup) for i, p in enumerate(params)
+        }
+        return _PARAM_AMP_RE.sub(lambda m: resolved.get(int(m.group(1)), m.group(0)), desc)
+    if isinstance(params, str):
+        tiers = params.split("/")
+        idx = (_DEFAULT_DISC_DUPE - 1) if kind == "disc_main" else (_DEFAULT_DISC_HARMONY - 1)
+        picked = _pick_tier(params, idx) if tiers else ""
+        values = picked.split(",") if picked else []
+        resolved = {i + 1: _param_value_cn(v.strip(), lookup) for i, v in enumerate(values)}
+        return _PARAM_BRACE_RE.sub(lambda m: resolved.get(int(m.group(1)), m.group(0)), desc)
+    return desc
+
+
 
 def _stat_parts(
     stat_dict: dict,
@@ -1320,19 +1426,20 @@ def _stat_parts(
     return parts
 
 
-def _render_skill_block(sk: dict, label: str, lookup: Any) -> list:
+def _render_skill_block(sk: dict, label: str, lookup: Any, kind: str = "skill") -> list:
     """渲染单个技能块（名称/描述/数值表），角色四技能与秘纹主/副技能共用。
 
     取值优先级：nameCN/descCN（官方中文）→ name/desc 经 _cn_by_en 反查；
+    desc 中的参数占位符按 kind 取站点默认档位回填（角色 &ParamN& / 秘纹 {N}）；
     params 为 list 时以 ' / ' 连接，否则原样输出。
     """
     lines: list[str] = []
     name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
     desc = sk.get("descCN") or sk.get("desc", "")
+    params = sk.get("params")
     lines.append(f"【{label}】{name}")
     if desc:
-        lines.append(f"描述：{desc}")
-    params = sk.get("params")
+        lines.append(f"描述：{_fill_params(desc, params, kind, lookup)}")
     if params:
         if isinstance(params, list):
             lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
@@ -1520,7 +1627,10 @@ def _build_character_material(
                             p_name = item.get("nameCN") or _cn_by_en(lookup, item.get("name", ""))
                             p_desc = item.get("descCN") or item.get("desc", "")
                             if p_name or p_desc:
-                                lines.append(f"  {p_name}：{p_desc}")
+                                lines.append(
+                                    f"  {p_name}："
+                                    f"{_fill_params(p_desc, item.get('params'), 'potential', lookup)}"
+                                )
 
     # 天赋：talent；模块化查询时追加天赋轶闻（Item.{num_id}.3 命中且含 cn 才输出）
     if modules is None or "talents" in modules:
@@ -1532,13 +1642,19 @@ def _build_character_material(
                     if t.get("nameCN") or t.get("descCN"):
                         t_name = t.get("nameCN") or _cn_by_en(lookup, t.get("name", ""))
                         t_desc = t.get("descCN") or t.get("desc", "")
-                        lines.append(f"  {t_name}：{t_desc}")
+                        lines.append(
+                            f"  {t_name}："
+                            f"{_fill_params(t_desc, t.get('params'), 'talent', lookup)}"
+                        )
                     elif t.get("boost") and isinstance(t["boost"], list):
                         for b in t["boost"]:
                             if isinstance(b, dict) and (b.get("nameCN") or b.get("descCN")):
                                 b_name = b.get("nameCN") or _cn_by_en(lookup, b.get("name", ""))
                                 b_desc = b.get("descCN") or b.get("desc", "")
-                                lines.append(f"  {b_name}：{b_desc}")
+                                lines.append(
+                                    f"  {b_name}："
+                                    f"{_fill_params(b_desc, b.get('params'), 'talent', lookup)}"
+                                )
         if modules is not None:
             # 天赋轶闻：查询失败不兜底造数据，命中且含中文才追加
             flavor = lookup.lookup_term(f"Item.{num_id}.3")
@@ -1652,13 +1768,13 @@ def _build_disc_material(
     if modules is None or "melody" in modules:
         main_skill = disc.get("mainSkill")
         if main_skill and isinstance(main_skill, dict):
-            lines.extend(_render_skill_block(main_skill, "主技能", lookup))
+            lines.extend(_render_skill_block(main_skill, "主技能", lookup, "disc_main"))
 
         for sec_key, sec_label in [("secondarySkill1", "副技能1"), ("secondarySkill2", "副技能2")]:
             sec_skill = disc.get(sec_key)
             if sec_skill and isinstance(sec_skill, dict):
                 has_secondary = True
-                lines.extend(_render_skill_block(sec_skill, sec_label, lookup))
+                lines.extend(_render_skill_block(sec_skill, sec_label, lookup, "disc_secondary"))
 
     # details 模块（模块化新增）：面板数值（首级 + 90 级满级；秘纹 stat 无 Level
     # 字段，等级按下标按突破规则反推，不可用 idx+1）
