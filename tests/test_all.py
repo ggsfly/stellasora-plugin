@@ -780,7 +780,7 @@ async def run_direct_send() -> None:
           and send.sent[0][0] == "stream_g1")
     check("G2 prompt 注入人格与表达风格",
           "你的名字是麦麦" in llm.calls[0]["prompt"] and "表达风格" in llm.calls[0]["prompt"])
-    check("G3 SDK 透传 model=utils", llm.calls[0].get("model") == "utils")
+    check("G3 SDK 透传 task_name=utils", llm.calls[0].get("task_name") == "utils")
 
     # G4-G6 失败分支：LLM 软失败→降级回传原始资料 / 硬异常→降级回传 / stream 缺失→未找到
     # （修复点2：资料查询成功但 LLM 加工失败时不再谎报"未找到"，而是带系统说明回传原始资料）
@@ -975,13 +975,13 @@ async def run_direct_send() -> None:
     has_knowledge = "【游戏机制知识（回答格式必须遵守）】" in llm19.calls[0]["prompt"]
     check("G16 游戏知识内联 how 模板（恒含知识标头）", has_knowledge)
 
-    # G17 llm_model 空串 → generate kwargs 不含 model 键（负路径）
+    # G17 llm_model 空串 → generate kwargs 不含 task_name 键（负路径，宿主回落默认任务）
     p20, ctx20 = make_plugin()
     await p20.on_load()
     p20._plugin_config_instance.query.llm_model = ""
     r21 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_g17")
-    check("G17 llm_model 空串不含 model 键",
-          "model" not in ctx20.llm.calls[0] and "已直接发送" in r21.get("content", ""))
+    check("G17 llm_model 空串不含 task_name 键",
+          "task_name" not in ctx20.llm.calls[0] and "已直接发送" in r21.get("content", ""))
 
     # G18 直发 prompt 注入反 markdown 约束（规则 9）
     ctx20.llm, ctx20.send = MockLLM(), MockSend()

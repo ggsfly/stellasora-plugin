@@ -30,6 +30,8 @@ MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增�
 # 「慢模型下 LLM 先于工具超时」的静默降级（LLM 异常 → 回传原始资料而非成品）。
 # 故显式声明：工具预算由 @Tool(timeout_ms=...) 经 metadata 上报宿主，
 # 内部 LLM 预算须略小于工具预算，余量留给 LLM 之前的抓取/渲染（更早发生）。
+# timeout_ms 具名参数自 SDK 2.5.4 起支持；模型选择走 task_name（任务名）契约自
+# SDK 2.8.1 起，manifest 的 sdk.min_version 已钉死 2.8.1 保证两者可用。
 _TOOL_RPC_TIMEOUT_MS = 90000
 _LLM_RPC_TIMEOUT_MS = 80000
 
@@ -650,7 +652,10 @@ class StellaSoraPlugin(MaiBotPlugin):
         try:
             gen_kwargs: dict[str, Any] = {"prompt": prompt}
             if llm_model:
-                gen_kwargs["model"] = llm_model
+                # 任务名必须经 task_name 传：SDK 2.8.1 起 payload 恒含 task_name，
+                # 宿主据此把 model 解释为「直选模型名」而非任务名——继续传
+                # model="utils" 会被当作物理模型名解析失败（llm.generate 必炸）。
+                gen_kwargs["task_name"] = llm_model
             # 内部 LLM 预算须小于工具预算（见模块顶部常量注释），避免慢模型下
             # LLM 先于工具超时导致静默降级；timeout_ms 由 SDK 绑定为本次 RPC 超时
             gen_kwargs["timeout_ms"] = _LLM_RPC_TIMEOUT_MS
