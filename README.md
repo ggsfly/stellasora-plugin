@@ -21,7 +21,7 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 | **离线优先** | 优先读取本地持久化数据（`data/offline/`），无实时外部网络依赖 |
 | **双通道更新** | 每日 17:00 自动定时更新，支持管理员在聊天端发送 `/st_update` 手动触发更新 |
 | **直接发送模式** | 内部 LLM 加工后直发聊天，支持人格与表达风格注入（默认开启） |
-| **官方中文输出** | 47,500+ 条中英对照字典，术语与技能描述对齐官方译名 |
+| **官方中文输出** | 48,854 条中英对照字典，术语与技能描述对齐官方译名 |
 | **表驱动查询** | 基于统一队伍-槽位表（`team_table.json`）按交集抽取区块，减少 token 消耗 |
 | **分组与详略策略** | 同区块多队伍合并展示；问询角色详述，其余成员作为队友并集简列 |
 | **纹章网格对齐** | 基于绝对列索引解析，精确对齐 70/80/90 级纹章词条 |
@@ -114,14 +114,17 @@ llm_model = "utils"
 inject_persona = true
 
 [overrides]
-# 别名/俗称映射：将别名、俗称、变体写法映射到官方中文名、英文名或条目 ID
-# 示例：aliases = { "土" = "地", "花玲" = "花铃" }
-aliases = { "土" = "地", "花玲" = "花铃" }
+# 中文别名/俗称 → 官方中文名映射
+# 用户在群里用简称提问时，插件自动映射到官方角色/术语名再查攻略
+# 每条别名为一个 [[overrides.aliases]] 条目，WebUI 会渲染为可增删的列表编辑器
 
-# 文本替换规则：直接将抓取的攻略文本中的英文短语、笔误或旧称替换为指定中文
-# 优先于内置字典执行，支持中英文子串替换
-# 示例：replacements = { "Finale Echoing" = "终焉绝响" }
-replacements = { "Finale Echoing" = "终焉绝响" }
+[[overrides.aliases]]
+alias = "春科"
+official = "科洛妮丝（新春）"
+
+[[overrides.aliases]]
+alias = "土"
+official = "地"
 ```
 
 > **提示**：修改主程序全局人格配置（如 bot_config 的 personality/nickname/reply_style 等）不会触发插件配置热重载，已缓存的直发答案口吻最长 24 小时内保持原口吻。如需立即刷新口吻，可手动清空 data/webcache/answers/ 目录，或将 answer_cache_ttl 设置为 0 禁用后再改回。
@@ -223,7 +226,7 @@ python tools/update_dict.py --mode local --source /path/to/ss-data
 - `docs/prompts_how.md`（`stellasora_how` 工具）：含 `persona_block`/`question`/`material`
   占位符、内联游戏机制知识与回答规则 1-9
 - `docs/prompts_what.md`（`stellasora_what` 工具）：含 `persona_block`/`question`/`material`
-  占位符（当前仅人格注入模块+骨架，回答规则待补充）
+  占位符，模块化材料说明与【约会】输出规则，禁止编造
 
 ## 关于与致谢
 

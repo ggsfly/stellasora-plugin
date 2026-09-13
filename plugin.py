@@ -75,8 +75,8 @@ def _load_prompt_doc_how() -> Optional[str]:
 def _load_prompt_doc_what() -> Optional[str]:
     """加载 docs/prompts_what.md 直发提示词文档（模块级缓存，单一事实源）。
 
-    what 工具专用提示词，当前仅含人格注入模块与骨架（其余待补充）。
-    缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
+    what 工具专用提示词：模块化材料说明（按模块输出）与【约会】输出规则，
+    并明确禁止编造。缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
     """
     global _PROMPT_DOC_CACHE_WHAT
     if _PROMPT_DOC_CACHE_WHAT is None:
@@ -91,6 +91,14 @@ def _load_prompt_doc_what() -> Optional[str]:
 # LLM 加工失败降级回传前缀（单一事实源）：攻略资料本身查询成功、仅回答加工失败时，
 # 用该前缀包装原始资料交由回复流程基于资料组织语言，不再谎报"未找到相关攻略"。
 _FAILURE_RELAY_PREFIX = "[系统说明：攻略资料已查询成功，但回答加工（LLM）暂时失败，请把下方【攻略资料】整块原样放入 reply 工具的 reply_reference 参数，由回复流程基于它组织语言，不要调用其他搜索工具。]\n【攻略资料·bot查询所得，非用户发言】\n"
+
+# 直发成功后的工具返回文案（单一事实源）：明确告知 planner 无需再 reply，
+# 避免与已直发的攻略重复。缓存命中与首次加工两条路径共用，防止文案漂移。
+_ALREADY_SENT_CONTENT = (
+    "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
+    "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
+    "请立即调用 wait 工具（seconds=5）结束本轮即可。"
+)
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -134,8 +142,8 @@ class QueryConfig(PluginConfigBase):
 
     default_max_length: int = Field(
         default=40000,
-        description="工具返回文本的最大长度（超出按行边界截断并标注，防止撑爆 LLM 上下文；"
-        "how 路径含元素队 infodoc 全文，完整攻略需较大预算）",
+        description="历史遗留字段：文本截断逻辑已移除（资料全量输出，长度控制交由提示词与模块选段）。"
+        "当前仅作为答案相关配置指纹的一部分保留，改动会触发直发成品缓存刷新",
     )
 
     direct_send: bool = Field(
@@ -269,18 +277,8 @@ class StellaSoraPlugin(MaiBotPlugin):
                     await asyncio.to_thread(sync_offline_data, sync_all=True)
                     # 表缓存失效接线：定时同步产出新统一表后立即失效表缓存
                     reload_team_table()
-                    # 清空直发成品缓存并清理 answers 磁盘缓存
-                    answers_dir = self._cache_dir_ready() / "answers"
-                    if answers_dir.exists():
-                        for p in answers_dir.glob("*.json"):
-                            try:
-                                p.unlink()
-                            except Exception:
-                                pass
-                    try:
-                        self._get_answer_cache()._memory_cache.clear()
-                    except Exception:
-                        pass
+                    # 清空直发成品缓存（磁盘 answers 与内存）
+                    self._clear_answer_cache()
                     self.ctx.logger.info("每日 17:00 离线数据定时同步完成")
                 except asyncio.CancelledError:
                     raise
@@ -327,7 +325,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         答案相关配置指纹去抖：宿主会推送 scope=self 的配置更新（WebUI 保存/
         轮询均可能触发），其中大量为无实质变化的空更新——若每次都清空答案缓存，
         刚写入的成品秒被清掉，重复问题重复调用 LLM（实例日志证实）。
-        仅当影响答案的配置字段（aliases/replacements/llm_model/inject_persona/
+        仅当影响答案的配置字段（aliases/llm_model/inject_persona/
         default_max_length/config_version）实际变化时才清缓存。
         """
         self.ctx.logger.info(
@@ -340,15 +338,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             return
         self._answer_cfg_fp = fingerprint
         # 清空直发成品缓存（防旧配置答案残留）
-        answers_dir = self._cache_dir_ready() / "answers"
-        if answers_dir.exists():
-            for p in answers_dir.glob("*.json"):
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-        if self._answer_cache is not None:
-            self._answer_cache._memory_cache.clear()
+        self._clear_answer_cache()
         self.ctx.logger.info("直发成品缓存已清空")
 
     def _code_fingerprint(self) -> str:
@@ -369,16 +359,20 @@ class StellaSoraPlugin(MaiBotPlugin):
         return str(int(latest))
 
     def _answer_relevant_fingerprint(self) -> str:
-        """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。"""
+        """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。
+
+        别名列表元素为 AliasEntry 模型，须先转为纯 dict 才能 JSON 序列化：
+        直接 json.dumps 模型列表会抛 TypeError，导致别名恒不入指纹、别名
+        变更无法使直发成品缓存失效（同 key 命中变更前的旧答案原样重发）。
+        """
         c = self.config
-        try:
-            aliases = json.dumps(c.overrides.aliases, ensure_ascii=False, sort_keys=True)
-            replacements = json.dumps(c.overrides.replacements, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            aliases = replacements = ""
+        aliases = json.dumps(
+            [{"alias": e.alias, "official": e.official} for e in c.overrides.aliases],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         return "|".join((
             aliases,
-            replacements,
             c.query.llm_model,
             str(c.query.inject_persona),
             str(c.query.default_max_length),
@@ -406,6 +400,22 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._answer_cache.ttl_seconds = ttl
         return self._answer_cache
 
+    def _clear_answer_cache(self) -> None:
+        """清空直发成品缓存：磁盘 answers/*.json 逐个删除 + 内存缓存整体清空。
+
+        定时同步、手动 /st_update、答案相关配置变更三条链路共用（单一事实源），
+        避免三处重复实现漂移；内存缓存仅在管理器已创建时清理（未创建即无事可做）。
+        """
+        answers_dir = self._cache_dir_ready() / "answers"
+        if answers_dir.exists():
+            for p in answers_dir.glob("*.json"):
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        if self._answer_cache is not None:
+            self._answer_cache.clear()
+
     def _resolve_stream_id(self, kwargs: dict) -> str:
         """从工具调用 kwargs 提取 stream_id（直发/去重/未找到发送共用）。"""
         return (str(kwargs.get("stream_id") or kwargs.get("chat_id") or "")).strip()
@@ -424,7 +434,7 @@ class StellaSoraPlugin(MaiBotPlugin):
     # ===== 直接发送模式 =====
 
     # 直发 Prompt 双模板：how 用 docs/prompts_how.md（含 {persona_block}/{question}/{material} 与内联游戏知识+回答规则 1-9），
-    # what 用 docs/prompts_what.md（当前仅人格注入模块+骨架，其余待补充）。
+    # what 用 docs/prompts_what.md（模块化材料说明 +【约会】输出规则 + 禁止编造）。
     # 由模块级 _load_prompt_doc_how() / _load_prompt_doc_what() 加载（模块级缓存，修改后需重启生效）；
     # 加载失败为 None，_direct_send 开头显式判 None 返回"未找到相关攻略。"，不回退内嵌旧文。
     # 本 Prompt 为插件自维护文档模板，非 prompts/ 目录模板，不受多语言同步约束。
@@ -558,11 +568,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 )
                 return {
                     "name": tool_name,
-                    "content": (
-                        "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
-                        "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
-                        "请立即调用 wait 工具（seconds=5）结束本轮即可。"
-                    ),
+                    "content": _ALREADY_SENT_CONTENT,
                 }
             else:
                 self.ctx.logger.info("直接发送缓存未命中: key=%s", cache_key)
@@ -962,17 +968,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         reload_team_table()
 
         # 清空直发成品缓存（磁盘文件与内存缓存）
-        answers_dir = self._cache_dir_ready() / "answers"
-        if answers_dir.exists():
-            for p in answers_dir.glob("*.json"):
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-        try:
-            self._get_answer_cache()._memory_cache.clear()
-        except Exception:
-            pass
+        self._clear_answer_cache()
 
         if effective_stream_id:
             try:

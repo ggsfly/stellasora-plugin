@@ -11,6 +11,11 @@ __pycache__/
 *.py[cod]
 .venv/
 
+# 开发用静态检查配置（本机 venv 与 tools 导入路径，不入库）
+pyrightconfig.json
+# 本地 Agent/会话运行态（非插件源码）
+.omo/
+
 # 归档（非必要数据，见 docs/stage1_report.md）
 data/_archive/
 data/.cache_sim/

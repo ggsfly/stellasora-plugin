@@ -172,14 +172,14 @@ def run_singleton() -> None:
         tmp_b = Path(tempfile.mkdtemp(prefix="stellasora_singleton_b_"))
         svc_a = service._get_services(tmp_a)
         svc_b = service._get_services(tmp_b)
-        lookup_a, last_a, st_a, gd_a, replacer = svc_a
-        lookup_b, last_b, st_b, gd_b, _ = svc_b
+        lookup_a, last_a, st_a, gd_a, replacer_a = svc_a
+        lookup_b, last_b, st_b, gd_b, replacer_b = svc_b
 
         check("B1 dict.json 全进程只解析一次", counter["dict"] == 1,
               f"解析 {counter['dict']} 次（总 json.load {counter['total']}：dict 1 + names 1）")
         check("B2 两个 cache_dir 共享同一 lookup", lookup_a is lookup_b)
         check("B3 cache_dir 变化仅重建 fetcher", st_a is not st_b and gd_a is not gd_b)
-        check("B4 replacer 为单一事实源注入", service._term_replace_module._replacer is replacer)
+        check("B4 replacer 随 lookup 复用（cache_dir 变化不重建）", replacer_a is replacer_b)
         check("B5 未收录术语返回 not_found", service.lookup_term("NoSuchTermXYZ").get("not_found") is True)
 
         # 并发冒烟：10 线程同时取服务，计数不变且拿到同一实例
@@ -948,6 +948,13 @@ async def run_direct_send() -> None:
     await p15.on_config_update(scope="query", config_data={}, version="1.2.3")
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
     check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.sent) == 4)
+
+    # G14b 别名变更进入答案指纹（回归：AliasEntry 为 pydantic 模型，须先转纯 dict
+    # 才能 json.dumps；旧实现直接序列化抛 TypeError 被吞 → 别名恒不入指纹、变更不清缓存）
+    fp_before = p15._answer_relevant_fingerprint()
+    p15._plugin_config_instance.overrides.aliases = [plug.AliasEntry(alias="新俗称", official="夏花")]
+    fp_after = p15._answer_relevant_fingerprint()
+    check("G14b 别名变更改变答案指纹（不再被序列化异常吞掉）", fp_before != fp_after)
 
     # G15 presets 独立缓存键（需要 ttl>0 才有成品缓存行为）
     p18, ctx18 = make_plugin(ttl=86400)
@@ -2662,6 +2669,35 @@ def test_no_truncation() -> None:
           and "<color" not in mat and "</colo" not in mat and "</color" not in mat)
 
 
+def test_stat_level_cap() -> None:
+    """O22: 面板等级上限——旅人 stat 尾部 Level 91 为内部溢出条目（数值与 90 级
+    相同），不得渲染为「91 级」；秘纹 stat 无 Level 字段，须按突破规则由下标反推
+    等级（末行实为 90 级，而非 idx+1 得出的 98 级）。合成数据镜像真实 ss-data 结构：
+    旅人 99 行（91 唯一等级 + 8 突破重复）、秘纹 98 行（90 唯一等级 + 8 突破重复）。"""
+    char_stat: list = []
+    level = 1
+    while len(char_stat) < 99:
+        char_stat.append({"Level": level, "HP": level * 100, "ATK": level, "DEF": 10})
+        if level in (10, 20, 30, 40, 50, 60, 70, 80):
+            char_stat.append({"Level": level, "HP": level * 100, "ATK": level, "DEF": 10})
+        level += 1
+    disc_stat = [{"HP": i, "ATK": i} for i in range(98)]
+
+    char_levels = service._stat_levels(char_stat)
+    char_rows = service._render_stat_rows(char_stat, None, service._STAT_LABELS)
+    disc_levels = service._stat_levels(disc_stat)
+    disc_rows = service._render_stat_rows(disc_stat, None, service._STAT_LABELS_HP_ATK)
+
+    check("O22 面板等级上限（旅人 90 非 91 / 秘纹按下标反推 90 非 98）",
+          len(char_levels) == 99 and char_levels[-1] == 91            # 溢出条目仍在序列末尾
+          and char_levels[10] == 10 and char_levels[21] == 20         # 突破重复对齐
+          and char_rows[0].startswith("  1级") and char_rows[-1].startswith("  90级")
+          and len(disc_levels) == 98 and disc_levels[-1] == 90
+          and disc_levels[10] == 10 and disc_levels[21] == 20
+          and disc_rows[0].startswith("  1级") and disc_rows[-1].startswith("  90级")
+          and "91级" not in char_rows and "98级" not in disc_rows)
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2684,6 +2720,7 @@ def run_section_o() -> None:
     test_monster_module_material()
     test_what_end_to_end_modules()
     test_no_truncation()
+    test_stat_level_cap()
 
 
 # ===== 汇总入口 =====

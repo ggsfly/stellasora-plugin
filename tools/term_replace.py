@@ -201,9 +201,9 @@ class TermReplacer:
     def replace(self, text: str) -> str:
         """把文本中的英文术语替换为中文（单遍交替正则，一次扫描）。
 
-        等价性边界见 tests/test_term_replace_equiv.py：相邻术语命中且前序术语
-        以非字母字符结尾（如 "Lv."+"Upgrade cost"）时，单遍与逐条实现可能存在
-        仅标点字符差异（白名单豁免，【Metis 修订 #5】）。
+        等价性边界见 tests/test_all.py 的 C 节（REPLACE_SAMPLES 等价性对照）：
+        相邻术语命中且前序术语以非字母字符结尾（如 "Lv."+"Upgrade cost"）时，
+        单遍与逐条实现可能存在仅标点字符差异（白名单豁免，【Metis 修订 #5】）。
         """
         if not text:
             return text
@@ -213,8 +213,8 @@ class TermReplacer:
     def replace_legacy(self, text: str) -> str:
         """把文本中的英文术语替换为中文。
 
-        旧实现保留用于等价性对照测试（tests/test_term_replace_equiv.py）：
-        逐条 pattern.sub，约 2.3 万次扫描，慢但语义为历史基线。
+        旧实现保留用于等价性对照测试（tests/test_all.py C1）：逐条 pattern.sub，
+        约 2.3 万次扫描，慢但语义为历史基线。
         """
         if not text:
             return text
@@ -222,12 +222,3 @@ class TermReplacer:
             text = pattern.sub(self.mapping[term], text)
         return text
 
-
-def replace_terms(text: str, data_dir: Optional[Path] = None) -> str:
-    """便捷入口：模块级单例，避免每次调用都重新加载字典。"""
-    global _replacer
-    if "_replacer" not in globals():
-        if data_dir is None:
-            data_dir = Path(__file__).resolve().parents[1] / "data"
-        _replacer = TermReplacer(data_dir)
-    return _replacer.replace(text)

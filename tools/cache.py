@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from typing import Any, Dict, Optional
 import hashlib
 import json
@@ -49,3 +49,7 @@ class CacheManager:
                 json.dump(entry, f, ensure_ascii=False)
         except Exception:
             pass
+
+    def clear(self) -> None:
+        """清空内存缓存（磁盘缓存文件由调用方按需单独清理）。"""
+        self._memory_cache.clear()

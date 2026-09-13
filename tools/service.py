@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Collection, Dict, Optional, Set, Tuple
 
 import json
 import logging
@@ -40,7 +40,7 @@ _team_table_cache: Optional[Dict[str, Any]] = None
 _team_table_cache_mtime: Optional[float] = None
 
 # 元素与战斗弱抗常量（what 扩展 / 角色 / 秘纹 / boss 渲染）
-_ELEMENT_CN = {
+_ELEMENT_CN: Dict[str, str] = {
     "Ignis": "火",
     "Aqua": "水",
     "Terra": "地",
@@ -52,8 +52,19 @@ _ELEMENT_CN = {
 _WEAK_LABEL = "弱点"
 _RESIST_LABEL = "抗性"
 
-# 讨伐术语中文常量（用户审定 docs/term_cn_review.md v2 定稿）：what 渲染
-# blitz/raid 首领资料时，字典未收录的英文术语在此映射为中文。类职业
+
+def _element_cn(name: Any) -> str:
+    """元素英文名 → 中文简称；未收录原样返回，非字符串转为字符串（None → 空串）。
+
+    显式收窄返回类型为 str：数据源取出的元素字段为 Any，直接 dict.get(Any, Any)
+    会被推断为 str | None，导致 "、".join(...) 类型不匹配。
+    """
+    if not isinstance(name, str):
+        return "" if name is None else str(name)
+    return _ELEMENT_CN.get(name, name)
+
+# 讨伐术语中文常量（用户审定定稿）：what 渲染 blitz/raid 首领资料时，
+# 字典未收录的英文术语在此映射为中文。类职业
 # （class=Vanguard/Support/Versatile）已被字典 CharacterTag 覆盖，不需重复。
 _TERM_CN = {
     "Damage Per Score": "单分伤害",
@@ -152,7 +163,7 @@ def configure_overrides(
 
         key = str(_DATA_DIR)
         if key in _instances:
-            lookup, _last, _st, _gd, _replacer = _instances[key]
+            lookup = _instances[key][0]
             if aliases is not None:
                 lookup.set_custom_aliases(_merged_alias_map())
 
@@ -173,14 +184,13 @@ def _get_services(cache_dir: Path) -> tuple:
             # _lowercase_index/_character_names_cache 均已就绪，后续线程读取无竞态
             # （【双审 SH-6】）
             lookup._load()
-            # 单一事实源注入：service 持有的 replacer 是全进程唯一实例，
-            # 避免 term_replace 模块级懒加载再自行 parse 一份 8.8MB 字典
-            # （【Metis 修订 #11】）
+            # 替换器全进程仅此一份：以已解析的 _main_dict 预建，避免 TermReplacer
+            # 再自行 json.load 一份 8.8MB 字典（preloaded_dict 传 None 的隐患，
+            # 【双审 SH-6】）；实例随 _instances 复用，不另设模块级全局
             replacer = _term_replace_module.TermReplacer(
                 _DATA_DIR,
                 preloaded_dict=lookup._main_dict,
             )
-            _term_replace_module._replacer = replacer
             _instances[key] = (
                 lookup,
                 cache_dir,
@@ -219,16 +229,6 @@ def _get_lookup() -> DictLookup:
 def lookup_term(term: str, custom_aliases: Optional[Dict[str, str]] = None) -> Dict:
     """查词工具核心：术语 → {id, en, cn, cat} 或 {"not_found": True}。"""
     res = _get_lookup().lookup_term(term, custom_aliases=custom_aliases)
-    return res if res else {"not_found": True}
-
-
-def lookup_full(item_id: str) -> Dict:
-    """全量字典按 ID 查询完整文本（含描述/效果/剧情）。
-
-    与 lookup_term 的区别：lookup_term 按名字查（返回 .1 名字条目），
-    lookup_full 按 ID 查全量字典（.1 + .2/.3 描述/效果/剧情文本）。
-    """
-    res = _get_lookup().get_full(item_id)
     return res if res else {"not_found": True}
 
 
@@ -278,9 +278,9 @@ def _scan_character_hits(text: str) -> list:
             target_res = lookup.lookup_term(target)
             if target_res and target_res.get("cat") == "Character":
                 official_name = target_res.get("cn") or target_res.get("en")
-            elif target in lookup._main_dict:
-                entry = lookup._main_dict[target]
-                if entry.get("cat") == "Character":
+            else:
+                entry = lookup.get_by_id(target)
+                if entry and entry.get("cat") == "Character":
                     official_name = entry.get("cn") or entry.get("en")
 
         if official_name and official_name != alias_clean:
@@ -1267,7 +1267,12 @@ def check_permission(
 # =====================================================================
 
 def _cn_by_en(lookup: Any, en_name: str) -> str:
-    """用 lookup.lookup_term(en_name) 反查中文名；查不到原样返回 en_name。"""
+    """用 lookup.lookup_term(en_name) 反查中文名；查不到原样返回 en_name。
+
+    lookup_term 内部已覆盖 main_dict 精确命中、names.json 大小写索引与
+    自定义别名三层解析，故无需在本函数重复访问其私有索引（旧兜底与
+    lookup_term 的解析路径完全重合，恒不可达）。
+    """
     if not en_name:
         return ""
     if not isinstance(en_name, str):
@@ -1278,20 +1283,127 @@ def _cn_by_en(lookup: Any, en_name: str) -> str:
         res = lookup.lookup_term(en_name)
         if res and isinstance(res, dict) and res.get("cn"):
             return res["cn"]
-        # 兜底直接查 names.json 索引
-        if hasattr(lookup, "_name_index") and hasattr(lookup, "_main_dict"):
-            lookup._load()
-            if lookup._name_index and lookup._main_dict:
-                key = lookup._name_index.get(en_name)
-                if not key and getattr(lookup, "_lowercase_index", None):
-                    key = lookup._lowercase_index.get(en_name.lower())
-                if key and key in lookup._main_dict:
-                    cn = lookup._main_dict[key].get("cn")
-                    if cn:
-                        return cn
     except Exception:
         pass
     return en_name
+
+
+# 面板数值渲染共用常量：三围中文标签（第一优先）与噪声键（对 LLM 无意义的元数据列）
+_STAT_LABELS: Tuple[Tuple[str, str], ...] = (("HP", "生命"), ("ATK", "攻击"), ("DEF", "防御"))
+# 秘纹面板只有生命/攻击两围（无防御），单独一组避免渲染出空的防御项
+_STAT_LABELS_HP_ATK: Tuple[Tuple[str, str], ...] = (("HP", "生命"), ("ATK", "攻击"))
+_STAT_SKIP_KEYS: Tuple[str, ...] = ("Type", "HP Bar", "Score", "Max Score")
+
+
+def _stat_parts(
+    stat_dict: dict,
+    label_keys: Tuple[Tuple[str, str], ...] = _STAT_LABELS,
+    key_cn: Optional[Callable[[str], str]] = None,
+    skip_keys: Tuple[str, ...] = (),
+    limit: int = 3,
+) -> list:
+    """从面板数值 dict 提取展示片段（角色/秘纹/首领三源共用）。
+
+    第一优先按 label_keys 中的键取中文标签值（如 HP/ATK/DEF 三围）；一个都不命中时
+    按原键回退（最多 limit 项），回退键经 key_cn 转中文（None=原样），并跳过 skip_keys
+    噪声键。统一此处逻辑可避免三源面板各自实现漂移。
+    """
+    parts = [f"{label} {stat_dict[k]}" for k, label in label_keys if k in stat_dict]
+    if not parts:
+        conv = key_cn or (lambda k: k)
+        for k, v in stat_dict.items():
+            if k in skip_keys:
+                continue
+            parts.append(f"{conv(k)} {v}")
+            if len(parts) >= limit:
+                break
+    return parts
+
+
+def _render_skill_block(sk: dict, label: str, lookup: Any) -> list:
+    """渲染单个技能块（名称/描述/数值表），角色四技能与秘纹主/副技能共用。
+
+    取值优先级：nameCN/descCN（官方中文）→ name/desc 经 _cn_by_en 反查；
+    params 为 list 时以 ' / ' 连接，否则原样输出。
+    """
+    lines: list[str] = []
+    name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
+    desc = sk.get("descCN") or sk.get("desc", "")
+    lines.append(f"【{label}】{name}")
+    if desc:
+        lines.append(f"描述：{desc}")
+    params = sk.get("params")
+    if params:
+        if isinstance(params, list):
+            lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
+        else:
+            lines.append(f"数值表：{params}")
+    return lines
+
+
+# 游戏等级上限：旅人与秘纹均为 90 级。ss-data 原始表越过上限仍残留内容——
+# 旅人 stat 尾部含内部溢出条目（Level 91，数值与 90 级相同），
+# 秘纹 stat 无 Level 字段且含 8 个突破重复行（90 级 + 8 = 98 行）。
+_MAX_LEVEL = 90
+# 突破（升阶）等级：每 10 级一次；每个突破点在 stat 表内于同一等级占两行
+# （突破前 / 突破后），这是「下标 → 等级」非线性映射的成因。
+_ASCENSION_LEVELS: Tuple[int, ...] = (10, 20, 30, 40, 50, 60, 70, 80)
+
+
+def _stat_levels(stat_list: list) -> list:
+    """求 stat 数组各行的等级标签。
+
+    优先取条目自带 Level 字段（旅人）；缺失时按突破规则由下标反推（秘纹
+    stat 无 Level 字段，不能以 idx+1 当等级）。突破点在序列中连续出现两次
+    （突破前 / 突破后），故 90 级 + 8 突破 = 98 项，与秘纹 stat 条目数一致。
+    """
+    fallback: list = []
+    level = 1
+    while len(fallback) < len(stat_list):
+        fallback.append(level)
+        if level in _ASCENSION_LEVELS:
+            fallback.append(level)
+        level += 1
+    levels: list = []
+    for i, entry in enumerate(stat_list):
+        lv = entry.get("Level") if isinstance(entry, dict) else None
+        if not isinstance(lv, int):
+            lv = fallback[i] if i < len(fallback) else i + 1
+        levels.append(lv)
+    return levels
+
+
+def _render_stat_rows(
+    stat_list: list,
+    lookup: Any,
+    label_keys: Tuple[Tuple[str, str], ...],
+) -> list:
+    """渲染面板数值「首级 + 满级」两行（角色 / 秘纹共用）。
+
+    满级行按游戏等级上限定位，不得直取末行：ss-data 旅人 stat 尾部残留
+    Level 91 溢出条目、秘纹末行下标 97 实为 90 级（其前有 8 个突破重复行），
+    直取 len-1 会显示 91 级 / 98 级并可能取到越界数据。
+    """
+    levels = _stat_levels(stat_list)
+    max_idx = len(stat_list) - 1
+    for i in range(len(stat_list) - 1, -1, -1):
+        if levels[i] <= _MAX_LEVEL:
+            max_idx = i
+            break
+    rows: list = []
+    shown: set = set()
+    for idx in (0, max_idx):
+        if idx in shown or not (0 <= idx < len(stat_list)):
+            continue
+        shown.add(idx)
+        entry = stat_list[idx]
+        if not isinstance(entry, dict):
+            continue
+        parts = _stat_parts(entry, label_keys=label_keys, key_cn=lambda k: _cn_by_en(lookup, k))
+        if not parts:
+            continue
+        rows.append(f"  {levels[idx]}级：{' | '.join(parts)}")
+    return rows
 
 
 def _build_character_material(
@@ -1332,7 +1444,7 @@ def _build_character_material(
         lines.append(f"星级：{star}星")
 
     elem = char.get("element", "")
-    elem_cn = _ELEMENT_CN.get(elem, elem)
+    elem_cn = _element_cn(elem)
     if elem_cn:
         lines.append(f"属性：{elem_cn}")
 
@@ -1361,30 +1473,13 @@ def _build_character_material(
             if source_cn:
                 lines.append(f"获取途径：{'、'.join(source_cn)}")
 
-    # details 模块（仅模块化路径新增）：面板数值（stat 取首尾等级，不取 fixedStat）
+    # details 模块（仅模块化路径新增）：面板数值（首级 + 90 级满级，不取 fixedStat）
     # + 升级材料（upgrade）
     if modules is not None and "details" in modules:
         stat_list = char.get("stat", [])
         if isinstance(stat_list, list) and stat_list:
             lines.append("【面板数值】")
-            shown_indexes: set[int] = set()
-            for idx in (0, len(stat_list) - 1):
-                if idx in shown_indexes:
-                    continue
-                shown_indexes.add(idx)
-                s = stat_list[idx]
-                if not isinstance(s, dict):
-                    continue
-                parts = []
-                for k in ("HP", "ATK", "DEF"):
-                    if k in s:
-                        label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
-                        parts.append(f"{label} {s[k]}")
-                if not parts:
-                    parts = [f"{_cn_by_en(lookup, k)} {v}" for k, v in s.items()]
-                    parts = parts[:3]
-                lv = s.get("Level", idx + 1)
-                lines.append(f"  {lv}级：{' | '.join(parts)}")
+            lines.extend(_render_stat_rows(stat_list, lookup, _STAT_LABELS))
         upgrade = char.get("upgrade", [])
         if isinstance(upgrade, list) and upgrade:
             lines.append("【升级材料】")
@@ -1395,26 +1490,15 @@ def _build_character_material(
 
     # 技能块：normalAtk / skill / supportSkill / ultimate
     if modules is None or "skills" in modules:
-        skill_configs = [
+        for sk_key, sk_label in (
             ("normalAtk", "普攻"),
             ("skill", "主控技能"),
             ("supportSkill", "援护技能"),
             ("ultimate", "绝招"),
-        ]
-        for sk_key, sk_label in skill_configs:
+        ):
             sk = char.get(sk_key)
             if sk and isinstance(sk, dict):
-                sk_name = sk.get("nameCN") or _cn_by_en(lookup, sk.get("name", ""))
-                sk_desc = sk.get("descCN") or sk.get("desc", "")
-                lines.append(f"【{sk_label}】{sk_name}")
-                if sk_desc:
-                    lines.append(f"描述：{sk_desc}")
-                params = sk.get("params")
-                if params:
-                    if isinstance(params, list):
-                        lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
-                    else:
-                        lines.append(f"数值表：{params}")
+                lines.extend(_render_skill_block(sk, sk_label, lookup))
 
     # 潜能：potential.mainCore / mainNormal / common / supportCore / supportNormal
     if modules is None or "potentials" in modules:
@@ -1538,7 +1622,7 @@ def _build_disc_material(
         lines.append(f"星级：{star}星")
 
     elem = disc.get("element", "")
-    elem_cn = _ELEMENT_CN.get(elem, elem)
+    elem_cn = _element_cn(elem)
     if elem_cn:
         lines.append(f"属性：{elem_cn}")
 
@@ -1568,56 +1652,21 @@ def _build_disc_material(
     if modules is None or "melody" in modules:
         main_skill = disc.get("mainSkill")
         if main_skill and isinstance(main_skill, dict):
-            ms_name = main_skill.get("nameCN") or _cn_by_en(lookup, main_skill.get("name", ""))
-            ms_desc = main_skill.get("descCN") or main_skill.get("desc", "")
-            lines.append(f"【主技能】{ms_name}")
-            if ms_desc:
-                lines.append(f"描述：{ms_desc}")
-            params = main_skill.get("params")
-            if params:
-                if isinstance(params, list):
-                    lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
-                else:
-                    lines.append(f"数值表：{params}")
+            lines.extend(_render_skill_block(main_skill, "主技能", lookup))
 
         for sec_key, sec_label in [("secondarySkill1", "副技能1"), ("secondarySkill2", "副技能2")]:
             sec_skill = disc.get(sec_key)
             if sec_skill and isinstance(sec_skill, dict):
                 has_secondary = True
-                sec_name = sec_skill.get("nameCN") or _cn_by_en(lookup, sec_skill.get("name", ""))
-                sec_desc = sec_skill.get("descCN") or sec_skill.get("desc", "")
-                lines.append(f"【{sec_label}】{sec_name}")
-                if sec_desc:
-                    lines.append(f"描述：{sec_desc}")
-                params = sec_skill.get("params")
-                if params:
-                    if isinstance(params, list):
-                        lines.append(f"数值表：{' / '.join(str(p) for p in params)}")
-                    else:
-                        lines.append(f"数值表：{params}")
+                lines.extend(_render_skill_block(sec_skill, sec_label, lookup))
 
-    # details 模块（模块化新增）：面板数值（stat list[dict] 取首尾等级）
+    # details 模块（模块化新增）：面板数值（首级 + 90 级满级；秘纹 stat 无 Level
+    # 字段，等级按下标按突破规则反推，不可用 idx+1）
     if modules is not None and "details" in modules:
         stat_list = disc.get("stat", [])
         if isinstance(stat_list, list) and stat_list:
             lines.append("【面板数值】")
-            shown_indexes: set[int] = set()
-            for idx in (0, len(stat_list) - 1):
-                if idx in shown_indexes:
-                    continue
-                shown_indexes.add(idx)
-                s = stat_list[idx]
-                if not isinstance(s, dict):
-                    continue
-                parts = []
-                for k in ("HP", "ATK"):
-                    if k in s:
-                        label = "生命" if k == "HP" else "攻击"
-                        parts.append(f"{label} {s[k]}")
-                if not parts:
-                    parts = [f"{_cn_by_en(lookup, k)} {v}" for k, v in s.items()]
-                    parts = parts[:3]
-                lines.append(f"  {idx + 1}级：{' | '.join(parts)}")
+            lines.extend(_render_stat_rows(stat_list, lookup, _STAT_LABELS_HP_ATK))
 
     # 潜能加成（dupe）+ 升级消耗（upgrade）：modules=None 保持"无副技能才展示"的
     # 既有耦合行为；模块化路径归属 details 区块，独立渲染不再受副技能抑制
@@ -1827,7 +1876,7 @@ def _build_banner_material(
                     else:
                         i_cn = _cn_by_en(lookup, i_name)
                     elem = item.get("element", "")
-                    elem_cn = _ELEMENT_CN.get(elem, elem)
+                    elem_cn = _element_cn(elem)
                     if elem_cn:
                         item_descs.append(f"{i_cn}（{elem_cn}）")
                     else:
@@ -1874,7 +1923,7 @@ def _build_disc_list_material(
         cn_name = _cn_by_en(lookup, en_name)
         star = d.get("star", 0)
         elem = d.get("element", "")
-        elem_cn = _ELEMENT_CN.get(elem, elem)
+        elem_cn = _element_cn(elem)
         star_str = f"{star}星" if star else ""
         elem_str = f"{elem_cn}属性" if elem_cn else ""
         attr_parts = [p for p in [star_str, elem_str] if p]
@@ -2077,16 +2126,16 @@ def _build_monster_material(
 
     weak_to = monster.get("weakTo", [])
     if isinstance(weak_to, list) and weak_to:
-        weak_cn = [_ELEMENT_CN.get(w, w) for w in weak_to]
+        weak_cn = [_element_cn(w) for w in weak_to]
         lines.append(f"{_WEAK_LABEL}：{'、'.join(weak_cn)}")
 
     resist_to = monster.get("resistTo")
     if resist_to:
         if isinstance(resist_to, list):
-            resist_cn = [_ELEMENT_CN.get(r, r) for r in resist_to]
+            resist_cn = [_element_cn(r) for r in resist_to]
             lines.append(f"{_RESIST_LABEL}：{'、'.join(resist_cn)}")
         elif isinstance(resist_to, str) and resist_to.lower() != "none":
-            lines.append(f"{_RESIST_LABEL}：{_ELEMENT_CN.get(resist_to, resist_to)}")
+            lines.append(f"{_RESIST_LABEL}：{_element_cn(resist_to)}")
         else:
             lines.append(f"{_RESIST_LABEL}：无")
     else:
@@ -2146,17 +2195,8 @@ def _build_monster_material(
                         elif isinstance(first, dict):
                             stat_dict = first
 
-                    stats_parts = []
-                    for k in ["HP", "ATK", "DEF"]:
-                        if k in stat_dict:
-                            label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
-                            stats_parts.append(f"{label} {stat_dict[k]}")
-                    if not stats_parts:
-                        for k, v in stat_dict.items():
-                            if k not in ("Type", "HP Bar", "Score", "Max Score"):
-                                stats_parts.append(f"{k} {v}")
-                                if len(stats_parts) >= 3:
-                                    break
+                    # 面板数值三围优先，退化时按原键取最多 3 项并跳过元数据噪声键
+                    stats_parts = _stat_parts(stat_dict, skip_keys=_STAT_SKIP_KEYS)
                     stat_str = " | ".join(stats_parts) if stats_parts else "无属性详情"
                     lines.append(f"  - {d_name}：{stat_str}")
         else:
@@ -2164,17 +2204,7 @@ def _build_monster_material(
             stat_dict = _monster_stat_dict(monster)
             if stat_dict:
                 lines.append("【面板数值】")
-                stats_parts = []
-                for k in ["HP", "ATK", "DEF"]:
-                    if k in stat_dict:
-                        label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
-                        stats_parts.append(f"{label} {stat_dict[k]}")
-                if not stats_parts:
-                    for k, v in stat_dict.items():
-                        if k not in ("Type", "HP Bar", "Score", "Max Score"):
-                            stats_parts.append(f"{_term_cn(k)} {v}")
-                            if len(stats_parts) >= 3:
-                                break
+                stats_parts = _stat_parts(stat_dict, key_cn=_term_cn, skip_keys=_STAT_SKIP_KEYS)
                 if stats_parts:
                     lines.append(f"  {' | '.join(stats_parts)}")
 
@@ -2300,15 +2330,15 @@ def _build_blitz_material(
                 overview_parts.append(f"类型：{m_type}")
             weak_to = e["boss"].get("weakTo", [])
             weak_str = (
-                "、".join(_ELEMENT_CN.get(w, w) for w in weak_to)
+                "、".join(_element_cn(w) for w in weak_to)
                 if isinstance(weak_to, list) and weak_to
                 else "无"
             )
             resist_to = e["boss"].get("resistTo")
             if isinstance(resist_to, list):
-                resist_str = "、".join(_ELEMENT_CN.get(r, r) for r in resist_to) if resist_to else "无"
+                resist_str = "、".join(_element_cn(r) for r in resist_to) if resist_to else "无"
             elif resist_to:
-                resist_str = _ELEMENT_CN.get(resist_to, resist_to)
+                resist_str = _element_cn(resist_to)
             else:
                 resist_str = "无"
             dps = e["boss"].get("damagePerScore")
@@ -2340,17 +2370,7 @@ def _build_blitz_material(
         # stat 摘要：复用 _monster_stat_dict 三源解包（嵌套 dict/list 兼容），
         # 键经 _term_cn 翻译，每 boss 最多 3 项关键值
         stat_dict = _monster_stat_dict(boss)
-        stats_parts: list[str] = []
-        for k in ["HP", "ATK", "DEF"]:
-            if k in stat_dict:
-                label = "生命" if k == "HP" else ("攻击" if k == "ATK" else "防御")
-                stats_parts.append(f"{label} {stat_dict[k]}")
-        if not stats_parts:
-            for k, v in stat_dict.items():
-                if k not in ("Type", "HP Bar", "Score", "Max Score"):
-                    stats_parts.append(f"{_term_cn(k)} {v}")
-                    if len(stats_parts) >= 3:
-                        break
+        stats_parts = _stat_parts(stat_dict, key_cn=_term_cn, skip_keys=_STAT_SKIP_KEYS)
         if stats_parts:
             detail_lines.append(f"  - {' | '.join(stats_parts)}")
 

@@ -205,7 +205,7 @@ def build_team_table(
         team_overrides = _load_team_overrides()
     if team_priorities is None:
         team_priorities = _load_team_priorities()
-    char_idx: Dict[str, str] = lookup._build_character_index() if hasattr(lookup, "_build_character_index") else {}
+    char_idx: Dict[str, str] = lookup.get_character_index()
     en_names = sorted(list(char_idx.keys()), key=len, reverse=True)
     blocks_by_element = {elem: iter_infodoc_blocks(infodocs.get(elem, ""), en_names) for elem in FIXED_ELEMENTS}
 
@@ -261,7 +261,7 @@ def build_team_table(
 
         matched_block_name = matched_block["name"] if matched_block else None
         if matched_block:
-            correlated_block_keys.add((elem, matched_block_name))
+            correlated_block_keys.add((elem, matched_block["name"]))
 
         if not (team_name_preset or matched_block_name):
             invalid_rows.append({"code": code, "reason": "缺名字（孤码且未关联到区块）", "detail": item})

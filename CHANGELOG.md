@@ -7,26 +7,31 @@
 ### 主要功能
 
 - **字典数据源迁移至 ss-data**：字典构建数据源从 `StellaSoraData` 切换至 `ss-data`（`AutumnVN/ss-data`），`update_dict.py` 的 `REPO_URL` 与 `update_dictionary.bat` 默认克隆路径同步更新；基于 ss-data 完整重建验证通过，字典条目数 48,854 条（不缩水），Character 条目 39 条，角色 CN 名（如「琥珀」）完整保留。
-- **stellasora_what 五类资料扩展**：基于 `ss-data` 权威数据集全面扩展资料查询能力，支持秘纹资料与列表（主调/强音效果）、卡池资讯（角色/秘纹卡池起止时间与格式化展示）、赛季排行榜（Boss Blitz 与 Finale Echoing 赛季资讯）以及首领怪物机制与弱点（首领图鉴与机制攻略）；角色资料未收录时平滑回退原 `stelladb` 攻略页能力。
+- **stellasora_what 五类资料扩展**：基于 `ss-data` 权威数据集全面扩展资料查询能力，支持秘纹资料与列表（主调/强音效果）、卡池资讯（角色/秘纹卡池起止时间与格式化展示）、首领怪物机制与弱点（首领图鉴与机制攻略）以及当期讨伐定位（赛季数据抓取供 blitz 当期 boss 判定）；角色资料未收录时平滑回退原 `stelladb` 攻略页能力。
 - **全量官方中文与游戏标记清理**：角色与装备描述全面采用官方中文字段（`descCN` / `nameCN`），新增 `strip_game_markup` 引擎级清洗，彻底剔除 `<color>`、`<style>`、`&Param...` 等游戏富文本占位标签，输出纯净自然的官方中文资料。
 - **stellasora_what 模块化选段查询**：按用户问题意图（`_MODULE_KEYWORDS` 词表）只渲染相关模块给 LLM——角色七模块（常驻卡/面板与升级材料/技能/潜能/天赋/礼物/约会）、秘纹三模块（常驻卡/面板/旋律）、怪物三模块（概览/数值/机制，联合讨伐/终焉绝响/巅峰秀场通用）；无模块词时仅回常驻卡（概览优先），材料模块完整保留、不再截断。
 - **巅峰秀场（duel）首领查询**：`duel.json` 纳入离线同步与首领怪物匹配（raid∪duel 双源合并命中），per-source schema 适配（Overlord→霸主类型翻译、数值平铺面板、分组词缀机制渲染）。
 
 ### 细节与修复
 
+- **面板等级上限修正**：`ss-data` 原始表越过游戏等级上限（旅人与秘纹均为 90 级）仍残留内容——旅人 `stat` 尾部含 Level 91 内部溢出条目、秘纹 `stat` 无 Level 字段且含 8 个突破重复行（90 级 + 8 = 98 行）。原渲染直取末行并以 `idx+1` 标等级，导致旅人显示「91 级」、秘纹显示「98 级」。现按等级上限定位满级行，秘纹等级由下标按突破规则（10/20/…/80 每级占两行）反推，两者均正确显示「90 级」。
+- **答案指纹序列化修复**：`_answer_relevant_fingerprint` 改为先把 `AliasEntry` 模型转为纯 dict 再 JSON 序列化——旧实现直接序列化 pydantic 模型抛 `TypeError` 被吞，别名恒不入指纹，别名配置变更无法使直发成品缓存失效（同 key 命中变更前的旧答案原样重发）。
+- **死代码清理**：删除无调用者的 `tools/probe_google_doc.py`、`service.lookup_full`、`DictLookup.get_full`/`_load_full`/`full_dict_path`（`dict_full.json` 从未生成）、`StelladbFetcher.fetch_disc`、`term_replace.replace_terms` 及其模块级 `_replacer` 全局。
+- **重复逻辑合并**：新增 `_stat_parts`（角色/秘纹/首领三源面板共用）与 `_render_skill_block`（角色四技能与秘纹主/副技能共用）；`_clear_answer_cache` 合并定时同步/手动更新/配置变更三处缓存清理；`_ALREADY_SENT_CONTENT` 常量合并两处直发返回文案。
+- **元素与面板渲染统一**：新增 `_element_cn` 收窄元素映射返回类型（非字符串安全转义），替换 11 处内联 `_ELEMENT_CN.get(x, x)`；`_cn_by_en` 删除与 `lookup_term` 解析路径完全重合的私有索引兜底。
+- **类型标注与静态检查**：`DictLookup` 主字典/名字索引显式标注并让 `_load` 返回已加载字典；`fetcher_stelladb` 三处数据集路径解析改用局部 `offline_dir` 变量消除 Optional 除法；`team_table` 改用新增公共 `get_character_index()`（替换私有 `_build_character_index()` 与 `hasattr` 兜底）；新增 `pyrightconfig.json` 对齐 venv 与 tools 导入路径。
+- **文档与仓库卫生**：`tools/cache.py` 去除 UTF-8 BOM；README 修正 overrides 示例为实际的 `[[overrides.aliases]]` 列表格式（删除不存在的 `replacements` 配置项）、更新 prompts_what 说明与字典条数；CHANGELOG 消除排行榜自相矛盾条目并合并重复的「回归测试扩充」；`_manifest.json` 版本对齐至已发布的 1.1.1。
 - **数据源获取与离线缓存增强**：新增 `fetch_ssdata_dataset` 与 `fetch_leaderboard_meta` 离线优先读取机制，支持 mtime 驱动的模块级缓存与网络断开优雅降级。
-- **回归测试扩充**：新增 O 节「ss-data 数据源与 what 五类扩展」（12 项断言），覆盖离线加载、降级容灾、元素映射、markup 清洗、五类资料渲染与端到端关键词路由验证。
-- **当期联合讨伐 boss 查询**：`stellasora_what` 新增 blitz 意图（`联合讨伐`/`讨伐`/`boss`/`blitz`），基于 `season.json`（当期赛季）→ `meta.json`（当期 floor）→ `blitz.json`（首领资料）三源拼接，一次输出当期两个 boss 的中文资料（弱点/抗性/单分伤害/机制全程 `descCN` 中文，紧凑两段式结构省 token）；问其中一个 boss 名（中/英）同样返回两个；`终焉boss` 等 raid 意图不被劫持。
-- **讨伐术语中文化**：新增 `_TERM_CN` 11 项代码层术语映射（单分伤害/累计生命/预估得分伤害/命中率/攻击速度/最终受到伤害/联合讨伐/终焉绝响/远程/近战/机制），渲染无英文术语残留。
-- **鹿鸣秘纹错位修复**：`overrides.json` 别名运行时注入 `DictLookup`（`_merged_alias_map`，config 别名覆盖同名），修复「鹿鸣」被同名主技能抢占导致秘纹查询落"没有专属攻略页"的问题。
-- **离线同步扩展**：`sync_data.py --all` 纳入 `blitz.json` 与 `season.json`（dict 返回类型适配成功判定），每日 17:00 与 `/st_update` 自动更新。
-- **回归测试扩充**：O 节新增 3 项（已定稿 15 项断言）：鹿鸣秘纹路由、当期讨伐双 boss、术语映射。
+- **当期联合讨伐 boss 查询**：`stellasora_what` 新增 blitz 意图（`联合讨伐`/`讨伐`/`boss`/`blitz`），基于 `season.json`（当期赛季）→ `meta.json`（当期 floor）→ `blitz.json`（首领资料）三源拼接，一次输出当期两个 boss 的中文资料；问其中一个 boss 名同样返回两个。
+- **讨伐术语中文化**：新增 `_TERM_CN` 11 项代码层术语映射（单分伤害/累计生命/预估得分伤害/命中率/攻击速度/最终受到伤害/联合讨伐/终焉绝响/远程/近战/机制）。
+- **鹿鸣秘纹错位修复**：`overrides.json` 别名运行时注入 `DictLookup`（`_merged_alias_map`），修复「鹿鸣」被同名主技能抢占导致秘纹查询落"没有专属攻略页"的问题。
+- **离线同步扩展**：`sync_data.py --all` 纳入 `blitz.json` 与 `season.json`，每日 17:00 与 `/st_update` 自动更新。
+- **回归测试扩充（O 节）**：新增「ss-data 数据源与 what 五类扩展」22 项断言，覆盖离线加载、降级容灾、元素映射、markup 清洗、五类资料渲染、端到端关键词路由、鹿鸣秘纹路由、当期讨伐双 boss、术语映射、模块检测（命座/培养材料/空问句/机制/技能隔离/stats）、角色/秘纹/首领模块定向选段、duel 分区渲染、超长 descCN 整条输出无截断与面板等级上限（旅人 90 级/秘纹按下标反推）。
 - **全链路移除文本截断**：what 与 how 路径删除全部 `max_length`/`_fit_lines` 截断（`_MAX_MECH_*` 常量移除），资料整段输出，长度控制移交提示词约束与模块选段（配置字段保留仅作缓存指纹）。
 - **排行榜查询删除**：移除 `leaderboard` 意图路由与排行榜渲染，保留赛季数据抓取供当期讨伐定位当期 boss。
 - **角色天赋轶闻附带**：模块化选段下角色天赋模块命中 `Item.{num_id}.3` 且含中文时追加「天赋轶闻」（查询失败不兜底造数据）。
 - **prompts_what 重写**：模块化材料说明（按模块输出）并明确禁止编造，保留【约会】输出规则。
 - **回传模式材料范围收敛**：direct_send=false 且无模块词时仅回常驻卡（概览优先），加载材料比此前少（概览优先选段的预期副作用）。
-- **回归测试扩充**：O 节扩充至 21 用例，新增模块检测（命座/培养材料/空问句/机制/技能隔离/stats）、角色/秘纹/首领模块定向选段、duel 分区渲染与超长 `descCN` 整条输出无截断端到端。
 - **duel boss 同名???变体识别**：巅峰秀场 boss（猫眼？？？/花原？？？/火垂？？？）与旅人同名，`_match_monster` 剥赛季前缀内层名反查中文收录名并精确匹配（长度阈值防裸名误桥到 boss），首领头部显示官方中文名；查询「猫眼？？？」现命中 duel 资料。
 
 ## [1.1.1] - 2026-09-10
