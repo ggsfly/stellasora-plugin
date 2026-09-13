@@ -2832,6 +2832,40 @@ def test_source_cn() -> None:
           and service._source_cn(lookup, "") == "")
 
 
+def test_signature_disc_dynamic() -> None:
+    """O27: 角色专属秘纹由 disc 数据集动态反查（source 含 Signature 且 char 含角色
+    英文名，规则经 39 角色人工圈定验证与数据源 100% 一致）——随 ss-data 更新自动
+    跟随，无静态表；适配但不 Signature 的秘纹不得误判为专属；无专属角色省略该行。"""
+    lookup = DictLookup(DATA_DIR)
+    datasets = {
+        "character": {
+            "103": {"name": "Amber", "star": "4", "element": "Terra", "class": "Attacker"},
+            "133": {"name": "Nazuka", "star": "5", "element": "Ventus", "class": "Support"},
+        },
+        "disc": {
+            # Amber 适配但非 Signature（孤烟真实为琥珀专属的反例：无 Signature 标记）
+            "211001": {"name": "Crisp Morning", "char": ["Amber"], "source": ["Permanent", "Standard"]},
+            # 琥珀专属：Signature 标记 → 命中
+            "214001": {"name": "Lonely Dunes", "char": ["Amber"], "source": ["Signature", "Limited"]},
+            # 夏花专属：Signature 标记 → 各自命中各自
+            "214015": {"name": "Deer's Song", "char": ["Nazuka"], "source": ["Signature", "Limited"]},
+        },
+    }
+    fake_st = unittest.mock.Mock()
+    fake_st.fetch_ssdata_dataset.side_effect = lambda name: datasets.get(name, {})
+    # 1. 全量路径（modules=None）：专属行随 overview 出现
+    mat_full, ok_full = service._build_character_material(fake_st, "103", lookup)
+    p1 = ok_full and "专属秘纹：孤烟（Lonely Dunes）" in mat_full and "朝霭" not in mat_full
+    # 2. 模块化 overview 路径：专属行仍在，且不得命中他角色专属
+    mat_ov, ok_ov = service._build_character_material(fake_st, "133", lookup, modules={"overview"})
+    p2 = ok_ov and "专属秘纹：鹿鸣（Deer's Song）" in mat_ov and "孤烟" not in mat_ov
+    # 3. 数据集无该角色专属时（删掉标记）省略整行
+    datasets["disc"]["214001"]["source"] = ["Limited"]
+    mat_none, ok_none = service._build_character_material(fake_st, "103", lookup)
+    p3 = ok_none and "专属秘纹" not in mat_none
+    check("O27 专属秘纹动态反查（Signature 命中/适配非专属不误判/无专属省略行）", p1 and p2 and p3)
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2859,6 +2893,7 @@ def run_section_o() -> None:
     test_entity_priority_route()
     test_blitz_module_select()
     test_source_cn()
+    test_signature_disc_dynamic()
 
 
 # ===== 汇总入口 =====

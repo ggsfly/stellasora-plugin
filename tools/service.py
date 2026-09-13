@@ -1569,9 +1569,11 @@ def _build_character_material(
     """渲染角色官方中文资料（来源于 ss-data 的 character.json）。
 
     返回 (material_text, True)；若 dataset 缺失或对应 id 不存在则返回 ("", False)。
+    overview（两条路径恒出）在职业后附「专属秘纹」——由 disc 数据集按 Signature
+    规则动态反查（无静态表，随 ss-data 更新自动跟随）。
     modules 给定（模块化查询）时只渲染 overview（恒出）+ modules 命中的区块，
     overview 在模块化模式下补 风格/势力/CV/生日/获取途径，并附带 details 面板
-    与升级材料、talents 天赋轶闻；modules=None 保持既有全量输出逐字节不变。
+    与升级材料、talents 天赋轶闻。
     """
     if not st:
         return "", False
@@ -1606,6 +1608,22 @@ def _build_character_material(
     cls_cn = _cn_by_en(lookup, cls)
     if cls_cn:
         lines.append(f"职业：{cls_cn}")
+
+    # 专属秘纹：由 disc 数据集动态反查——source 含 Signature 且 char 含本角色英文名
+    # 即专属（规则经 39 角色人工圈定与数据源 100% 吻合验证），ss-data 更新后自动
+    # 跟随，无静态映射表；一角色至多一把，找不到则不渲染本行
+    disc_data = st.fetch_ssdata_dataset("disc") or {}
+    for disc_entry in disc_data.values():
+        if not isinstance(disc_entry, dict) or "Signature" not in (disc_entry.get("source") or []):
+            continue
+        if en_name and en_name in (disc_entry.get("char") or []):
+            s_en = disc_entry.get("name", "")
+            s_cn = _cn_by_en(lookup, s_en)
+            if s_en and s_cn != s_en:
+                lines.append(f"专属秘纹：{s_cn}（{s_en}）")
+            else:
+                lines.append(f"专属秘纹：{s_cn}")
+            break
 
     if modules is not None:
         # 模块化 overview 扩展字段（缺失省略；style/force/source 经字典反查中文名）
