@@ -1351,6 +1351,18 @@ def run_tool_query_desc() -> None:
     check("J4 what.query 描述覆盖实体与概念词",
           "角色" in what_desc and "秘纹" in what_desc and "首领" in what_desc,
           what_desc)
+    # J5 自省修复：主观「不回答」必须在 planner 层（工具 description）控制，
+    # 且 prompts_what 只承载输出约束——二者职责不可混（见 F:\stellasora-ssdata-notes.md 第 8 节）
+    what_tool_desc = tool_descs.get("stellasora_what", "")
+    what_prompt = plug._load_prompt_doc_what() or ""
+    check("J5 主观不触发归 planner（工具描述）/ 输出约束归 prompt",
+          "调用边界" in what_tool_desc and "不要调用本工具" in what_tool_desc
+          and "stellasora_how" in what_tool_desc
+          and "作用边界" in what_prompt
+          and "只约束 LLM 的输出表达" in what_prompt
+          and "无法控制" in what_prompt
+          and "不新增主观评价" in what_prompt,
+          f"tool_desc_has_boundary={'调用边界' in what_tool_desc}")
 
 
 # ===== 节 K：手动更新指令（st_update） =====
