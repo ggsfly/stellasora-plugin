@@ -42,28 +42,9 @@ from build_dict import (  # noqa: E402
     write_json,
 )
 
+from net_common import resolve_proxy as _resolve_proxy
+
 REPO_URL = "https://github.com/AutumnVN/ss-data.git"
-
-# 默认代理地址
-_DEFAULT_PROXY = "http://127.0.0.1:7890"
-
-
-def _resolve_proxy(proxy: Optional[str]) -> Optional[str]:
-    """解析最终代理地址。
-
-    优先级（高→低）：
-      1. 显式传入的 proxy 参数
-      2. 环境变量 HTTPS_PROXY / HTTP_PROXY
-      3. 默认值 http://127.0.0.1:7890
-
-    传入空字符串 "" 表示强制直连（跳过代理）。
-    """
-    if proxy is not None:
-        return proxy.strip() or None
-    env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    if env_proxy:
-        return env_proxy.strip()
-    return _DEFAULT_PROXY
 
 
 def load_current(dict_path: Path) -> Dict[str, Dict[str, str]]:

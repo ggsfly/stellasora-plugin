@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
 import difflib
+import json
 import logging
 import re
 import struct
@@ -161,35 +163,21 @@ def _make_slots(chars: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _load_team_overrides() -> Dict[str, Any]:
-    """从 data/overrides.json 中加载队伍人工修正配置。"""
-    from pathlib import Path
-    import json
+def _load_team_config() -> Tuple[Dict[str, Any], Dict[str, list]]:
+    """从 data/overrides.json 中加载队伍人工修正配置与热门队伍优先级清单。"""
     overrides_path = Path(__file__).resolve().parents[1] / "data" / "overrides.json"
+    team_overrides: Dict[str, Any] = {}
+    team_priorities: Dict[str, list] = {}
     if overrides_path.is_file():
         try:
             with overrides_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get("team_overrides", {})
-        except Exception as e:
-            logger.warning("Failed to load team_overrides from %s: %s", overrides_path, e)
-    return {}
-
-
-def _load_team_priorities() -> Dict[str, list]:
-    """从 data/overrides.json 中加载热门队伍优先级清单（元素 → 区块名列表）。"""
-    from pathlib import Path
-    import json
-    overrides_path = Path(__file__).resolve().parents[1] / "data" / "overrides.json"
-    if overrides_path.is_file():
-        try:
-            with overrides_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+            team_overrides = data.get("team_overrides", {})
             raw = data.get("team_priorities", {})
-            return {k: list(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
+            team_priorities = {k: list(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
         except Exception as e:
-            logger.warning("Failed to load team_priorities from %s: %s", overrides_path, e)
-    return {}
+            logger.warning("Failed to load team config from %s: %s", overrides_path, e)
+    return team_overrides, team_priorities
 
 
 def build_team_table(
@@ -201,10 +189,12 @@ def build_team_table(
     team_priorities: Optional[Dict[str, list]] = None,
 ) -> Dict[str, Any]:
     """构建全量队伍-槽位统一表。"""
-    if team_overrides is None:
-        team_overrides = _load_team_overrides()
-    if team_priorities is None:
-        team_priorities = _load_team_priorities()
+    if team_overrides is None or team_priorities is None:
+        cfg_overrides, cfg_priorities = _load_team_config()
+        if team_overrides is None:
+            team_overrides = cfg_overrides
+        if team_priorities is None:
+            team_priorities = cfg_priorities
     char_idx: Dict[str, str] = lookup.get_character_index()
     en_names = sorted(list(char_idx.keys()), key=len, reverse=True)
     blocks_by_element = {elem: iter_infodoc_blocks(infodocs.get(elem, ""), en_names) for elem in FIXED_ELEMENTS}

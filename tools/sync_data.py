@@ -211,7 +211,6 @@ def sync_offline_data(
                             infodocs = {e: _read_offline_file(target_offline_dir / "infodocs" / f"{e}.json") or "" for e in FIXED_ELEMENTS}
                             index_text = _read_offline_file(target_offline_dir / "infodocs" / "index.json") or ""
                             lookup = DictLookup(target_offline_dir.parent)
-                            lookup._load()
                             table_dict = build_team_table(presets_text, infodocs, lookup, index_text)
                             _atomic_write(target_offline_dir / "presets" / "team_table.json", json.dumps(table_dict, ensure_ascii=False, indent=2))
                             team_table_report = table_dict.get("report", {})
