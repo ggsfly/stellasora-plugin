@@ -1238,7 +1238,6 @@ async def run_output_format() -> None:
     orig = {
         "index": service.StelladbFetcher.fetch_infodoc_index,
         "infodoc": service.StelladbFetcher.fetch_infodoc,
-        "trekker": service.StelladbFetcher.fetch_trekker,
     }
     try:
         service.StelladbFetcher.fetch_infodoc_index = lambda self: "Chaton (Ignis) | Rotation: E > Q > R | Chaton (Main Slot) | Flora (1st Supp. Slot)"
@@ -1247,7 +1246,6 @@ async def run_output_format() -> None:
             "Emblem: Triangle | Ignis PEN\n"
             "Priority Potentials: Mark of Flame +3\n"
         )
-        service.StelladbFetcher.fetch_trekker = lambda self, num_id: "Ignis character data with Ignis element"
         res = await p3.handle_how(query="赤霞", question="赤霞攻略", group_id="g1", stream_id="s_h3")
         prompt = ctx3.llm.calls[0]["prompt"]
         # 新版关键词：分组结构说明（N. 队伍名）+ 队友并集行 + 同级词条合并；
@@ -1260,7 +1258,6 @@ async def run_output_format() -> None:
     finally:
         service.StelladbFetcher.fetch_infodoc_index = orig["index"]
         service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
-        service.StelladbFetcher.fetch_trekker = orig["trekker"]
 
 
 # ===== 节 I：非阻塞探针 =====
@@ -2423,17 +2420,19 @@ def test_monster_match_and_material() -> None:
 
 
 def test_query_what_fallback() -> None:
-    """O9: monkeypatch _build_character_material 返回 ('', False) → 回退 fetch_trekker。"""
+    """O9: 角色 ss-data 渲染失败 → 不回退 trekker 抓取（冗余路径已删除），
+    直接返回统一的「没有专属攻略页」文案。"""
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mock_trekker = unittest.mock.MagicMock(return_value="<div>Trekker HTML Guide</div>")
-    st_fix.fetch_trekker = mock_trekker
     with unittest.mock.patch.object(service, "_build_character_material", return_value=("", False)):
         with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
             res = service.query_what("琥珀", cache_dir=fixtures_dir)
-            check("O9 角色资料失败回退 fetch_trekker 路径",
-                  mock_trekker.called and "角色攻略 (stelladb /trekker/103)" in res)
+            check("O9 角色资料失败不回退 trekker（返回无专属攻略页文案）",
+                  "没有专属攻略页" in res
+                  and "字典匹配" in res
+                  and "trekker" not in res
+                  and "未在字典中找到" not in res)
 
 
 def test_query_what_disc_route() -> None:

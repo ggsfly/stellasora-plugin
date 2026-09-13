@@ -352,6 +352,20 @@ def find_character_names_ordered(text: str) -> list:
     return [name for _idx, name in sorted(_scan_character_hits(text), key=lambda t: t[0])]
 
 
+def _no_page_message(term: str, res: dict) -> str:
+    """统一的「无专属攻略页」文案：字典命中信息 + 说明。角色/怪物/其它 cat 共用。"""
+    lines = [
+        "=== 字典匹配 ===",
+        f"  中文: {res['cn']}",
+        f"  英文: {res['en']}",
+        f"  ID:   {res['id']}",
+        f"  类别: {res['cat']}",
+        "",
+        f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
+    ]
+    return "\n".join(lines)
+
+
 def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
@@ -413,19 +427,11 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
             text, _ = _build_blitz_material(st_fetcher, lookup)
             return text
 
-        # 若该兜底 _match_monster 返回 None → 落入 step 5 的"没有专属攻略页"文案
-        lines = [
-            "=== 字典匹配 ===",
-            f"  中文: {res['cn']}",
-            f"  英文: {res['en']}",
-            f"  ID:   {res['id']}",
-            f"  类别: {res['cat']}",
-            "",
-            f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
-        ]
-        return "\n".join(lines)
+        # 若该兜底 _match_monster 返回 None → 落入"没有专属攻略页"文案
+        return _no_page_message(term, res)
 
-    # 3. 角色路由（优先 ssdata descCN，失败回退 trekker HTML 攻略）
+    # 3. 角色路由（ss-data character.json 渲染；失败不回退 stelladb 页面——
+    #    ss-data 已覆盖全部角色资料，trekker HTML 抓取属冗余）
     if res["cat"] == "Character":
         parts = res["id"].split(".")
         num_id = parts[1] if len(parts) > 1 else res["id"]
@@ -433,19 +439,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
         text, ok = _build_character_material(st_fetcher, num_id, lookup, modules=modules)
         if ok and text:
             return text
-
-        # 回退现有 fetch_trekker(num_id) 路径（strip_game_markup + replacer.replace，维持现在输出）
-        lines = [
-            "=== 字典匹配 ===",
-            f"  中文: {res['cn']}",
-            f"  英文: {res['en']}",
-            f"  ID:   {res['id']}",
-            f"  类别: {res['cat']}",
-            "",
-            f"=== 角色攻略 (stelladb /trekker/{num_id}) ===",
-            strip_game_markup(replacer.replace(st_fetcher.fetch_trekker(num_id))),
-        ]
-        return "\n".join(lines)
+        # ss-data 渲染失败 → 统一"没有专属攻略页"文案（不再回退 trekker 抓取）
+        return _no_page_message(term, res)
 
     # 4. 秘纹（disc）路由——按数字 id 成员判断，不按 cat 字符串
     parts = res["id"].split(".")
@@ -458,16 +453,7 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
             return text
 
     # 5. 其它 cat → 维持现有"没有专属攻略页"文案
-    lines = [
-        "=== 字典匹配 ===",
-        f"  中文: {res['cn']}",
-        f"  英文: {res['en']}",
-        f"  ID:   {res['id']}",
-        f"  类别: {res['cat']}",
-        "",
-        f"[{term}] 是 {res['cat']} 类词条（{res['en']} / {res['cn']}），没有专属攻略页。",
-    ]
-    return "\n".join(lines)
+    return _no_page_message(term, res)
 
 
 # 区块锚点行内的导航片段：'⏏ Back to Top ⏏'（含前后空格），行内队名保留

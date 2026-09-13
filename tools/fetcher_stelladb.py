@@ -175,36 +175,6 @@ class StelladbFetcher:
                     time.sleep(1.5)  # 重试前短暂等待
         return None
 
-    def fetch_trekker(self, numeric_id: str, force_update: bool = False) -> str:
-        """获取角色攻略数据，本地优先。"""
-        offline_file = self.offline_dir / "trekkers" / f"{numeric_id}.json" if self.offline_dir else None
-        if not force_update and offline_file:
-            offline_data = _read_offline_file(offline_file)
-            if offline_data:
-                return offline_data
-
-        url = f"https://stelladb.pages.dev/trekker/{numeric_id}"
-        res = self.fetch_url(url, ignore_cache=force_update)
-        if res:
-            if offline_file:
-                payload = {
-                    "url": url,
-                    "id": str(numeric_id),
-                    "timestamp": time.time(),
-                    "data": res,
-                }
-                try:
-                    _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
-                except Exception:
-                    pass
-            return res
-
-        if offline_file:
-            offline_data = _read_offline_file(offline_file)
-            if offline_data:
-                return offline_data
-        return "Error fetching trekker."
-
     def fetch_infodoc(self, element: str, force_update: bool = False) -> str:
         """获取元素 infodoc 攻略，本地优先。"""
         elem_key = element.lower()
