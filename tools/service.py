@@ -2600,8 +2600,9 @@ def _build_blitz_material(
                 detail_lines.pop()
             continue
 
-        # 机制列表：名称 _term_cn + descCN（缺则 desc 经 _term_cn），全量输出；
-        # 数据滞后时省略机制明细
+        # 机制列表：名称经全文映射（整段机制名如 "Bounty: Nimble Dodge" 只能由
+        # replacer 整段译出，_term_cn 仅覆盖 11 个固定术语）；descCN 优先，
+        # 缺失则英文 desc 同样过全文映射。数据滞后时省略机制明细。
         if e["lagging"]:
             continue
         mechanics = boss.get("mechanic", [])
@@ -2611,10 +2612,10 @@ def _build_blitz_material(
             if not isinstance(m, dict):
                 continue
             m_name = m.get("name", "")
-            m_name_cn = _term_cn(m_name) if m_name else ""
+            m_name_cn = _cn_full(lookup, m_name) if m_name else ""
             desc = m.get("descCN") or ""
             if not desc:
-                desc = _term_cn(m.get("desc", ""))
+                desc = _cn_full(lookup, m.get("desc", ""))
             if not desc:
                 detail_lines.append(f"  - {m_name_cn or m_name}")
                 continue

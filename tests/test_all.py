@@ -2707,6 +2707,13 @@ def test_no_truncation() -> None:
           and "成功完成躲避即获得675技巧得分，最多触发8次，共计5400分" in mat
           and "资料因长度限制被截断" not in mat
           and "<color" not in mat and "</colo" not in mat and "</color" not in mat)
+    # O21b 机制名整段中文化（hotfix 回归）：_"Bounty: Nimble Dodge" 等由
+    # _term_cn（11 个固定术语）译不出、replacer 全文映射可译（悬赏·游隙闪身）
+    check("O21b blitz 机制名整段中文化（replacer 全文映射）",
+          ok
+          and "悬赏·游隙闪身" in mat
+          and "Bounty: Nimble Dodge" not in mat
+          and "悬赏·吹风机克星" in mat)
 
 
 def test_stat_level_cap() -> None:
