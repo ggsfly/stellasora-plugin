@@ -366,8 +366,12 @@ def _no_page_message(term: str, res: dict) -> str:
     return "\n".join(lines)
 
 
-def query_what(term: str, cache_dir: Path, question: str = "") -> str:
-    """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
+def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") -> str:
+    """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。
+
+    as_of：planner 传入的卡池时间锚点（ISO 日期，如 '2026-08-23'；可为空）。
+    仅 banner 路由使用——planner 解析用户问句中的时间语义后直接传锚点。
+    """
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
 
     # 1. 实体优先保护：查询词若为「实体+概念词」混合形态（如「猫眼的秘纹」「鹿鸣秘纹」），
@@ -380,7 +384,7 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
         # 2. 关键词概念路由（banner / disc 概念列表；blitz 当期讨伐整页）
         route = _route_what_keywords(term)
         if route == "banner":
-            text, _ = _build_banner_material(st_fetcher, lookup)
+            text, _ = _build_banner_material(st_fetcher, lookup, as_of=as_of)
             return text
         elif route == "blitz":
             modules = _detect_what_modules(question, "blitz")
@@ -1974,9 +1978,12 @@ def _extract_entity_term(term: str, lookup: Any) -> Optional[str]:
 def _build_banner_material(
     st: StelladbFetcher,
     lookup: Any,
+    as_of: str = "",
 ) -> Tuple[str, bool]:
-    """渲染卡池资讯（进行中 + 最近 1 期已结束，最多 3 期）。
+    """渲染卡池资讯。
 
+    as_of 非空（planner 传入 ISO 日期锚点）时回看该时刻进行中的历史卡池；
+    为空时输出「进行中 + 最近 1 期已结束」（最多 3 期，既有行为）。
     返回 (material_text, True)；若 dataset 缺失返回 ("", False)。
     """
     if not st:
@@ -2028,15 +2035,25 @@ def _build_banner_material(
         else:
             ended.append(b)
 
-    # 取当前进行中 + 最近 1 期已结束（共最多 3 期）
-    selected_banners: list[dict] = list(ongoing)
-    if ended:
-        selected_banners.append(ended[0])
-    if not ongoing and ended:
-        selected_banners = ended[:min(3, len(ended))]
-    elif not selected_banners:
-        selected_banners = sorted_banners[:3]
-    selected_banners = selected_banners[:3]
+    # as_of 非空：回看该时刻进行中的历史卡池（planner 已解析用户问句时间语义）
+    anchor = _parse_dt(as_of) if as_of else None
+    if anchor is not None:
+        selected_banners = []
+        for b in sorted_banners:
+            sd = _parse_dt(b.get("startTime", ""))
+            ed = _parse_dt(b.get("endTime", ""))
+            if sd is not None and ed is not None and sd <= anchor <= ed:
+                selected_banners.append(b)
+    else:
+        # 取当前进行中 + 最近 1 期已结束（共最多 3 期）
+        selected_banners = list(ongoing)
+        if ended:
+            selected_banners.append(ended[0])
+        if not ongoing and ended:
+            selected_banners = ended[:min(3, len(ended))]
+        elif not selected_banners:
+            selected_banners = sorted_banners[:3]
+    selected_banners = selected_banners[:3] if anchor is None else selected_banners[:6]
 
     lines: list[str] = ["【卡池资讯】"]
     for b in selected_banners:

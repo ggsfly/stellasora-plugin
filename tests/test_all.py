@@ -2379,17 +2379,20 @@ def test_keyword_routes() -> None:
 
 
 def test_banner_material() -> None:
-    """O7: fixture gacha.json (2期) → 断言输出含 2 期且 startTime 日期格式化。"""
+    """O7: fixture gacha.json (3期) → 断言输出含 2 期、日期格式化，且 as_of 回看历史期。"""
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
     mat, ok = service._build_banner_material(st_fix, lookup)
-    # 2 期时间戳均经格式化呈现（2026-09-08 与 2026-09-01），且含角色/秘纹卡池，无残余 markup
+    # 3 期时间戳均经格式化呈现（2026-09-08 与 2026-09-01），且含角色/秘纹卡池，无残余 markup
     has_period_1 = "2026-09-08" in mat
     has_period_2 = "2026-09-01" in mat
     has_types = "【角色卡池】" in mat and "【秘纹卡池】" in mat
+    # as_of 回看：2026-09-05 时刻进行中的是 09-01~09-08 的 Bloom to the Bright Sun
+    mat_hist, ok_hist = service._build_banner_material(st_fix, lookup, as_of="2026-09-05")
+    has_hist = ok_hist and "Bloom to the Bright Sun" in mat_hist and "2026-09-01" in mat_hist
     check("O7 卡池资讯渲染含2期且日期格式化",
-          ok and has_period_1 and has_period_2 and has_types and "<color" not in mat)
+          ok and has_period_1 and has_period_2 and has_types and "<color" not in mat and has_hist)
 
 
 def test_monster_match_and_material() -> None:

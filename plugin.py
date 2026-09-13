@@ -753,9 +753,11 @@ class StellaSoraPlugin(MaiBotPlugin):
                     "①角色——属性/职业/技能/潜能/天赋(玩家俗称'命座')/礼物/约会，如'XX是谁''XX技能''XX面板数值''XX培养素材''XX命座效果''XX喜欢什么礼物'；"
                     "②秘纹——属性/适配/旋律，如'XX秘纹''XX旋律'；"
                     "③首领怪物——弱点/抗性/机制/数值，如'XX的弱点''XX机制''XX怎么打'(只答机制事实，不答打法策略)；"
-                    "④当期讨伐——'联合讨伐''本期讨伐''boss'，返回当期两个首领的弱点/抗性与机制；"
-                    "⑤卡池资讯——'卡池''池子''up池'，返回进行中与近期卡池的起止时间。"
-                    "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
+                     "④当期讨伐——'联合讨伐''本期讨伐''boss'，返回当期两个首领的弱点/抗性与机制；"
+                     "⑤卡池资讯——'卡池''池子''up池'，返回进行中与近期卡池的起止时间；"
+                     "用户问往期/历史/指定时间点的卡池（如'三周前的up池''上期卡池''8月的卡池'）时，"
+                     "把时间语义解析为 ISO 日期（YYYY-MM-DD）填入 as_of 参数，返回该时间点进行中的卡池。"
+                     "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
                     "关闭直接发送时返回攻略正文，用 reply 组织回复。"
                     "调用边界（决定是否调用本工具）：本工具只产出客观资料，不产出主观结论——"
                     "①主观评价类问题（值不值得练/强不强/要不要抽/怎么打/打法思路/攻略策略）不要调用本工具，它没有主观建议可给；"
@@ -775,10 +777,17 @@ class StellaSoraPlugin(MaiBotPlugin):
                 description="用户的原始问题原文（如'夏花的完整资料'），用于生成贴合问题的回答；无法提取时可不传",
                 required=False,
             ),
+            ToolParameterInfo(
+                name="as_of",
+                param_type=ToolParamType.STRING,
+                description="卡池时间锚点（ISO 日期 YYYY-MM-DD，仅卡池概念页查询时使用）："
+                "用户问往期/历史/指定时间点的卡池时，把时间语义解析成该日期传入；当前/本期卡池不传",
+                required=False,
+            ),
         ],
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
-    async def handle_what(self, query: str = "", question: str = "", **kwargs):
+    async def handle_what(self, query: str = "", question: str = "", as_of: str = "", **kwargs):
         if self._denied(**kwargs):
             return {"name": "stellasora_what", "content": "当前聊天不在星塔旅人插件的允许范围内。"}
         self._apply_overrides_config()
@@ -796,6 +805,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             query,
             self._cache_dir_ready(),
             effective_question,
+            as_of,
         )
         # 未找到时不走 LLM 加工，直接返回
         if "未在字典中找到" in text:
