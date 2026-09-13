@@ -2356,8 +2356,11 @@ def _build_monster_material(
                     for a in affixes:
                         if not isinstance(a, dict):
                             continue
+                        # 机制名（词级）走 _cn_by_en；描述（整段英文，仅存于
+                        # 字典 .2/.3）走 _cn_full 全文映射译出；字典未收录的
+                        # 句子保留原文交 LLM 转写
                         a_name = _cn_by_en(lookup, a.get("name", ""))
-                        a_desc = a.get("desc", "")
+                        a_desc = _cn_full(lookup, a.get("desc", ""))
                         lines.append(f"  - {a_name}")
                         if a_desc:
                             lines.append(f"    描述：{a_desc}")
@@ -2366,7 +2369,7 @@ def _build_monster_material(
                     if not isinstance(m, dict):
                         continue
                     m_name = _cn_by_en(lookup, m.get("name", ""))
-                    m_desc = m.get("desc", "")
+                    m_desc = _cn_full(lookup, m.get("desc", ""))
                     lines.append(f"  - {m_name}")
                     if m_desc:
                         lines.append(f"    描述：{m_desc}")
