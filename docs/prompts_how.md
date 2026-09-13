@@ -2,8 +2,6 @@
 
 本文件是星塔旅人插件 `stellasora_how` 工具「直接发送模式」LLM 提示词的单一事实源。`plugin.py` 启动时通过 `_load_prompt_doc_how()` 读取本文件并缓存于模块级变量，修改后需**重启插件**才能生效。
 
-> 2025-09 重构：原 `docs/game_knowledge.md` 内容已内联至下方【游戏机制知识】段，不再运行时注入；`docs/prompts.md` 已改名为本文件。
-
 ## 占位符说明
 
 提示词正文含 3 个占位符，由 `plugin.py` 在运行时填充：

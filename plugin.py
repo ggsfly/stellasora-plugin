@@ -585,9 +585,8 @@ class StellaSoraPlugin(MaiBotPlugin):
                 self.ctx.logger.info("直接发送缓存命中: key=%s", cache_key)
                 try:
                     sent = await self.ctx.send.text(cached_answer, stream_id)
-                except Exception as exc:
+                except Exception:
                     self.ctx.logger.exception("直接发送模式消息发送异常")
-                    _ = exc
                     return not_found
                 if not sent:
                     self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
@@ -658,7 +657,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             llm_result = await self.ctx.llm.generate(**gen_kwargs)
         except Exception as exc:
             self.ctx.logger.exception("直接发送模式 LLM 调用异常")
-            _ = exc
             return _llm_failed(f"LLM 调用异常: {exc}")
 
         answer = str((llm_result or {}).get("response") or "").strip()
@@ -685,9 +683,8 @@ class StellaSoraPlugin(MaiBotPlugin):
 
         try:
             sent = await self.ctx.send.text(answer, stream_id)
-        except Exception as exc:
+        except Exception:
             self.ctx.logger.exception("直接发送模式消息发送异常")
-            _ = exc
             return not_found
         if not sent:
             self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
@@ -708,11 +705,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         )
         return {
             "name": tool_name,
-            "content": (
-                "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
-                "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
-                "请立即调用 wait 工具（seconds=5）结束本轮即可。"
-            ),
+            "content": _ALREADY_SENT_CONTENT,
         }
 
     # ===== Tool 组件 =====

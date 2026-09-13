@@ -21,7 +21,6 @@ import re
 import threading
 
 from dict_lookup import DictLookup
-from fetcher_google_doc import GoogleDocFetcher
 from fetcher_stelladb import StelladbFetcher, _read_offline_file
 from text_clean import strip_game_markup
 import term_replace as _term_replace_module
@@ -103,8 +102,8 @@ def _term_cn(s: str) -> str:
     return s
 
 # 模块级单例（按数据目录缓存，避免每次调用重载字典）；
-# 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
-# cache_dir 变化时仅重建两个 fetcher，lookup 与 replacer 全进程复用
+# 值形状 = (lookup, last_cache_dir, st_fetcher, replacer)：
+# cache_dir 变化时仅重建 fetcher，lookup 与 replacer 全进程复用
 _instances: Dict[str, tuple] = {}
 # 线程安全保护：跑在线程池中时，避免无锁并发首次调用重复解析字典
 _init_lock = threading.Lock()
@@ -169,7 +168,7 @@ def configure_overrides(
 
 
 def _get_services(cache_dir: Path) -> tuple:
-    """获取/构建共享服务元组 (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)。
+    """获取/构建共享服务元组 (lookup, last_cache_dir, st_fetcher, replacer)。
 
     锁内 check-then-init：lookup 只建一次并显式预热，replacer 基于已加载字典预建；
     cache_dir 与上次不同时仅重建 fetcher（lookup/replacer 复用）。
@@ -192,18 +191,16 @@ def _get_services(cache_dir: Path) -> tuple:
                 lookup,
                 cache_dir,
                 StelladbFetcher(cache_dir),
-                GoogleDocFetcher(cache_dir),
                 replacer,
             )
         else:
-            lookup, last_cache_dir, _st, _gd, replacer = _instances[key]
+            lookup, last_cache_dir, _st, replacer = _instances[key]
             if cache_dir != last_cache_dir:
-                # 仅重建 fetcher（各自持有缓存目录），lookup/replacer 全进程复用
+                # 仅重建 fetcher（持有缓存目录），lookup/replacer 全进程复用
                 _instances[key] = (
                     lookup,
                     cache_dir,
                     StelladbFetcher(cache_dir),
-                    GoogleDocFetcher(cache_dir),
                     replacer,
                 )
     return _instances[key]
@@ -223,15 +220,15 @@ def _get_lookup() -> DictLookup:
 
 
 def _get_replacer() -> Any:
-    """取共享 TermReplacer（服务元组第 5 位）；未初始化时先构建字典单例。"""
+    """取共享 TermReplacer（服务元组第 4 位）；未初始化时先构建字典单例。"""
     entry = _instances.get(str(_DATA_DIR))
     if entry is None:
         _get_lookup()
         entry = _instances[str(_DATA_DIR)]
-    return entry[4]
+    return entry[3]
 
 
-def _cn_full(lookup: Any, text: Any) -> str:
+def _cn_full(text: Any) -> str:
     """整句/短语 → 官方中文：走 TermReplacer 全字段映射。
 
     与 _cn_by_en 的区别：_cn_by_en 只查字典 .1 名字条目，整句（如约会
@@ -331,20 +328,6 @@ def _scan_character_hits(text: str) -> list:
     return found
 
 
-def find_character_names(text: str) -> list:
-    """返回 text 中命中的角色名列表（字典原名，长名优先防子串误配）。
-
-    在匹配角色名前先做别名替换预处理（支持 config.overrides.aliases 与
-    data/overrides.json），将玩家俗称/变体映射为官方角色名，避免多角色联合
-    查询识别失败。
-
-    命中区间做掩码去重叠（如 "NazuNazuka" 中 Nazuna/Nazuka 区间重叠时，
-    先命中的长名保留、被覆盖区间的短名跳过）。掩码 None = 未占用，
-    "#" = 已被更长名占用。
-    """
-    return [name for _idx, name in _scan_character_hits(text)]
-
-
 def find_character_names_ordered(text: str) -> list:
     """返回 text 中命中的角色名列表，按问句首次出现位置升序（保序键=命中
     区间首字符最小索引，与长度排序/字典遍历序解耦；等长名先后由文本位置
@@ -372,7 +355,7 @@ def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") 
     as_of：planner 传入的卡池时间锚点（ISO 日期，如 '2026-08-23'；可为空）。
     仅 banner 路由使用——planner 解析用户问句中的时间语义后直接传锚点。
     """
-    lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
+    lookup, _last, st_fetcher, replacer = _get_services(cache_dir)
 
     # 1. 实体优先保护：查询词若为「实体+概念词」混合形态（如「猫眼的秘纹」「鹿鸣秘纹」），
     #    先剥离概念词取出实体并改走实体路由，避免概念页抢占实体（原缺陷：问某角色的
@@ -428,7 +411,8 @@ def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") 
 
         # 当期联合讨伐 boss 名兜底（MonsterManual 命中但 raid 找不到时的链接形态）
         if _match_blitz_boss(term, st_fetcher, lookup):
-            text, _ = _build_blitz_material(st_fetcher, lookup)
+            modules = _detect_what_modules(question, "blitz")
+            text, _ = _build_blitz_material(st_fetcher, lookup, modules=modules)
             return text
 
         # 若该兜底 _match_monster 返回 None → 落入"没有专属攻略页"文案
@@ -1060,8 +1044,7 @@ def query_how_rows(
         包含攻略文本（与可选预设码行）的格式化字符串；无可用行时返回空串
     """
     lookup = _get_lookup()  # 确保共享查词服务已初始化
-    # replacer 与 lookup 同源：_get_lookup 初始化时构建的共享实例（元组第 5 位）
-    replacer = _instances[str(_DATA_DIR)][4]
+    replacer = _get_replacer()
 
     # 问句 → 问询角色 EN 名有序 list（保序版提取；多角色详略依赖顺序）
     asker_ens: list = []
@@ -1438,9 +1421,8 @@ def _fill_params(desc: str, params: Any, kind: str, lookup: Any) -> str:
         }
         return _PARAM_AMP_RE.sub(lambda m: resolved.get(int(m.group(1)), m.group(0)), desc)
     if isinstance(params, str):
-        tiers = params.split("/")
         idx = (_DEFAULT_DISC_DUPE - 1) if kind == "disc_main" else (_DEFAULT_DISC_HARMONY - 1)
-        picked = _pick_tier(params, idx) if tiers else ""
+        picked = _pick_tier(params, idx)
         values = picked.split(",") if picked else []
         resolved = {i + 1: _param_value_cn(v.strip(), lookup) for i, v in enumerate(values)}
         return _PARAM_BRACE_RE.sub(lambda m: resolved.get(int(m.group(1)), m.group(0)), desc)
@@ -1747,9 +1729,9 @@ def _build_character_material(
             lines.append("【约会分支】")
             for d in dates:
                 if isinstance(d, dict):
-                    d_name = _cn_full(lookup, d.get("name", ""))
-                    d_clue = _cn_full(lookup, d.get("clue", ""))
-                    d_choice = _cn_full(lookup, d.get("secondChoice", ""))
+                    d_name = _cn_full(d.get("name", ""))
+                    d_clue = _cn_full(d.get("clue", ""))
+                    d_choice = _cn_full(d.get("secondChoice", ""))
                     parts = []
                     if d_name:
                         parts.append(f"事件：{d_name}")
@@ -2039,30 +2021,31 @@ def _build_banner_material(
     if not sorted_banners:
         return "", False
 
-    now = datetime.now(timezone.utc)
-    ongoing: list[dict] = []
-    ended: list[dict] = []
-    for b in sorted_banners:
-        st_dt = _parse_dt(b.get("startTime", ""))
-        ed_dt = _parse_dt(b.get("endTime", ""))
-        if st_dt and ed_dt:
-            if st_dt <= now <= ed_dt:
-                ongoing.append(b)
-            elif ed_dt < now:
-                ended.append(b)
-        else:
-            ended.append(b)
+    parsed = [
+        (b, _parse_dt(b.get("startTime", "")), _parse_dt(b.get("endTime", "")))
+        for b in sorted_banners
+    ]
 
     # as_of 非空：回看该时刻进行中的历史卡池（planner 已解析用户问句时间语义）
     anchor = _parse_dt(as_of) if as_of else None
     if anchor is not None:
-        selected_banners = []
-        for b in sorted_banners:
-            sd = _parse_dt(b.get("startTime", ""))
-            ed = _parse_dt(b.get("endTime", ""))
-            if sd is not None and ed is not None and sd <= anchor <= ed:
-                selected_banners.append(b)
+        selected_banners = [
+            b for b, sd, ed in parsed
+            if sd is not None and ed is not None and sd <= anchor <= ed
+        ]
     else:
+        now = datetime.now(timezone.utc)
+        ongoing: list[dict] = []
+        ended: list[dict] = []
+        for b, st_dt, ed_dt in parsed:
+            if st_dt and ed_dt:
+                if st_dt <= now <= ed_dt:
+                    ongoing.append(b)
+                elif ed_dt < now:
+                    ended.append(b)
+            else:
+                ended.append(b)
+
         # 取当前进行中 + 最近 1 期已结束（共最多 3 期）
         selected_banners = list(ongoing)
         if ended:
@@ -2395,7 +2378,7 @@ def _build_monster_material(
                         # 字典 .2/.3）走 _cn_full 全文映射译出；字典未收录的
                         # 句子保留原文交 LLM 转写
                         a_name = _cn_by_en(lookup, a.get("name", ""))
-                        a_desc = _cn_full(lookup, a.get("desc", ""))
+                        a_desc = _cn_full(a.get("desc", ""))
                         lines.append(f"  - {a_name}")
                         if a_desc:
                             lines.append(f"    描述：{a_desc}")
@@ -2404,7 +2387,7 @@ def _build_monster_material(
                     if not isinstance(m, dict):
                         continue
                     m_name = _cn_by_en(lookup, m.get("name", ""))
-                    m_desc = _cn_full(lookup, m.get("desc", ""))
+                    m_desc = _cn_full(m.get("desc", ""))
                     lines.append(f"  - {m_name}")
                     if m_desc:
                         lines.append(f"    描述：{m_desc}")
@@ -2636,10 +2619,10 @@ def _build_blitz_material(
             if not isinstance(m, dict):
                 continue
             m_name = m.get("name", "")
-            m_name_cn = _cn_full(lookup, m_name) if m_name else ""
+            m_name_cn = _cn_full(m_name) if m_name else ""
             desc = m.get("descCN") or ""
             if not desc:
-                desc = _cn_full(lookup, m.get("desc", ""))
+                desc = _cn_full(m.get("desc", ""))
             if not desc:
                 detail_lines.append(f"  - {m_name_cn or m_name}")
                 continue

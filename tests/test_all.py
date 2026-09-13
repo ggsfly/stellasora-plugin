@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT))
 import service  # noqa: E402
 import team_table  # noqa: E402
 from dict_lookup import DictLookup  # noqa: E402
+from fetcher_google_doc import GoogleDocFetcher  # noqa: E402
 from fetcher_stelladb import StelladbFetcher  # noqa: E402
 from term_replace import TermReplacer  # noqa: E402
 from maibot_sdk.context import PluginContext, PluginPaths  # noqa: E402
@@ -172,13 +173,13 @@ def run_singleton() -> None:
         tmp_b = Path(tempfile.mkdtemp(prefix="stellasora_singleton_b_"))
         svc_a = service._get_services(tmp_a)
         svc_b = service._get_services(tmp_b)
-        lookup_a, last_a, st_a, gd_a, replacer_a = svc_a
-        lookup_b, last_b, st_b, gd_b, replacer_b = svc_b
+        lookup_a, last_a, st_a, replacer_a = svc_a
+        lookup_b, last_b, st_b, replacer_b = svc_b
 
         check("B1 dict.json 全进程只解析一次", counter["dict"] == 1,
               f"解析 {counter['dict']} 次（总 json.load {counter['total']}：dict 1 + names 1）")
         check("B2 两个 cache_dir 共享同一 lookup", lookup_a is lookup_b)
-        check("B3 cache_dir 变化仅重建 fetcher", st_a is not st_b and gd_a is not gd_b)
+        check("B3 cache_dir 变化仅重建 fetcher", st_a is not st_b)
         check("B4 replacer 随 lookup 复用（cache_dir 变化不重建）", replacer_a is replacer_b)
         check("B5 未收录术语返回 not_found", service.lookup_term("NoSuchTermXYZ").get("not_found") is True)
 
@@ -614,7 +615,7 @@ def run_query_how_section() -> None:
             # F7+F8 别名问句（原 F15-1/F15-4 迁移）：提取官方名 + 双"本角色"标签
             service.configure_overrides(aliases={"春科": "科洛妮丝（新春）"})
             try:
-                extracted = service.find_character_names("春科 猫眼 谁好")
+                extracted = service.find_character_names_ordered("春科 猫眼 谁好")
                 check("F7 俗称别名提取为官方角色名",
                       "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
                       f"提取结果: {extracted}")
@@ -1457,15 +1458,19 @@ async def run_manual_update() -> None:
         # 准备 offline 假数据（路径为 infodocs/*.txt 或 *.json，presets/presets.txt 或 presets.json）
         offline_infodocs = tmp_dir / "offline" / "infodocs"
         offline_infodocs.mkdir(parents=True, exist_ok=True)
-        (offline_infodocs / "index.txt").write_text("Offline Infodoc Index Content", encoding="utf-8")
-        (offline_infodocs / "ignis.txt").write_text("Offline Ignis Detailed Content", encoding="utf-8")
+        (offline_infodocs / "index.json").write_text(
+            json.dumps({"data": "Offline Infodoc Index Content"}), encoding="utf-8"
+        )
+        (offline_infodocs / "ignis.json").write_text(
+            json.dumps({"data": "Offline Ignis Detailed Content"}), encoding="utf-8"
+        )
 
         offline_presets = tmp_dir / "offline" / "presets"
         offline_presets.mkdir(parents=True, exist_ok=True)
         (offline_presets / "presets.txt").write_text("Offline Presets TSV Content", encoding="utf-8")
 
         st_fetcher = service.StelladbFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
-        gd_fetcher = service.GoogleDocFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
+        gd_fetcher = GoogleDocFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
 
         network_calls: list = []
 
@@ -1961,7 +1966,7 @@ def run_section_n() -> None:
             umbra_data = json.load(f)["data"]
         f_block = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
         f_emblem_raw = f_block["segments"]["Firenze"]["emblem"] if f_block else []
-        replacer = service._instances[str(DATA_DIR)][4]
+        replacer = service._instances[str(DATA_DIR)][3]
         f_emblem = [replacer.replace(ln) for ln in f_emblem_raw]
         e70 = next((ln for ln in f_emblem if ln.startswith("70级：")), "")
         e90 = next((ln for ln in f_emblem if ln.startswith("90级：")), "")
@@ -2409,7 +2414,7 @@ def test_monster_match_and_material() -> None:
     # 2. MonsterManual dict 路径（防死分支回归）：question="机制" 命中
     #    模块化选段的 mechanic 区块，断言内容保持既有语义不变
     with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.51002.1", "cat": "MonsterManual", "cn": "歌剧魅影", "en": "Opera Ghost"}):
-        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, None)):
+        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None)):
             q_res = service.query_what("某怪名", cache_dir=fixtures_dir, question="某怪名的机制")
             p2_ok = ("弱" in q_res or "弱点" in q_res) and "机制" in q_res and "没有专属攻略页" not in q_res
 
@@ -2429,7 +2434,7 @@ def test_query_what_fallback() -> None:
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
     with unittest.mock.patch.object(service, "_build_character_material", return_value=("", False)):
-        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
             res = service.query_what("琥珀", cache_dir=fixtures_dir)
             check("O9 角色资料失败不回退 trekker（返回无专属攻略页文案）",
                   "没有专属攻略页" in res
@@ -2443,7 +2448,7 @@ def test_query_what_disc_route() -> None:
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
         res = service.query_what("朝霭", cache_dir=fixtures_dir, question="朝霭的旋律")
         check("O10 端到端 disc 路由渲染含强音·主调",
               "强音·主调" in res and "<color" not in res)
@@ -2476,9 +2481,9 @@ def test_luming_alias_routes_to_disc() -> None:
 
     # 复用含 merged 别名的真实单例 lookup，fixture 驱动端到端 disc 路由：
     # query_what('鹿鸣') 应渲染秘纹资料，而非 MainSkill 类词条的兜底文案
-    lookup, _last, _st, _gd, _replacer = service._get_services(DATA_DIR / ".cache")
+    lookup, _last, _st, _replacer = service._get_services(DATA_DIR / ".cache")
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
         q_res = service.query_what("鹿鸣", cache_dir=fixtures_dir)
     check("O13 query_what('鹿鸣') 渲染秘纹鹿鸣且无兜底残渣",
           "【秘纹】" in q_res and "鹿鸣" in q_res
@@ -2513,7 +2518,7 @@ def test_blitz_current_bosses() -> None:
           "<color" not in mat and "</color" not in mat and "</colo" not in mat)
 
     # 3. 端到端：mock _get_services 后 query_what 走 blitz 路由
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
         q_res = service.query_what("当期讨伐boss", cache_dir=fixtures_dir)
     check("O14 query_what('当期讨伐boss') 含两 boss 名",
           "Furious Stomper Crab" in q_res and "Forbidden Beauty" in q_res)
@@ -2680,7 +2685,7 @@ def test_what_end_to_end_modules() -> None:
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None, TermReplacer(DATA_DIR))):
+    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
         # 1. 问题定向到天赋模块：含【天赋】+天赋轶闻，无【约会分支】/【普攻】
         r_tal = service.query_what("琥珀", cache_dir=fixtures_dir, question="琥珀的命座")
         p1_ok = "【天赋】" in r_tal and "约会分支" not in r_tal and "【普攻】" not in r_tal
