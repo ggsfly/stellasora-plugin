@@ -338,19 +338,27 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
     """what 桶：角色/物品"是什么"，输出已中文化的攻略文本。"""
     lookup, _last, st_fetcher, _gd, replacer = _get_services(cache_dir)
 
-    # 1. 关键词概念路由（banner / disc 概念列表；blitz 当期讨伐整页）
-    route = _route_what_keywords(term)
-    if route == "banner":
-        text, _ = _build_banner_material(st_fetcher, lookup)
-        return text
-    elif route == "blitz":
-        text, _ = _build_blitz_material(st_fetcher, lookup)
-        return text
-    elif route == "disc":
-        text, _ = _build_disc_list_material(st_fetcher, lookup)
-        return text
+    # 1. 实体优先保护：查询词若为「实体+概念词」混合形态（如「猫眼的秘纹」「鹿鸣秘纹」），
+    #    先剥离概念词取出实体并改走实体路由，避免概念页抢占实体（原缺陷：问某角色的
+    #    秘纹会返回与角色无关的秘纹列表）。纯概念词（如「秘纹」）不受影响。
+    entity_term = _extract_entity_term(term, lookup)
+    if entity_term is not None:
+        term = entity_term
+    else:
+        # 2. 关键词概念路由（banner / disc 概念列表；blitz 当期讨伐整页）
+        route = _route_what_keywords(term)
+        if route == "banner":
+            text, _ = _build_banner_material(st_fetcher, lookup)
+            return text
+        elif route == "blitz":
+            modules = _detect_what_modules(question, "blitz")
+            text, _ = _build_blitz_material(st_fetcher, lookup, modules=modules)
+            return text
+        elif route == "disc":
+            text, _ = _build_disc_list_material(st_fetcher, lookup)
+            return text
 
-    # 2. 查词与首领怪物路由
+    # 3. 查词与首领怪物路由
     res = lookup.lookup_term(term)
     if not res:
         monster_id = _match_monster(term, lookup, st_fetcher)
@@ -361,7 +369,8 @@ def query_what(term: str, cache_dir: Path, question: str = "") -> str:
                 return text
         # 当期联合讨伐 boss 名兜底（中/英文名直接命中当期赛季 boss）
         if _match_blitz_boss(term, st_fetcher, lookup):
-            text, _ = _build_blitz_material(st_fetcher, lookup)
+            modules = _detect_what_modules(question, "blitz")
+            text, _ = _build_blitz_material(st_fetcher, lookup, modules=modules)
             return text
         return f"[{term}] 未在字典中找到。请检查拼写，或使用查词工具确认。"
 
@@ -1313,6 +1322,44 @@ _PARAM_ATTR_CN: Dict[str, str] = {
     "Movement Speed": "移动速度",
 }
 
+# 获取途径（source 字段）枚举 → 中文。字典未覆盖、或字典译名带瑕疵
+# （如 "Recruit"→"招 募"）的项在此显式修正；其余（Event/Shop/Ascension 等）
+# 仍走 _cn_by_en 字典反查。缩写项按全称译名对齐（JT/BP/AFE/CS/SS）。
+_SOURCE_CN: Dict[str, str] = {
+    "Recruit": "招募",       # 字典给出「招 募」（含空格瑕疵）
+    "Limited": "限定",
+    "Premium": "付费",
+    "f2p": "免费",
+    "p2w": "氪金",
+    "Gacha": "抽卡",
+    "Banner": "卡池",
+    "Permanent": "常驻",
+    "Standard": "标准",
+    "Signature": "专属",
+    "Exclusive": "专属",
+    "Battle Pass": "战令",
+    "BP": "战令",
+    "Journey Ticket": "征途票根",
+    "JT": "征途票根",
+    "A Finale Echoing": "终焉绝响",
+    "AFE": "终焉绝响",
+    "Cataclysm Survivor": "灾变防线",
+    "CS": "灾变防线",
+    "Shadow Siege": "猎影合围",
+    "SS": "猎影合围",
+    "Login Reward": "登录奖励",
+}
+
+
+def _source_cn(lookup: Any, value: str) -> str:
+    """获取途径枚举 → 中文：先查显式修正表，未收录再走字典反查，仍无则原样。"""
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    if v in _SOURCE_CN:
+        return _SOURCE_CN[v]
+    return _cn_by_en(lookup, v)
+
 # 角色占位符 &ParamN&（兼容站点正则的 &ParamN_xxx& 变体）；秘纹占位符 {N}
 _PARAM_AMP_RE = re.compile(r"&Param(\d+)(?:_[^&]*)?&")
 _PARAM_BRACE_RE = re.compile(r"\{(\d+)\}")
@@ -1576,7 +1623,7 @@ def _build_character_material(
             lines.append(f"生日：{birthday}")
         source = char.get("source", [])
         if isinstance(source, list) and source:
-            source_cn = [_cn_by_en(lookup, s) for s in source if s]
+            source_cn = [_source_cn(lookup, s) for s in source if s]
             if source_cn:
                 lines.append(f"获取途径：{'、'.join(source_cn)}")
 
@@ -1758,7 +1805,7 @@ def _build_disc_material(
         # 模块化 overview 扩展字段（缺失省略；source 经字典反查中文名）
         source = disc.get("source", [])
         if isinstance(source, list) and source:
-            source_cn = [_cn_by_en(lookup, s) for s in source if s]
+            source_cn = [_source_cn(lookup, s) for s in source if s]
             if source_cn:
                 lines.append(f"获取途径：{'、'.join(source_cn)}")
 
@@ -1828,7 +1875,7 @@ def _build_disc_material(
 # 恒在返回集），不设为任何模块触发词。
 _MODULE_KEYWORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "character": {
-        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "培养材料", "升满", "满级", "毕业"),
+        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "培养材料", "升满", "满级", "毕业", "突破", "素材"),
         "skills": ("技能", "普攻", "大招", "绝招", "必杀", "援护", "主控", "奥义", "技能升级"),
         "potentials": ("潜能", "核心潜能", "共鸣"),
         "talents": ("天赋", "命座", "命之座", "被动特性"),
@@ -1836,7 +1883,7 @@ _MODULE_KEYWORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "dates": ("约会", "邀约", "剧情", "好感", "分支", "攻略线"),
     },
     "disc": {
-        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "升满", "满级"),
+        "details": ("数值", "面板", "stats", "升级材料", "突破材料", "升满", "满级", "突破", "素材"),
         "melody": ("旋律", "主旋律", "音符", "支援音符", "曲调", "技能"),
     },
     "monster": {
@@ -1845,7 +1892,21 @@ _MODULE_KEYWORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
         # 的意图词，加入会造成 what/how 意图竞争、误路由到怪物机制
         "mechanic": ("机制", "技能", "难点", "核心机制"),
     },
+    # 概念页模块：无触发词时仅返回概览（overview 恒在返回集），
+    # 使「本期讨伐boss的弱点」这类问法不必整页输出机制明细
+    "blitz": {
+        "mechanic": ("机制", "技能", "难点", "核心机制", "怎么打", "打法"),
+    },
 }
+
+# 概念路由触发词（与 _route_what_keywords 的词表同源）：用于「实体+概念词」混合
+# 查询的实体提取（见 _extract_entity_term），避免概念页抢占具名实体。
+_CONCEPT_KEYWORDS: Tuple[str, ...] = (
+    "联合讨伐", "当期讨伐", "本期讨伐", "讨伐", "卡池", "池子", "up池", "boss", "blitz", "秘纹", "旋律",
+)
+_CONCEPT_KW_RE = re.compile(
+    "|".join(re.escape(k) for k in _CONCEPT_KEYWORDS), re.IGNORECASE
+)
 
 
 def _detect_what_modules(question: str, entity_type: str) -> Set[str]:
@@ -1889,6 +1950,27 @@ def _route_what_keywords(term: str) -> Optional[str]:
         return None
     if any(k in lower_term for k in ("秘纹", "旋律")):
         return "disc"
+    return None
+
+
+def _extract_entity_term(term: str, lookup: Any) -> Optional[str]:
+    """从「实体+概念词」混合查询中提取具名实体（概念路由让位保护）。
+
+    例：「猫眼的秘纹」→「猫眼」（角色）、「鹿鸣秘纹」→「鹿鸣」（秘纹条目）。
+    仅当查询含概念词、且剥离概念词与结构助词后的残留可解析为已知实体
+    （字典精确命中或含已知角色名）时返回该残留；纯概念词（如「秘纹」）返回 None，
+    仍走概念页。修复概念词无关前置词抢先命中、返回与用户所指实体无关的内容。
+    """
+    if not term or not _CONCEPT_KW_RE.search(term):
+        return None
+    residue = _CONCEPT_KW_RE.sub("", term).strip(" 的了")
+    if not residue:
+        return None
+    if lookup.lookup_term(residue):
+        return residue
+    names = lookup.get_character_names()
+    if any(name and name in residue for name in names):
+        return residue
     return None
 
 
@@ -2371,6 +2453,7 @@ def _resolve_current_blitz(st: StelladbFetcher) -> Optional[Tuple[str, dict]]:
 def _build_blitz_material(
     st: StelladbFetcher,
     lookup: Any,
+    modules: Optional[Collection[str]] = None,
 ) -> Tuple[str, bool]:
     """渲染当期联合讨伐 boss 资料（两 boss 一次输出，紧凑两段式结构）。
 
@@ -2379,6 +2462,10 @@ def _build_blitz_material(
     boss 名与 meta floor name 不一致时以 meta 名为准并标注机制数据可能滞后、
     省略机制明细。返回 (material_text, True)；无当期赛季或 blitz dataset 缺失
     返回 ("", False)。
+
+    modules 给定（模块化查询）时，仅当命中 mechanic 才输出【机制】明细；
+    概览行恒输出（弱点/抗性/单分伤害等客观数据已在其内），故「本期讨伐boss的
+    弱点属性」这类问法不再附带整页机制。modules=None 保持既有全量输出不变。
     """
     if not st:
         return "", False
@@ -2470,8 +2557,12 @@ def _build_blitz_material(
         lines.append("｜".join(overview_parts))
 
     # 2. 逐 boss【机制】明细（stat 摘要 + 机制列表）
+    #    模块化查询下按模块选段：stats 控制数值摘要、mechanic 控制机制列表；
+    #    二者皆未命中时整块省略（概览行已含弱点/抗性等客观数据）。
+    want_stats = modules is None or "stats" in modules
+    want_mechanic = modules is None or "mechanic" in modules
     detail_lines: list[str] = []
-    for idx, e in enumerate(entries, start=1):
+    for idx, e in enumerate(entries, start=1) if (want_stats or want_mechanic) else ():
         boss = e["boss"]
         if boss is None:
             continue
@@ -2481,14 +2572,22 @@ def _build_blitz_material(
             name_str = f"{cn_name}（{display_en}）"
         else:
             name_str = cn_name or display_en
+        head_index = len(detail_lines)
         detail_lines.append(f"【机制】{idx}. {name_str}")
 
         # stat 摘要：复用 _monster_stat_dict 三源解包（嵌套 dict/list 兼容），
         # 键经 _term_cn 翻译，每 boss 最多 3 项关键值
-        stat_dict = _monster_stat_dict(boss)
-        stats_parts = _stat_parts(stat_dict, key_cn=_term_cn, skip_keys=_STAT_SKIP_KEYS)
-        if stats_parts:
-            detail_lines.append(f"  - {' | '.join(stats_parts)}")
+        if want_stats:
+            stat_dict = _monster_stat_dict(boss)
+            stats_parts = _stat_parts(stat_dict, key_cn=_term_cn, skip_keys=_STAT_SKIP_KEYS)
+            if stats_parts:
+                detail_lines.append(f"  - {' | '.join(stats_parts)}")
+
+        if not want_mechanic:
+            # 仅要数值时不需要机制标题行，避免「【机制】」空壳
+            if len(detail_lines) == head_index + 1:
+                detail_lines.pop()
+            continue
 
         # 机制列表：名称 _term_cn + descCN（缺则 desc 经 _term_cn），全量输出；
         # 数据滞后时省略机制明细

@@ -1348,7 +1348,9 @@ def run_tool_query_desc() -> None:
           not any(elem in desc for elem in ("水", "火", "风", "地", "光", "暗"))
           and "元素" not in desc, desc)
     what_desc = tool_infos.get("stellasora_what", {}).get("query", "")
-    check("J4 what.query 描述未受影响", "角色" in what_desc and "装备" in what_desc, what_desc)
+    check("J4 what.query 描述覆盖实体与概念词",
+          "角色" in what_desc and "秘纹" in what_desc and "首领" in what_desc,
+          what_desc)
 
 
 # ===== 节 K：手动更新指令（st_update） =====
@@ -2733,6 +2735,56 @@ def test_param_fill() -> None:
           and disc_sec == "全队风系伤害提升5%")              # harmony 默认 1 → 索引 0
 
 
+def test_entity_priority_route() -> None:
+    """O24: 概念词实体优先——「实体+概念词」混合查询须提取实体走实体路由，
+    纯概念词仍走概念页。修复原缺陷：问某角色的秘纹会返回与角色无关的秘纹列表。"""
+    from dict_lookup import DictLookup
+
+    lookup = DictLookup(DATA_DIR)
+    # 混合形态 → 提取实体
+    check("O24 实体+概念词混合提取实体",
+          service._extract_entity_term("猫眼的秘纹", lookup) == "猫眼"
+          and service._extract_entity_term("鹿鸣秘纹", lookup) == "鹿鸣")
+    # 纯概念词 / 无概念词 → 不提取
+    check("O24b 纯概念词不提取实体（仍走概念页）",
+          service._extract_entity_term("秘纹", lookup) is None
+          and service._extract_entity_term("卡池", lookup) is None
+          and service._extract_entity_term("联合讨伐", lookup) is None
+          and service._extract_entity_term("猫眼", lookup) is None)
+
+
+def test_blitz_module_select() -> None:
+    """O25: 联合讨伐按模块选段——弱点问句（无机制词）只出概览行；
+    命中机制词或 modules=None 时输出【机制】明细。"""
+    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
+    lookup = DictLookup(DATA_DIR)
+    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
+
+    q = "本期讨伐boss的弱点属性"
+    mods = service._detect_what_modules(q, "blitz")
+    overview_only, ok1 = service._build_blitz_material(st_fix, lookup, modules=mods)
+    full, ok2 = service._build_blitz_material(st_fix, lookup)
+
+    check("O25 讨伐模块选段（弱点问句仅概览 / 机制词带机制 / None 全量）",
+          ok1 and ok2
+          and mods == {"overview"}
+          and "弱点：" in overview_only and "【机制】" not in overview_only
+          and service._detect_what_modules("讨伐boss的机制", "blitz") == {"overview", "mechanic"}
+          and "【机制】" in full)
+
+
+def test_source_cn() -> None:
+    """O26: 获取途径枚举中文化——字典未覆盖/带瑕疵项（Recruit→「招 募」）须修正。"""
+    lookup = DictLookup(DATA_DIR)
+    check("O26 获取途径枚举中文化（含空格瑕疵修正）",
+          service._source_cn(lookup, "Recruit") == "招募"
+          and service._source_cn(lookup, "Limited") == "限定"
+          and service._source_cn(lookup, "p2w") == "氪金"
+          and service._source_cn(lookup, "BP") == "战令"
+          and service._source_cn(lookup, "AFE") == "终焉绝响"
+          and service._source_cn(lookup, "") == "")
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2757,6 +2809,9 @@ def run_section_o() -> None:
     test_no_truncation()
     test_stat_level_cap()
     test_param_fill()
+    test_entity_priority_route()
+    test_blitz_module_select()
+    test_source_cn()
 
 
 # ===== 汇总入口 =====
