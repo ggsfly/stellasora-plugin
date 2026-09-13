@@ -5,17 +5,14 @@
 机制：
   1. 从 dict.json（全字段：.1 名字 + .2/.3 描述/效果文本）构建 en -> cn 映射：
      同 en 多条目时先按「.1 名字字段优先于 .2+ 描述字段」决胜，
-     同为 .1 再按 CAT_PRIORITY 取优先类目——保证名字译名稳定，
-     .2+ 条目仅贡献增量（整段描述、CV 名等新键）
+     同为 .1 再按 CAT_PRIORITY 取优先类目；.2+ 条目仅贡献增量
   2. 按英文名长度降序替换（长名优先，避免 "Skill DMG" 抢先命中 "Skill DMG %"）
-  3. 用正则 \b 词边界匹配，替换后不残留英文
+  3. 用正则词边界匹配（非 ASCII 字母相邻），替换后不残留英文
   4. 少量缩写变体（Support Skill Lv. 等）通过补充别名表处理
 
 注意：
-  - 预设码（AAAA...）、参数占位符（&Param1&）不在替换范围（非英文单词）
-  - 人名（Amber 等角色名）也在字典中，会被一并替换，这正是期望行为
-  - .2/.3 的整段描述文本作为长模式参与替换：stelladb 页面与游戏解包文本
-    逐字一致时会整段命中译为官方中文（实测见 docs/ 与 CHANGELOG 1.2.0）
+  - 预设码（AAAA...）、参数占位符（&Param1& / {1}）不在替换范围（非英文单词）
+  - 人名（Amber 等角色名）也在字典中，会被一并替换，这是期望行为
 """
 
 from pathlib import Path
@@ -201,9 +198,8 @@ class TermReplacer:
     def replace(self, text: str) -> str:
         """把文本中的英文术语替换为中文（单遍交替正则，一次扫描）。
 
-        等价性边界见 tests/test_all.py 的 C 节（REPLACE_SAMPLES 等价性对照）：
-        相邻术语命中且前序术语以非字母字符结尾（如 "Lv."+"Upgrade cost"）时，
-        单遍与逐条实现可能存在仅标点字符差异（白名单豁免，【Metis 修订 #5】）。
+        边界：相邻术语命中且前序术语以非字母字符结尾（如 "Lv."+"Upgrade cost"）时，
+        单遍与逐条实现可能存在仅标点字符差异，由 tests/test_all.py C 节白名单豁免。
         """
         if not text:
             return text
@@ -211,11 +207,7 @@ class TermReplacer:
         return text
 
     def replace_legacy(self, text: str) -> str:
-        """把文本中的英文术语替换为中文。
-
-        旧实现保留用于等价性对照测试（tests/test_all.py C1）：逐条 pattern.sub，
-        约 2.3 万次扫描，慢但语义为历史基线。
-        """
+        """逐条 pattern.sub 的旧实现，保留用于等价性对照测试（tests/test_all.py C1）。"""
         if not text:
             return text
         for term, pattern in self._patterns:

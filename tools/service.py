@@ -102,7 +102,7 @@ def _term_cn(s: str) -> str:
         s = s.replace(en, cn)
     return s
 
-# 模块级单例（按数据目录缓存，避免每次调用重载 8.8MB 字典）；
+# 模块级单例（按数据目录缓存，避免每次调用重载字典）；
 # 值形状 = (lookup, last_cache_dir, st_fetcher, gd_fetcher, replacer)：
 # cache_dir 变化时仅重建两个 fetcher，lookup 与 replacer 全进程复用
 _instances: Dict[str, tuple] = {}
@@ -178,15 +178,12 @@ def _get_services(cache_dir: Path) -> tuple:
     with _init_lock:
         if key not in _instances:
             lookup = DictLookup(_DATA_DIR, custom_aliases=_merged_alias_map())
-            # 先显式完成字典加载，再基于 _main_dict 构建替换器——不依赖
-            # "构建 TermReplacer 隐含触发 _load" 的顺序假设，避免 preloaded_dict
-            # 传到 None（【双审 SH-6】）。锁释放前 _main_dict/_name_index/
-            # _lowercase_index/_character_names_cache 均已就绪，后续线程读取无竞态
-            # （【双审 SH-6】）
+            # 先显式完成字典加载再构建替换器，不依赖「构建 TermReplacer 隐含触发 _load」
+            # 的顺序假设，避免 preloaded_dict 收到 None。锁释放前 _main_dict/_name_index/
+            # _lowercase_index/_character_names_cache 均已就绪，后续线程读取无竞态。
             lookup._load()
-            # 替换器全进程仅此一份：以已解析的 _main_dict 预建，避免 TermReplacer
-            # 再自行 json.load 一份 8.8MB 字典（preloaded_dict 传 None 的隐患，
-            # 【双审 SH-6】）；实例随 _instances 复用，不另设模块级全局
+            # 替换器全进程唯一：以已解析的 _main_dict 预建，避免 TermReplacer 再自行
+            # json.load 一份字典；随 _instances 复用，不另设模块级全局。
             replacer = _term_replace_module.TermReplacer(
                 _DATA_DIR,
                 preloaded_dict=lookup._main_dict,
@@ -215,9 +212,8 @@ def _get_services(cache_dir: Path) -> tuple:
 def _get_lookup() -> DictLookup:
     """只取共享 DictLookup（无 fetcher/缓存目录概念）：查词类纯离线路径专用。
 
-    已初始化时直接返回缓存实例（【Metis 修订 #9】彻底删除查词路径的
-    data/.cache 传参）；仅首次调用时以模块 data/.cache 作为 fetcher 缓存
-    目录委托 _get_services 构建元组（fetcher 仅攻略查询路径实际使用）。
+    已初始化时直接返回缓存实例；仅首次调用时以模块 data/.cache 作为 fetcher
+    缓存目录委托 _get_services 构建元组（fetcher 仅攻略查询路径实际使用）。
     """
     entry = _instances.get(str(_DATA_DIR))
     if entry is None:
@@ -296,7 +292,7 @@ def _scan_character_hits(text: str) -> list:
     # 3. 匹配角色名并做掩码去重叠（记录命中区间首字符索引）
     names = sorted(lookup.get_character_names(), key=len, reverse=True)
     found: list = []
-    masked: list = [None] * len(text)  # None = 未占用（修复：之前是字符列表恒非 None）
+    masked: list = [None] * len(text)  # None = 未占用，"#" = 已被更长名占用
     for name in names:
         if not name or len(name) < 2:
             continue
@@ -707,10 +703,9 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
 def load_team_table() -> Dict[str, Any]:
     """加载统一队伍-槽位表（data/offline/presets/team_table.json）。
 
-    缓存绑定文件 mtime 自愈：外部进程（bat 更新脚本/手动重建）覆写表文件后，
-    下次查询自动重读——不依赖插件进程内的 reload_team_table() 调用
-    （实例事故：独立进程重建新表后，运行中进程的内存缓存仍是旧表，
-    priority 字段全空导致热门过滤静默失效）。mtime 为 None 视为测试注入，信任缓存。
+    缓存以文件 mtime 自愈：外部进程（bat 更新脚本/手动重建）覆写表文件后，
+    下次查询自动重读，不依赖进程内 reload_team_table() 调用。mtime 为 None
+    表示测试注入，信任缓存。
 
     缺失或损坏时记录警告日志并返回空表结构 {"rows": [], "report": {}}，
     不抛出异常。
@@ -757,9 +752,8 @@ def reload_team_table() -> None:
 def preheat_services() -> None:
     """预热共享服务：字典单例（含替换引擎编译）与统一队伍-槽位表。
 
-    供插件 on_load 后台调用——消除首次用户查询的秒级冷启动
-    （字典 8.8MB JSON 解析 + TermReplacer 编译 + 表加载），
-    实例日志证实暖态单次链路仅 0.05-0.3s。
+    供插件 on_load 后台调用，消除首次用户查询的秒级冷启动
+    （字典 JSON 解析 + TermReplacer 编译 + 表加载）。
     """
     _get_lookup()
     load_team_table()
@@ -987,15 +981,9 @@ _EMBLEM_VALUE_RE = re.compile(r"^[\d.]+\s*%$|^[\d.]+$|^\+\d+\s*levels?$|^无需�
 def _filter_noise_lines(lines: list[str]) -> list[str]:
     """过滤字段行序列中的纯数字噪声行，并折叠连续多余空行（token 精简）。
 
-    移植语义（旧 strip_infodoc_noise）：
     - 行过滤：详细页 HTML 表格的行号列折叠出的纯数字行（如 "19"、"297"），
-      对 LLM 无意义——旧实现为 _ROW_NUM_LINE_RE = ^\\d{1,3}$（整页场景下
-      限制 1-3 位以免误伤更长纯数字行），本层只处理字段行、无整页误伤面，
-      故用 .strip().isdigit() 表达"纯数字行"的完整语义（实测全部区块
-      行号均 ≤3 位，两形态在真实数据上零差异）；
-    - 空行折叠：旧 re.sub(r"\\n{3,}", "\\n\\n") 在列表语义下等价于
-      "连续 ≥2 个空行折叠为 1 个空行"（N 个空行 = N+1 个换行，
-      3+ 连续换行折叠为 2 个换行）。
+      对 LLM 无意义，按 .strip().isdigit() 判定并丢弃；
+    - 空行折叠：连续 ≥2 个空行折叠为 1 个空行。
 
     仅作用于 description/discs 字段行；skill 为整体字符串不经此函数。
     """
@@ -1014,7 +1002,7 @@ def _filter_noise_lines(lines: list[str]) -> list[str]:
 
 
 def _filter_emblem_entry(entry: str) -> str:
-    """过滤纹章复合串中的纯数字噪声子条目（新增逻辑，旧实现无此结构）。
+    """过滤纹章复合串中的纯数字噪声子条目。
 
     emblem 条目由 _flush_emblem_into 以 `70级：词条、词条、...` 形态拼接
     （'、'.join(col)），整串 .isdigit() 恒为 False，须剥等级前缀后逐子条目判定。
@@ -1076,7 +1064,7 @@ def query_how_rows(
     # 含全量触发词（与 prompt 4a 词表一致）→全员详述（不设限，含非问询成员）；
     # 字段筛选类问法（配队/纹章/秘纹/技能/升级，对应 prompt 4b-4e 的"各成员"
     # 语义）要求各成员字段齐全，同样不设详略限制；
-    # 空角色集→回退 T2 行为（展开行全部 slots 详述，detail_ens=None 表示不设限）
+    # 空角色集 → 不设详略限制（展开行全部 slots 详述）
     detail_ens: Optional[set] = None
     if asker_ens:
         if any(w in question for w in ("完整", "详细", "全部", "所有", "配队", "纹章", "秘纹", "技能", "升级")) or len(asker_ens) >= 3:
@@ -1115,7 +1103,7 @@ def query_how_rows(
         lines.extend(strip_game_markup(replacer.replace(r)) for r in rotations)
         lines.append("")
 
-    # 行 → 组归并（Design X）：同 guide_ref 区块（或同预设码的未关联行）跨行并为一组，
+    # 行 → 组归并：同 guide_ref 区块（或同预设码的未关联行）跨行并为一组，
     # 组序 = 行序中首次出现序；归组键 = (element, block)，未关联行 = ("", 码/main_key)
     groups: list = []  # [(key, [row, ...]), ...] 保序
     group_index: Dict[tuple, int] = {}
@@ -2507,7 +2495,7 @@ def _build_blitz_material(
             entry["en_name"] = en_name
             # 名称为空时退用 blitz 数据源名称展示
             entry["display_en"] = fl_name if fl_name else en_name
-            # oracle M4：blitz 名与 meta floor name 一致性校验，不一致时机制数据视为滞后
+            # blitz 名与 meta floor name 一致性校验，不一致时机制数据视为滞后
             norm_boss = _normalize(en_name)
             norm_meta = _normalize(fl_name)
             if norm_boss and norm_meta and norm_boss != norm_meta:

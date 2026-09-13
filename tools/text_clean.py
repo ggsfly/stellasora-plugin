@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""文本清理模块：处理从 SSR 爬取的攻略原文格式。
+"""文本清理模块：处理从 stelladb SSR 页面爬取的攻略原文。
 
-核心修复：
-  1. 在剥离 HTML 标签前，先剔除 data-* 属性（含巨大 JSON 实体字符串）
-  2. 解码 HTML 实体（&#34; → " 等）
-  3. 保留 &Param& 游戏内占位符（LLM 可理解）
-  4. strip_game_markup 在 term_replace 之后清理游戏数据标记（颜色标签、##术语#ID#、参数注释）
-  5. 表格按 rowspan/colspan 网格展开导出（合并格在左上角坐标存储文本，
-     被覆盖坐标以空段占位），保留纹章表的列位置信息
+要点：
+  1. 剥离 HTML 标签前先剔除 data-* 属性（含巨大 JSON 实体字符串）
+  2. 表格按 rowspan/colspan 网格展开导出（合并格文本存左上角坐标，被覆盖坐标
+     以空段占位），保留纹章表的列位置信息
+  3. 块级元素转换行、解码 HTML 实体、压缩多余空行
+  4. strip_game_markup 在 term_replace 之后清理游戏数据标记（颜色标签、
+     ##术语#ID# 引用、参数占位符与注释）
 """
 
 from typing import Dict, Tuple

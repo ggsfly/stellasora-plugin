@@ -41,8 +41,75 @@ logger = logging.getLogger("stellasora.sync_data")
 # 六大元素权威集合
 ELEMENTS = ["ignis", "aqua", "terra", "lux", "umbra", "ventus"]
 
+# ss-data 数据集（离线落盘 sssdata/<name>.json）：what 查询依赖
+SS_DATA_SETS = ["character", "disc", "gacha", "raid", "blitz", "duel"]
+
+# ssleaderboard 数据集（离线落盘 ssleaderboard/<name>.json）：
+# blitz_season（season.json）定位当期讨伐赛季，meta 提供赛季→floor 映射
+LB_SETS = ["meta", "blitz_season"]
+
+# 全量同步项（--all 顺序）
+SYNC_ALL_ITEMS = list(ELEMENTS) + ["index", "presets"] + SS_DATA_SETS + LB_SETS
+
 _DEFAULT_OFFLINE_DIR = Path(__file__).resolve().parents[1] / "data" / "offline"
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / ".cache"
+
+
+def _resolve_sync_item(
+    item: str,
+    st_fetcher: StelladbFetcher,
+    gd_fetcher: GoogleDocFetcher,
+    offline_dir: Path,
+) -> tuple:
+    """把同步项名解析为 (目标离线文件, 抓取函数)；未知项返回 (None, None)。"""
+    if item in ELEMENTS:
+        return (
+            offline_dir / "infodocs" / f"{item}.json",
+            lambda: st_fetcher.fetch_infodoc(item, force_update=True),
+        )
+    if item == "index":
+        return (
+            offline_dir / "infodocs" / "index.json",
+            lambda: st_fetcher.fetch_infodoc_index(force_update=True),
+        )
+    if item == "presets":
+        return (
+            offline_dir / "presets" / "presets.txt",
+            lambda: gd_fetcher.fetch_presets(force_update=True),
+        )
+    if item in SS_DATA_SETS:
+        return (
+            offline_dir / "ssdata" / f"{item}.json",
+            lambda: st_fetcher.fetch_ssdata_dataset(item, force_update=True),
+        )
+    if item == "meta":
+        return (
+            offline_dir / "ssleaderboard" / "meta.json",
+            lambda: st_fetcher.fetch_leaderboard_meta(force_update=True),
+        )
+    if item == "blitz_season":
+        return (
+            offline_dir / "ssleaderboard" / "season.json",
+            lambda: st_fetcher.fetch_leaderboard_season(force_update=True),
+        )
+    return None, None
+
+
+def _evaluate_fetch_result(res: Any, mtime_changed: bool) -> tuple:
+    """按返回值类型判定同步结果，返回 (success, char_count, error_msg)。
+
+    已写盘生效（mtime 变化）且返回值有效才算成功；dict（ss-data / 榜单数据集）
+    的字符数按 JSON 序列化长度统计（len(dict) 仅 key 数，报告失真）。
+    """
+    if isinstance(res, dict):
+        if res and mtime_changed:
+            return True, len(json.dumps(res, ensure_ascii=False)), ""
+        return False, 0, "网络拉取失败或更新未生效（已保留本地现有离线数据）"
+    if isinstance(res, str) and res and not res.startswith("Error fetching"):
+        if mtime_changed:
+            return True, len(res), ""
+        return False, len(res), "网络拉取失败或更新未生效（已保留本地现有离线数据）"
+    return False, 0, "网络拉取失败或更新未生效（已保留本地现有离线数据）"
 
 
 def sync_offline_data(
@@ -55,8 +122,9 @@ def sync_offline_data(
     """核心同步函数：抓取离线数据并持久化到本地。
 
     Args:
-        element: 单一元素名（ignis/aqua/terra/lux/umbra/ventus，或 index/presets/blitz/blitz_season/duel）
-        sync_all: 是否执行全量同步（六大元素 + index + presets + blitz/blitz_season/duel）
+        element: 单项名（见 SYNC_ALL_ITEMS：元素名 / index / presets /
+                 ss-data 数据集 / 榜单数据集）
+        sync_all: 是否全量同步 SYNC_ALL_ITEMS 全部条目
         cache_dir: 网络缓存目录（默认 data/.cache）
         offline_dir: 离线数据存储目录（默认 data/offline）
         proxy: 代理地址，如 "http://127.0.0.1:7890"。
@@ -88,7 +156,7 @@ def sync_offline_data(
     # 确定待同步项目列表
     items_to_sync: List[str] = []
     if sync_all:
-        items_to_sync = list(ELEMENTS) + ["index", "presets", "blitz", "blitz_season", "duel"]
+        items_to_sync = list(SYNC_ALL_ITEMS)
     elif element:
         cleaned = element.strip().lower()
         items_to_sync = [cleaned]
@@ -117,50 +185,27 @@ def sync_offline_data(
         team_table_report: Optional[Dict[str, Any]] = None
 
         try:
-            fetch_func = None
-            if item in ELEMENTS:
-                target_file = target_offline_dir / "infodocs" / f"{item}.json"
-                fetch_func = lambda: st_fetcher.fetch_infodoc(item, force_update=True)
-            elif item == "index":
-                target_file = target_offline_dir / "infodocs" / "index.json"
-                fetch_func = lambda: st_fetcher.fetch_infodoc_index(force_update=True)
-            elif item == "presets":
-                target_file = target_offline_dir / "presets" / "presets.txt"
-                fetch_func = lambda: gd_fetcher.fetch_presets(force_update=True)
-            elif item == "blitz":
-                target_file = target_offline_dir / "ssdata" / "blitz.json"
-                fetch_func = lambda: st_fetcher.fetch_ssdata_dataset("blitz", force_update=True)
-            elif item == "blitz_season":
-                target_file = target_offline_dir / "ssleaderboard" / "season.json"
-                fetch_func = lambda: st_fetcher.fetch_leaderboard_season(force_update=True)
-            elif item == "duel":
-                target_file = target_offline_dir / "ssdata" / "duel.json"
-                fetch_func = lambda: st_fetcher.fetch_ssdata_dataset("duel", force_update=True)
-            else:
-                error_msg = f"未知同步项 '{item}'。支持的元素: {', '.join(ELEMENTS)}，以及 index, presets, blitz, blitz_season, duel"
+            target_file, fetch_func = _resolve_sync_item(
+                item, st_fetcher, gd_fetcher, target_offline_dir
+            )
+            if fetch_func is None or target_file is None:
+                error_msg = (
+                    f"未知同步项 '{item}'。支持: {', '.join(SYNC_ALL_ITEMS)}"
+                )
 
             if fetch_func and target_file:
                 mtime_before = target_file.stat().st_mtime_ns if target_file.is_file() else None
-                res = fetch_func()
+                res: Any = fetch_func()
                 mtime_after = target_file.stat().st_mtime_ns if target_file.is_file() else None
-
-                if isinstance(res, dict):
-                    # dict 返回（blitz/season 数据集）：以文件更新时间判定是否写盘生效，
-                    # 字符数按 JSON 序列化长度统计（len(dict) 只统计 key 数，报告失真）
-                    success = bool(res) and mtime_after is not None and mtime_after != mtime_before
-                    char_count = len(json.dumps(res, ensure_ascii=False)) if success else 0
-                    if not success:
-                        error_msg = "网络拉取失败或更新未生效（已保留本地现有离线数据）"
-                elif res and not res.startswith("Error fetching") and mtime_after is not None and mtime_after != mtime_before:
-                    success = True
-                    char_count = len(res)
-                else:
-                    success = False
-                    char_count = len(res) if (res and not res.startswith("Error fetching")) else 0
-                    error_msg = "网络拉取失败或更新未生效（已保留本地现有离线数据）"
+                success, char_count, error_msg = _evaluate_fetch_result(
+                    res, mtime_after is not None and mtime_after != mtime_before
+                )
 
                 if item == "presets":
-                    presets_text = res if (res and not res.startswith("Error fetching")) else (target_file.read_text(encoding="utf-8") if target_file.is_file() else "")
+                    presets_text = (
+                        res if isinstance(res, str) and res and not res.startswith("Error fetching")
+                        else (target_file.read_text(encoding="utf-8") if target_file.is_file() else "")
+                    )
                     if presets_text:
                         try:
                             infodocs = {e: _read_offline_file(target_offline_dir / "infodocs" / f"{e}.json") or "" for e in FIXED_ELEMENTS}
@@ -268,13 +313,14 @@ def main() -> int:
         "--element",
         type=str,
         default=None,
-        help="同步指定元素攻略数据 (ignis/aqua/terra/lux/umbra/ventus) 或 index/presets/blitz/blitz_season/duel",
+        help=f"同步单项。可选: {', '.join(SYNC_ALL_ITEMS)}",
     )
     parser.add_argument(
         "--all",
         dest="sync_all",
         action="store_true",
-        help="全量同步 11 项离线数据：六大元素 infodoc、索引页 index、Google Docs 预设码及 blitz/blitz_season/duel 数据集",
+        help=f"全量同步 {len(SYNC_ALL_ITEMS)} 项离线数据：六大元素 infodoc、索引 index、预设码 presets、"
+        "ss-data 数据集（character/disc/gacha/raid/blitz/duel）与榜单数据（meta/blitz_season）",
     )
     parser.add_argument(
         "--proxy",

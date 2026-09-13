@@ -9,9 +9,8 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 
 | 工具 | 回答的问题 | 示例 |
 |------|-----------|------|
-| `stellasora_what` | "是什么"：角色属性、技能描述、培养素材、礼物偏好 | 猫眼的培养素材是什么？ |
-| `stellasora_how` | "怎么玩"：配队、纹章词条、秘纹推荐、技能升级优先度 | 夏花的纹章优先级？ |
-| `stellasora_how` + 预设码 | 队伍预设码（查询统一队伍-槽位表，仅用户明确要求时附码） | 土印记队的预设码是什么？ |
+| `stellasora_what` | "是什么"：角色属性/技能/培养素材/礼物、秘纹、首领弱点与机制、当期讨伐、卡池资讯 | 猫眼的培养素材是什么？ |
+| `stellasora_how` | "怎么玩"：配队、纹章词条、秘纹推荐、技能升级优先度（用户要求时附预设码） | 夏花的纹章优先级？ |
 | `lookup_game_term` | 游戏术语中英对照与游戏内 ID（供 planner 内部调用） | — |
 
 ### 特性
@@ -19,13 +18,13 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 | 特性 | 说明 |
 |------|------|
 | **离线优先** | 优先读取本地持久化数据（`data/offline/`），无实时外部网络依赖 |
-| **双通道更新** | 每日 17:00 自动定时更新，支持管理员在聊天端发送 `/st_update` 手动触发更新 |
+| **双通道更新** | 每日 17:00 自动定时更新，支持管理员在聊天端发送 `/st_update` 手动触发 |
 | **直接发送模式** | 内部 LLM 加工后直发聊天，支持人格与表达风格注入（默认开启） |
-| **官方中文输出** | 48,854 条中英对照字典，术语与技能描述对齐官方译名 |
-| **表驱动查询** | 基于统一队伍-槽位表（`team_table.json`）按交集抽取区块，减少 token 消耗 |
+| **官方中文输出** | 4.8 万余条中英对照字典，术语与技能描述对齐官方译名 |
+| **模块化选段** | 按问题意图只提供相关模块给 LLM，资料不截断 |
+| **表驱动查询** | 基于统一队伍-槽位表（`team_table.json`）按成员交集抽取区块，降低 token 消耗 |
 | **分组与详略策略** | 同区块多队伍合并展示；问询角色详述，其余成员作为队友并集简列 |
 | **纹章网格对齐** | 基于绝对列索引解析，精确对齐 70/80/90 级纹章词条 |
-| **预设码支持** | 内置 60 组队伍预设码，用户明确索取时按需附加 |
 | **权限控制** | 支持群聊/私聊的白名单与黑名单模式 |
 | **零第三方依赖** | 纯 Python 标准库实现 |
 
@@ -47,21 +46,16 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 ### 数据初始化（必须）
 
-数据文件（离线攻略 `data/offline/`、字典 `data/dict.json` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。
+数据文件（字典 `data/dict.json`、离线攻略 `data/offline/` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。
 
-**最简方式：双击插件目录下的 `update_dictionary.bat`**（自动使用 MaiBot 根目录 `.venv` 的 Python，
-自动检测本地 ss-data 克隆（亦兼容旧版 StellaSoraData）：有则增量更新，无则 remote 模式直拉 GitHub，
-首次运行时自动从零构建字典，最后运行一致性测试）。
+**最简方式：双击插件目录下的 `update_dictionary.bat`**（自动使用 MaiBot 根目录 `.venv` 的 Python，自动完成字典构建与离线数据同步，详见下方「数据维护」）。
 
 命令行方式（在插件目录下，用 MaiBot 根目录 `.venv` 的 Python 执行）：
 
 ```bash
 # Windows（MaiBot 根目录的 .venv 含 maibot_sdk，系统 python 通常没有）
-..\..\.venv\Scripts\python.exe tools/sync_data.py --all
 ..\..\.venv\Scripts\python.exe tools/update_dict.py --mode remote
-
-# 无法使用代理时加 --proxy "" 强制直连
-# ..\..\.venv\Scripts\python.exe tools/update_dict.py --mode remote --proxy ""
+..\..\.venv\Scripts\python.exe tools/sync_data.py --all
 ```
 
 初始化完成后重启 MaiBot，插件即可离线运行。
@@ -72,8 +66,8 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 
 ```toml
 [plugin]
-# 升级到 1.1.1 后直发成品缓存 key 变更自动失效；若 config.toml 中钉死旧版本号，请手动改为 1.1.1 以立即失效旧缓存（或等待 24h TTL 自然过期）
-config_version = "1.1.1"
+# 配置版本。变更会使直发成品缓存 key 变化（旧答案自动失效）；若 config.toml 钉死旧版本号，请手动同步以免命中旧缓存
+config_version = "1.2.0"
 
 [access_control]
 # 鉴权模式：
@@ -94,9 +88,6 @@ whitelist = []
 blacklist = []
 
 [query]
-# 工具返回文本最大长度（字符），超出按行边界截断并标注，防止撑爆 LLM 上下文；
-# how 路径含元素队 infodoc 全文，完整攻略需较大预算；预设码区块不会被截断
-default_max_length = 40000
 # 直接发送模式：插件内部用 LLM 加工攻略成品后直接发送到聊天，工具只向 planner 返回"已发送"
 # 关闭（false）则退回旧行为：攻略原文交给 planner 翻译（回复质量取决于 planner 转述）
 direct_send = true
@@ -161,72 +152,59 @@ whitelist = ["你的群号"]
 > **80级纹章（圆形）**：支援技能等级 +3 / 风系穿透 110 / 技能伤害 20%
 > **90级纹章（六边形）**：花海·侵蚀 +3 / 全能领导 +3 / 自我提升 +3
 
-## 攻略与预设码数据维护
+## 数据维护
 
-插件采用**本地离线优先**持久化架构，平时查询完全无需联网。数据更新提供自动化与手动模式：
+插件采用**本地离线优先**架构，平时查询无需联网。三类数据及其更新方式：
 
-### 1. 每日定时自动更新
-- 插件后台守护协程在每日 **17:00** 自动静默拉取最新攻略与预设码；
-- 同步成功后自动原子覆写本地持久化数据，并清除直发成品缓存；
-- 如遇网络波动自动保留本地完好数据降级，不影响日常查询服务。
+| 数据 | 生成脚本 | 内容 |
+|------|---------|------|
+| 字典 `data/dict.json` + `names.json` | `tools/update_dict.py`（`update_dictionary.bat` 自动调用） | 官方中英对照译名（4.8 万余条） |
+| 离线攻略/预设码 `data/offline/` | `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 |
+| 更新报告 `data/_update_report.json` | 上述脚本产出 | 新增/更新/保留条目统计 |
 
-### 2. 聊天端指令手动更新
-- 管理员可在配置了白名单的聊天中发送：
-  ```
-  /st_update
-  ```
-  （或输入包含 `st_update` 的指令）
-- 插件验证白名单权限后异步执行全量数据拉取，同时重建统一队伍-槽位表 `team_table.json`，
-  完成后向聊天流反馈更新报告并刷新直发缓存与表运行时缓存。
+### 1. 一键初始化 / 更新
 
-### 3. 命令行独立同步脚本
-在服务器终端或本地维护时，可直接运行 `tools/sync_data.py`：
+双击插件目录下的 `update_dictionary.bat`：
+
+- 自动使用 MaiBot 根目录 `.venv` 的 Python（`maibot_sdk` 只在其内）；
+- 自动检测本地 ss-data 克隆（亦兼容旧 StellaSoraData 布局）：有则 `git pull` 增量更新 + local 模式，无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
+- 随后执行 `sync_data.py --all` 全量同步离线数据，并运行一致性测试。
+
+代理：默认 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；亦可用 `HTTPS_PROXY` 环境变量。
+
+### 2. 每日定时自动更新
+
+插件后台协程每日 **17:00** 静默拉取全量离线数据，成功后原子覆写本地数据并清除直发成品缓存；网络异常时保留本地数据降级，不影响查询。
+
+### 3. 聊天端手动更新
+
+管理员在聊天中发送 `/st_update`，插件鉴权后异步执行全量同步，并重建统一队伍-槽位表 `team_table.json`。
+
+### 4. 命令行独立同步
 
 ```bash
-# 全量同步所有元素攻略、索引与预设码
+# 全量同步（元素 infodoc + 索引 + 预设码 + ss-data 数据集 + 榜单数据）
 python tools/sync_data.py --all
 
-# 仅同步指定元素（如火队 ignis / 水队 aqua / 地队 terra 等）
+# 仅同步单项（元素名 / index / presets / character / disc / gacha / raid / blitz / duel / meta / blitz_season）
 python tools/sync_data.py --element ignis
 
-# 代理控制：默认使用 http://127.0.0.1:7890；
-# 优先级：--proxy 参数 > 环境变量 HTTPS_PROXY/HTTP_PROXY > 默认代理
-python tools/sync_data.py --all --proxy http://127.0.0.1:7890  # 指定代理
-python tools/sync_data.py --all --proxy ""                     # 强制直连
-```
-
-## 字典更新
-
-> - **本地仓库模式**（`update_dictionary.bat` / `--mode local`）：要求本机已有 ss-data 克隆（旧版 StellaSoraData 本地克隆仍可用，--source 兼容），每次更新只拉取**增量**变更（通常仅几 MB）；但若你还没有本地克隆，首次 `git clone` 会拉取**完整仓库**，请留意流量。
-> - **remote 模式**（`--mode remote`）：不会克隆完整仓库，仅下载 `EN/language` 与 `CN/language` 两个语言目录（约 10 MB）。
-
-游戏版本更新后（新角色/新技能），更新字典：
-
-- **一键更新**：双击插件目录下的 `update_dictionary.bat`
-  （自动使用 MaiBot 根目录 `.venv` 的 Python；自动检测本地 ss-data 克隆（旧版 StellaSoraData 本地克隆仍可用）：有则 `git pull` 增量更新 + 本地模式，
-  无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
-  最后运行字典一致性测试 `test_all.py` A-D 节。
-  代理控制：默认走 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；也可通过 `HTTPS_PROXY` 环境变量指定其他代理）
-- **手动更新**：
-
-```bash
-# 克隆/拉取 ss-data（旧版 StellaSoraData 本地克隆仍可用）
-git -C /path/to/ss-data pull --ff-only
+# 字典更新（local 需 --source 指向 ss-data 克隆；remote 仅下载语言目录）
 python tools/update_dict.py --mode local --source /path/to/ss-data
-```
+python tools/update_dict.py --mode remote
 
-- 更新报告见 `data/_update_report.json`（新增/更新/保留条目统计）
+# 代理控制：优先级 --proxy 参数 > 环境变量 HTTPS_PROXY/HTTP_PROXY > 默认代理
+python tools/sync_data.py --all --proxy ""   # 强制直连
+```
 
 ### 提示词文档
 
-直接发送模式的 LLM 提示词按工具分为两份单一事实源，插件启动时由 `plugin.py` 读取并缓存于
-模块级变量，修改后需**重启插件**才能生效；若文档缺失或读取失败，直发相关查询将返回
-"未找到相关攻略。"并记录 error 日志：
+直发模式的 LLM 提示词为两份单一事实源，`plugin.py` 启动时读取并缓存，修改后需**重启插件**；文档缺失或读取失败时直发查询返回「未找到相关攻略。」并记录 error：
 
-- `docs/prompts_how.md`（`stellasora_how` 工具）：含 `persona_block`/`question`/`material`
-  占位符、内联游戏机制知识与回答规则 1-9
-- `docs/prompts_what.md`（`stellasora_what` 工具）：含 `persona_block`/`question`/`material`
-  占位符，模块化材料说明与【约会】输出规则，禁止编造
+- `docs/prompts_how.md`（`stellasora_how`）：内联游戏机制知识与回答规则
+- `docs/prompts_what.md`（`stellasora_what`）：模块化材料说明与回答规则
+
+> 提示词只约束 LLM 的**输出表达**；是否触发工具由 planner（工具 `description`）决定，材料范围由 `service.py` 路由决定。
 
 ## 关于与致谢
 

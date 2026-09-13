@@ -26,7 +26,7 @@ class DictLookup:
         self._character_names_cache = None  # 别名更新后失效角色名缓存
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
-        """加载精简字典与名字索引并返回主字典（幂等：首次调用解析 8.8MB JSON）。
+        """加载精简字典与名字索引并返回主字典（幂等：首次调用解析字典 JSON）。
 
         返回主字典而非在此后访问 self._main_dict，让类型收窄为已加载形态，
         调用方无需再做 Optional 判定。

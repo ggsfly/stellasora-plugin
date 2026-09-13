@@ -118,7 +118,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.1", description="配置版本")
+    config_version: str = Field(default="1.2.0", description="配置版本")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -148,12 +148,6 @@ class QueryConfig(PluginConfigBase):
     __ui_label__ = "查询设置"
     __ui_icon__ = "search"
     __ui_order__ = 1
-
-    default_max_length: int = Field(
-        default=40000,
-        description="历史遗留字段：文本截断逻辑已移除（资料全量输出，长度控制交由提示词与模块选段）。"
-        "当前仅作为答案相关配置指纹的一部分保留，改动会触发直发成品缓存刷新",
-    )
 
     direct_send: bool = Field(
         default=True,
@@ -326,7 +320,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 答案相关配置指纹基线：加载后的首次空更新不清缓存
         self._answer_cfg_fp = self._answer_relevant_fingerprint()
         self._sync_task = asyncio.create_task(self._schedule_daily_sync())
-        # 后台预热共享服务（字典 8.8MB 解析+替换器编译+表加载）：消除首次查询秒级冷启动
+        # 后台预热共享服务（字典解析 + 替换器编译 + 表加载），消除首次查询冷启动
         self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
         self.ctx.logger.info("星塔旅人插件已加载，缓存目录: %s", self._cache_dir)
 
@@ -349,11 +343,9 @@ class StellaSoraPlugin(MaiBotPlugin):
     ) -> None:
         """配置热重载：黑白名单、overrides 与查询参数即时生效，无需重启。
 
-        答案相关配置指纹去抖：宿主会推送 scope=self 的配置更新（WebUI 保存/
-        轮询均可能触发），其中大量为无实质变化的空更新——若每次都清空答案缓存，
-        刚写入的成品秒被清掉，重复问题重复调用 LLM（实例日志证实）。
-        仅当影响答案的配置字段（aliases/llm_model/inject_persona/
-        default_max_length/config_version）实际变化时才清缓存。
+        答案相关配置指纹去抖：宿主对 scope=self 的配置更新（WebUI 保存/轮询）
+        多数为无实质变化的空更新，若每次都清缓存会清掉刚写入的成品、导致重复
+        问题重复调用 LLM。仅当影响答案的配置字段实际变化时才清缓存。
         """
         self.ctx.logger.info(
             "配置已更新: scope=%s version=%s（黑白名单与自定义覆盖即时生效）", scope, version
@@ -372,8 +364,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         """插件代码指纹（源码/提示词文件最新 mtime 的整秒值）。
 
         纳入直发成品缓存 key：代码或提示词更新后旧答案自动失效，
-        不再依赖人工 bump config_version（实例事故：过滤逻辑修复后
-        config_version 未变，同 key 命中修复前的 10 队旧答案原样重发）。
+        无需人工 bump config_version。
         """
         root = Path(__file__).resolve().parent
         latest = 0.0
@@ -388,9 +379,7 @@ class StellaSoraPlugin(MaiBotPlugin):
     def _answer_relevant_fingerprint(self) -> str:
         """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。
 
-        别名列表元素为 AliasEntry 模型，须先转为纯 dict 才能 JSON 序列化：
-        直接 json.dumps 模型列表会抛 TypeError，导致别名恒不入指纹、别名
-        变更无法使直发成品缓存失效（同 key 命中变更前的旧答案原样重发）。
+        别名列表元素为 AliasEntry 模型，须先转为纯 dict 才能 JSON 序列化。
         """
         c = self.config
         aliases = json.dumps(
@@ -402,7 +391,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             aliases,
             c.query.llm_model,
             str(c.query.inject_persona),
-            str(c.query.default_max_length),
             c.plugin.config_version,
         ))
 
@@ -616,7 +604,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         prompt = prompt_template.format(
             persona_block=persona_block,
             question=question,
-            material=material,  # service 已不再按 max_length 截断，资料全量交由 LLM 加工
+            material=material,  # 资料全量交由 LLM 加工，不截断
         )
         llm_model = (self.config.query.llm_model or "").strip()
 
@@ -780,8 +768,8 @@ class StellaSoraPlugin(MaiBotPlugin):
         # effective_question（用户原话，question 缺失时回退 query）先于 query_what 计算：
         # 供工具内部模块化选段（_detect_what_modules）与下方联合查询检测复用同一原话
         effective_question = (question or "").strip() or query
-        # Fix D：抓取+字典+替换是同步重活（urllib 网络 + 正则 CPU），放入线程池执行，
-        # 避免 runner 事件循环被阻塞（async handler 直接 await 在 runner 循环上）
+        # 抓取/字典/替换为同步重活（urllib 网络 + 正则 CPU），放入线程池，
+        # 避免阻塞 runner 事件循环
         text = await asyncio.to_thread(
             query_what,
             query,
@@ -983,7 +971,7 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     # ===== Command 指令 =====
 
-    @Command("st_update", description="手动触发星塔旅人全量攻略与预设码数据离线更新", pattern=r"^/st_update")
+    @Command("st_update", description="手动触发星塔旅人全量离线数据更新（攻略/预设码/ss-data/榜单）", pattern=r"^/st_update")
     async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
         """手动触发星塔旅人全量攻略与预设码数据离线更新。"""
         if self._denied(**kwargs):

@@ -629,7 +629,7 @@ def run_query_how_section() -> None:
             finally:
                 service.configure_overrides(aliases={})
 
-            # F10 分组渲染（Design X）：mock umbra.json 写入同一 tmp 目录，
+            # F10 分组渲染：mock umbra.json 写入同一 tmp 目录，
             # 同 guide_ref 区块跨行并组——组头编号、区块字段去重、队友并集 rescue、组尾预设码
             (infodocs_dir / "umbra.json").write_text(
                 json.dumps({"data": F10_UMBRA_INFODOC}, ensure_ascii=False), encoding="utf-8"
@@ -944,7 +944,7 @@ async def run_direct_send() -> None:
     check("G14a 无实质变化的配置更新保留缓存（LLM 仍 1 次）",
           len(llm15.calls) == 1 and len(send15.sent) == 3)
 
-    p15._plugin_config_instance.query.default_max_length = 12345  # 答案相关字段实质变化（不在缓存 key 内，证明清的是缓存）
+    p15._plugin_config_instance.query.llm_model = "alternate"  # 答案相关字段实质变化（不在缓存 key 内，证明清的是缓存）
     await p15.on_config_update(scope="query", config_data={}, version="1.2.3")
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
     check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.sent) == 4)
@@ -2447,7 +2447,7 @@ def test_disc_list_concept_route() -> None:
 def test_luming_alias_routes_to_disc() -> None:
     """O13: 鹿鸣别名（overrides.json 底层修正）经真实单例路由到秘纹 214015。"""
     fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    # oracle M5：先归一化别名状态（清空 config 侧别名），消除对 B/D/F 节
+    # M5：先归一化别名状态（清空 config 侧别名），消除对 B/D/F 节
     # 前序状态的隐式依赖——即便前序配置过 custom_aliases，merged 也只剩
     # overrides.json 底层别名，保证后续断言只验证 todo1 修复本身
     service.configure_overrides(aliases={})
