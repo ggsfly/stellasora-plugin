@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 import asyncio
 import json
 import logging
@@ -23,6 +23,15 @@ from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParamType, ToolParameterInfo
 
 MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增长
+
+# 工具 RPC 预算与插件内 LLM 调用预算（毫秒）。
+# 宿主默认工具超时 60s（component_timeout.DEFAULT_COMPONENT_RPC_TIMEOUT_MS），
+# 插件能力 RPC 默认超时 30s（runner rpc_client 默认值）——两者叠加会造成
+# 「慢模型下 LLM 先于工具超时」的静默降级（LLM 异常 → 回传原始资料而非成品）。
+# 故显式声明：工具预算由 @Tool(timeout_ms=...) 经 metadata 上报宿主，
+# 内部 LLM 预算须略小于工具预算，余量留给 LLM 之前的抓取/渲染（更早发生）。
+_TOOL_RPC_TIMEOUT_MS = 90000
+_LLM_RPC_TIMEOUT_MS = 80000
 
 # 让插件可以导入 tools/ 下的模块
 _TOOLS_DIR = Path(__file__).resolve().parent / "tools"
@@ -221,6 +230,16 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     config_model = StellaSoraConfig
 
+    @property
+    def config(self) -> StellaSoraConfig:
+        """强类型配置访问。
+
+        基类属性标注为 PluginConfigBase（SDK 文档注明实际返回强类型配置实例），
+        此处协变收窄为 StellaSoraConfig，使静态检查可直接访问 plugin/query/
+        overrides 等分区字段；纯静态 cast，运行时行为与基类一致。
+        """
+        return cast(StellaSoraConfig, super().config)
+
     def __init__(self) -> None:
         super().__init__()
         self._cache_dir: Path | None = None
@@ -229,21 +248,29 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._sync_task: asyncio.Task[Any] | None = None
         self._preheat_task: asyncio.Task[None] | None = None
         self._answer_cfg_fp: str = ""  # 答案相关配置指纹（on_config_update 去抖）
+        self._overrides_fp: tuple[tuple[str, str], ...] | None = None  # 别名配置指纹（跳过热重装）
 
     # ===== 生命周期 =====
 
-    def _apply_overrides_config(self) -> None:
-        """将 config 中的 [overrides.aliases] 中文别名应用到运行时查词服务层。"""
+    def _apply_overrides_config(self, *, force: bool = False) -> None:
+        """将 config 中的 [overrides.aliases] 中文别名应用到运行时查词服务层。
+
+        指纹短路：别名未变化时直接返回，避免每次工具调用都重建别名 dict 并抢占
+        configure_overrides 的初始化锁。首装（_overrides_fp 为 None）恒应用一次，
+        其后仅在别名实际变化（配置热重载）时重装。
+        """
         try:
-            overrides = getattr(self.config, "overrides", None)
-            if overrides and overrides.aliases:
-                alias_dict = {
-                    entry.alias: entry.official
-                    for entry in overrides.aliases
-                    if entry.alias and entry.official
-                }
-            else:
-                alias_dict = {}
+            fingerprint = tuple(
+                (entry.alias, entry.official) for entry in self.config.overrides.aliases
+            )
+            if not force and self._overrides_fp is not None and fingerprint == self._overrides_fp:
+                return
+            self._overrides_fp = fingerprint
+            alias_dict = {
+                entry.alias: entry.official
+                for entry in self.config.overrides.aliases
+                if entry.alias and entry.official
+            }
             configure_overrides(aliases=alias_dict)
         except Exception as exc:
             self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
@@ -616,6 +643,9 @@ class StellaSoraPlugin(MaiBotPlugin):
             gen_kwargs: dict[str, Any] = {"prompt": prompt}
             if llm_model:
                 gen_kwargs["model"] = llm_model
+            # 内部 LLM 预算须小于工具预算（见模块顶部常量注释），避免慢模型下
+            # LLM 先于工具超时导致静默降级；timeout_ms 由 SDK 绑定为本次 RPC 超时
+            gen_kwargs["timeout_ms"] = _LLM_RPC_TIMEOUT_MS
             llm_result = await self.ctx.llm.generate(**gen_kwargs)
         except Exception as exc:
             self.ctx.logger.exception("直接发送模式 LLM 调用异常")
@@ -729,6 +759,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_what(self, query: str = "", question: str = "", **kwargs):
         if self._denied(**kwargs):
@@ -803,6 +834,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_how(self, query: str = "", question: str = "", presets: bool = False, **kwargs):
         if self._denied(**kwargs):
