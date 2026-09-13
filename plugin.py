@@ -65,16 +65,35 @@ _PROMPT_DOC_CACHE_HOW: Optional[str] = None
 _PROMPT_DOC_CACHE_WHAT: Optional[str] = None
 
 
+def _extract_prompt_body(raw: str) -> str:
+    """从提示词文档中提取代码围栏（``` ... ```）内的提示词正文。
+
+    文档头部/尾部为面向维护者的说明（文件性质、占位符说明、作用边界等），
+    若整体作为 LLM 提示词，模型会产生「读取配置文件」的元认知而答非所问。
+    正文必须围栏隔离：取首个 ``` 与其次 ``` 之间的内容。
+    """
+    fence = "```"
+    start = raw.find(fence)
+    if start < 0:
+        return raw
+    end = raw.find(fence, start + len(fence))
+    if end < 0:
+        return raw
+    return raw[start + len(fence):end].lstrip("\n")
+
+
 def _load_prompt_doc_how() -> Optional[str]:
     """加载 docs/prompts_how.md 直发提示词文档（模块级缓存，单一事实源）。
 
-    提示词文档是直发模式的必需项：缺失或读取失败记录 error 并返回 None
-    （不回退内嵌旧文），由 _direct_send 显式处理失败。
+    返回代码围栏内的提示词正文；文档的维护者说明不进入 LLM 上下文。
+    缺失或读取失败记录 error 并返回 None（不回退内嵌旧文），由 _direct_send 显式处理失败。
     """
     global _PROMPT_DOC_CACHE_HOW
     if _PROMPT_DOC_CACHE_HOW is None:
         try:
-            _PROMPT_DOC_CACHE_HOW = _PROMPT_DOC_PATH_HOW.read_text(encoding="utf-8")
+            _PROMPT_DOC_CACHE_HOW = _extract_prompt_body(
+                _PROMPT_DOC_PATH_HOW.read_text(encoding="utf-8")
+            )
         except Exception as exc:
             logger.error("加载 how 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_HOW, exc)
             _PROMPT_DOC_CACHE_HOW = None
@@ -84,13 +103,15 @@ def _load_prompt_doc_how() -> Optional[str]:
 def _load_prompt_doc_what() -> Optional[str]:
     """加载 docs/prompts_what.md 直发提示词文档（模块级缓存，单一事实源）。
 
-    what 工具专用提示词：模块化材料说明（按模块输出）与【约会】输出规则，
-    并明确禁止编造。缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
+    返回代码围栏内的提示词正文；文档的维护者说明（含「作用边界」）不进入 LLM 上下文。
+    缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
     """
     global _PROMPT_DOC_CACHE_WHAT
     if _PROMPT_DOC_CACHE_WHAT is None:
         try:
-            _PROMPT_DOC_CACHE_WHAT = _PROMPT_DOC_PATH_WHAT.read_text(encoding="utf-8")
+            _PROMPT_DOC_CACHE_WHAT = _extract_prompt_body(
+                _PROMPT_DOC_PATH_WHAT.read_text(encoding="utf-8")
+            )
         except Exception as exc:
             logger.error("加载 what 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_WHAT, exc)
             _PROMPT_DOC_CACHE_WHAT = None

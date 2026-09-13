@@ -1006,6 +1006,19 @@ async def run_direct_send() -> None:
           and "{persona_block}" in loaded_prompt_what
           and "{question}" in loaded_prompt_what
           and "{material}" in loaded_prompt_what)
+    # G19c 加载结果只含围栏内正文，围栏外的维护者元说明（文件性质/占位符说明/
+    # 作用边界/重启生效）不得进入 LLM 上下文（否则模型产生"读取配置文件"的
+    # 元认知而答非所问——hotfix 回归）
+    check("G19c 加载结果排除围栏外元说明（what/how）",
+          "作用边界" not in loaded_prompt_what
+          and "占位符说明" not in loaded_prompt_what
+          and "需**重启插件**才能生效" not in loaded_prompt_what
+          and "{persona_block}" in loaded_prompt_what
+          and "{question}" in loaded_prompt_what
+          and "{material}" in loaded_prompt_what
+          and "占位符说明" not in loaded_prompt
+          and "需**重启插件**才能生效" not in loaded_prompt
+          and "不要使用任何 markdown 格式" in loaded_prompt)
 
     # G20-G21 失败路径：monkeypatch how 提示词文档路径为不存在并清空模块缓存，
     # 按插件加载同一路径重新赋值类属性 → _direct_send 返回未找到 + 双路 error 日志
@@ -1351,17 +1364,19 @@ def run_tool_query_desc() -> None:
     check("J4 what.query 描述覆盖实体与概念词",
           "角色" in what_desc and "秘纹" in what_desc and "首领" in what_desc,
           what_desc)
-    # J5 自省修复：主观「不回答」必须在 planner 层（工具 description）控制，
-    # 且 prompts_what 只承载输出约束——二者职责不可混（见 F:\stellasora-ssdata-notes.md 第 8 节）
+    # J5 自省修复：主观「不触发/不回答」由工具 description（planner 系统提示）承担，
+    # 提示词只承载输出约束；且维护者元说明（文件性质/作用边界/重启生效）不得进入
+    # LLM 上下文——否则模型产生「读取配置文件」的元认知而答非所问（hotfix 回归）。
     what_tool_desc = tool_descs.get("stellasora_what", "")
     what_prompt = plug._load_prompt_doc_what() or ""
-    check("J5 主观不触发归 planner（工具描述）/ 输出约束归 prompt",
+    check("J5 主观判定归 planner 描述 / 输出约束归 prompt / 元说明不入上下文",
           "调用边界" in what_tool_desc and "不要调用本工具" in what_tool_desc
           and "stellasora_how" in what_tool_desc
-          and "作用边界" in what_prompt
-          and "只约束 LLM 的输出表达" in what_prompt
-          and "无法控制" in what_prompt
-          and "不新增主观评价" in what_prompt,
+          and "不新增主观评价" in what_prompt
+          and "作用边界" not in what_prompt
+          and "只约束 LLM 的输出表达" not in what_prompt
+          and "无法控制" not in what_prompt
+          and "单一事实源" not in what_prompt,
           f"tool_desc_has_boundary={'调用边界' in what_tool_desc}")
 
 
