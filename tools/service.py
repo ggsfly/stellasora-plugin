@@ -376,6 +376,18 @@ def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") 
         elif route == "disc":
             text, _ = _build_disc_list_material(st_fetcher, lookup)
             return text
+        elif route == "raid":
+            resolved = _resolve_current_raid(st_fetcher)
+            if not resolved:
+                # 指针/数据缺失：文案含「未在字典中找到」以复用 handle_what 的未找到短路
+                return "[终焉绝响] 当期赛季数据缺失，未在字典中找到。"
+            boss_id, season_num, opened = resolved
+            modules = _detect_what_modules(question, "monster")
+            text, ok = _build_monster_material(st_fetcher, boss_id, lookup, modules=modules)
+            if ok and text:
+                tag = "当期" if opened else "下期"
+                return f"【{tag} · 终焉绝响 · 第{season_num}赛季】\n{text}"
+            return text
 
     # 3. 查词与首领怪物路由
     res = lookup.lookup_term(term)
@@ -1935,6 +1947,7 @@ def _route_what_keywords(term: str) -> Optional[str]:
 
     banner: 卡池 / 池子 / up池 / UP池
     blitz: 联合讨伐 / 当期讨伐 / 讨伐 / boss / blitz（先排除 raid 意图）
+    raid: 终焉绝响 / raid
     disc: 秘纹 / 旋律（严格排除纹章——那是 how 侧词汇）
     其它: None
     """
@@ -1949,6 +1962,9 @@ def _route_what_keywords(term: str) -> Optional[str]:
     if not any(k in lower_term for k in ("终焉", "绝响", "raid")):
         if any(k in lower_term for k in ("联合讨伐", "当期讨伐", "讨伐", "boss", "blitz")):
             return "blitz"
+    # raid 概念页：blitz 分支排除的「终焉/绝响/raid」正是终焉绝响触发词，二者互补互斥
+    if any(k in lower_term for k in ("终焉", "绝响", "raid")):
+        return "raid"
     # 3. disc 关键词（注意不得命中 纹章——那是 how 侧词汇）
     if "纹章" in lower_term:
         return None
@@ -2329,6 +2345,15 @@ def _build_monster_material(
                 if inner_cn != inner:
                     display_cn = inner_cn
                     display_en = en_name
+        elif source == "raid" and en_name.startswith("["):
+            # raid 名结构为「[首领名] 关卡名」：括号内才是首领本体（MonsterManual 收录全名），
+            # 与 duel（剥前缀取外层）相反，取括号内容反查官方中文
+            m = re.match(r"^\[([^\]]+)\]", en_name)
+            if m:
+                inner_cn = _cn_by_en(lookup, m.group(1))
+                if inner_cn != m.group(1):
+                    display_cn = inner_cn
+                    display_en = en_name
         if display_en:
             lines.append(f"【首领】{display_cn}（{display_en}）")
         else:
@@ -2338,6 +2363,8 @@ def _build_monster_material(
     if m_type:
         if source == "duel":
             m_type = _DUEL_TYPE_CN.get(m_type, m_type)
+        else:
+            m_type = _term_cn(m_type)  # Raid→终焉绝响 / Blitz→联合讨伐 / Melee→近战 / Ranged→远程
         lines.append(f"类型：{m_type}")
 
     weak_to = monster.get("weakTo", [])
@@ -2469,6 +2496,33 @@ def _resolve_current_blitz(st: StelladbFetcher) -> Optional[Tuple[str, dict]]:
     if not isinstance(floors, dict) or not floors:
         return None
     return bb_key, floors
+
+
+def _resolve_current_raid(st: StelladbFetcher) -> Optional[Tuple[str, int, bool]]:
+    """定位当期（或未实装的下期）终焉绝响 boss。
+
+    指针链：season.json 的 FE_SEASON（如 'fe7'）→ 季号 N → raid 数据集内
+    season==N 的唯一条目；实装与否以 ssleaderboard meta 键表判定（榜单随实装
+    产生，'fe{N}' 键存在 = 已实装）。任一环节数据缺失返回 None——不猜、不兜底。
+    返回 (boss_id, season_num, opened)。
+    """
+    if not st:
+        return None
+    season = st.fetch_leaderboard_season()
+    fe_key = str((season or {}).get("FE_SEASON") or "")
+    if not fe_key:
+        return None
+    meta = st.fetch_leaderboard_meta()
+    if not meta or not isinstance(meta, dict):
+        return None
+    season_num = int(fe_key[2:])  # 与 _resolve_current_blitz 对 'bbNN' 的同款解析约定
+    raid = st.fetch_ssdata_dataset("raid")
+    if not raid or not isinstance(raid, dict):
+        return None
+    for rid, entry in raid.items():
+        if isinstance(entry, dict) and entry.get("season") == season_num:
+            return str(rid), season_num, fe_key in meta
+    return None
 
 
 def _build_blitz_material(

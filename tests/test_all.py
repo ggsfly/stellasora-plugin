@@ -2875,6 +2875,71 @@ def test_signature_disc_dynamic() -> None:
     check("O27 专属秘纹动态反查（Signature 命中/适配非专属不误判/无专属省略行）", p1 and p2 and p3)
 
 
+def test_raid_concept_page() -> None:
+    """O28: 终焉绝响当期概念页（路由互斥 / 指针链解析 / 赛季头 / 官方中文名反查 / 类型翻译 / 无兜底）。"""
+    lookup = DictLookup(DATA_DIR)
+
+    # 1. 路由互斥
+    r1 = service._route_what_keywords("终焉绝响boss机制") == "raid"
+    r2 = service._route_what_keywords("联合讨伐") == "blitz"
+    r3 = service._route_what_keywords("raid 弱点") == "raid"
+    r4 = service._route_what_keywords("终焉绝响") == "raid"
+    check("O28 路由互斥（终焉绝响/raid 与联合讨伐互斥）", r1 and r2 and r3 and r4)
+
+    # 2-4. mock fake fetcher 端到端
+    fake_st = unittest.mock.Mock()
+    raid_dataset = {
+        "51007": {
+            "name": "[Exalted Puppets: Coppelius & Olympia] Eye of Ashes",
+            "season": 7,
+            "type": "Raid",
+            "weakTo": ["Ventus", "Umbra"],
+            "resistTo": "Ignis",
+            "mechanic": [{"name": "Cycle of Creation", "desc": "Cycle of Creation"}],
+            "diff": [],
+        }
+    }
+    fake_st.fetch_ssdata_dataset.side_effect = lambda name: raid_dataset if name == "raid" else {}
+    fake_st.fetch_leaderboard_season.return_value = {"FE_SEASON": "fe7", "BB_SEASON": "bb11"}
+    fake_st.fetch_leaderboard_meta.return_value = {"bb11": {}}  # WITHOUT fe7 key -> opened False
+
+    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
+        out_next = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
+
+    # 2. 下期 header + 弱点 + 类型 + 机制 + 无单分伤害
+    p2_hdr = out_next.startswith("【下期 · 终焉绝响 · 第7赛季】")
+    p2_weak = "弱点：风、暗" in out_next
+    p2_type = "类型：终焉绝响" in out_next
+    p2_mech = "【首领机制】" in out_next
+    p2_no_dps = "单分伤害" not in out_next
+    check("O28b 下期终焉绝响机制与类型概览渲染（无单分伤害）",
+          p2_hdr and p2_weak and p2_type and p2_mech and p2_no_dps)
+
+    # 3. 括号首领本体反查官方中文
+    p3_name = "崇高傀儡·科佩里乌斯与奥林匹娅" in out_next
+    check("O28c 括号内首领本体反查官方中文名", p3_name)
+
+    # 4. meta WITH fe7 key -> opened True (当期)
+    fake_st.fetch_leaderboard_meta.return_value = {"fe7": {}, "bb11": {}}
+    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
+        out_cur = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
+    check("O28d meta 命中 fe7 实装键渲染当期 header",
+          out_cur.startswith("【当期 · 终焉绝响 · 第7赛季】"))
+
+    # 5. season mock 缺失 FE_SEASON -> 未在字典中找到 (no fallback)
+    fake_st.fetch_leaderboard_season.return_value = {"BB_SEASON": "bb11"}
+    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
+        out_missing = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
+    check("O28e FE_SEASON 缺失时返回未在字典中找到（零兜底）",
+          "未在字典中找到" in out_missing)
+
+    # 6. duel regression：前缀剥离反查「猫眼？？？」依然正常生效
+    duel_mon = {"name": "[Cat-stle Siege] Chaton ???", "type": "Duel", "weakTo": ["Aqua"]}
+    fake_st.fetch_ssdata_dataset.side_effect = lambda name: {"9999": duel_mon} if name == "duel" else {}
+    mat_duel, ok_duel = service._build_monster_material(fake_st, "9999", lookup)
+    check("O28f duel 前缀剥离反查官方中文名回归保持", ok_duel and "猫眼？？？" in mat_duel)
+
+
 def run_section_o() -> None:
     """节 O：ss-data 数据源与 what 五类扩展。"""
     test_ssdata_dataset_offline_read()
@@ -2903,6 +2968,7 @@ def run_section_o() -> None:
     test_blitz_module_select()
     test_source_cn()
     test_signature_disc_dynamic()
+    test_raid_concept_page()
 
 
 # ===== 汇总入口 =====
