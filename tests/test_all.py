@@ -2568,9 +2568,13 @@ def test_character_module_material() -> None:
     lookup = DictLookup(DATA_DIR)
     st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
 
-    # 1. 技能模块：含【普攻】，不含【约会分支】
+    # 1. 技能模块：含【普攻】，不含【约会分支】；
+    #    CV 字典反译回归（hotfix）：cnCv 存罗马音 Si Bai，须渲染为字典中文「四白」
     mat_s, ok_s = service._build_character_material(st_fix, "103", lookup, modules={"overview", "skills"})
-    p1_ok = ok_s and "【普攻】" in mat_s and "二重奏" in mat_s and "约会分支" not in mat_s
+    p1_ok = (
+        ok_s and "【普攻】" in mat_s and "二重奏" in mat_s and "约会分支" not in mat_s
+        and "CV：四白" in mat_s and "Si Bai" not in mat_s
+    )
 
     # 2. 天赋模块：含【天赋】与天赋轶闻；lookup_term("Item.103.3") 走 mock，
     #    不依赖真实字典内容保证确定性

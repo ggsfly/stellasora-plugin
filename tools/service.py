@@ -1617,7 +1617,10 @@ def _build_character_material(
             lines.append(f"势力：{_cn_by_en(lookup, force)}")
         cv = char.get("cnCv") or char.get("jpCv", "")
         if cv:
-            lines.append(f"CV：{cv}")
+            # cnCv/jpCv 在 ss-data 中存的是罗马音（全 39 角色皆 ascii），字典里有
+            # 对应 CharacterDes 译名（Si Bai→四白、Liu Wen→刘雯、Karin→花铃——
+            # 花铃的 CV 恰与角色同名，非误命中），故走 _cn_by_en 反译官方中文。
+            lines.append(f"CV：{_cn_by_en(lookup, cv)}")
         birthday = char.get("birthday", "")
         if birthday:
             lines.append(f"生日：{birthday}")
