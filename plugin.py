@@ -772,7 +772,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="question",
                 param_type=ToolParamType.STRING,
-                description="用户的原始问题原文（如'夏花的完整资料'），用于生成贴合问题的回答；无法提取时可不传",
+                description="用户的原始问题原文（如'XX的完整资料'），用于生成贴合问题的回答；无法提取时可不传",
                 required=False,
             ),
             ToolParameterInfo(
@@ -831,7 +831,7 @@ class StellaSoraPlugin(MaiBotPlugin):
     @Tool(
         "stellasora_how",
         description="查询星塔旅人游戏中配队、纹章搭配、秘纹搭配、技能升级优先度等操作指南。"
-                    "输入：query 传角色名（可空格分隔多个，如'小禾 格芮'）；纯属性泛查直接传属性词（如'风队'）。"
+                    "输入：query 传角色名（可空格分隔多个，如'XX YY'）；纯属性泛查直接传属性词（如'风队'）。"
                     "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
                     "关闭直接发送时返回攻略正文，用 reply 组织回复。"
                     "适用：用户问'XX怎么配队''XX纹章怎么选''XX秘纹推荐''XX先升级什么技能'，"
@@ -843,13 +843,13 @@ class StellaSoraPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色名，可空格分隔多个（如'小禾 格芮'）；question 缺失时作为兜底归一（中/英均可）",
+                description="角色名，可空格分隔多个（如'XX YY'）；question 缺失时作为兜底归一（中/英均可）",
                 required=True,
             ),
             ToolParameterInfo(
                 name="question",
                 param_type=ToolParamType.STRING,
-                description="用户的原始问题原文，逐字传入（如'小禾 格芮攻略'）——联合查询识别与首个角色排序依赖原文，不可改写或省略",
+                description="用户的原始问题原文，逐字传入（如'XX YY攻略'）——联合查询识别与首个角色排序依赖原文，不可改写或省略",
                 required=True,
             ),
             ToolParameterInfo(
