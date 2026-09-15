@@ -4,6 +4,11 @@ rem  Stella Sora dictionary updater (CN-EN)
 rem  - If a local ss-data git clone exists: git pull + local mode
 rem  - Otherwise: sparse-clone language dirs from GitHub (remote mode)
 rem  - Python: uses MaiBot root .venv (../../.venv, where maibot_sdk lives)
+rem  - Data: written to MaiBot host-granted dirs
+rem      dict/names  -> <MaiBot>\data\plugins\ggsfly.stellasora-plugin\
+rem      offline     -> <MaiBot>\data\plugins\ggsfly.stellasora-plugin\offline\
+rem      cache       -> <MaiBot>\temp\plugins\ggsfly.stellasora-plugin\cache\
+rem    Plugin source dir stays clean; no runtime writes land there.
 rem  Requires: MaiBot root .venv; git on PATH (remote mode only)
 rem
 rem  Usage: update_dictionary.bat [path\to\ss-data]
@@ -22,17 +27,24 @@ echo  Stella Sora CN-EN dictionary update
 echo ==============================================
 echo.
 
-rem ---- resolve MaiBot venv python ------------------------------
+rem ---- resolve MaiBot root & host data/cache dirs ---------------------
 rem bat 位于 plugins\<plugin>\ 下，MaiBot 根目录即上两级；
 rem 插件必须用宿主 .venv 运行（maibot_sdk 等依赖只在其中）。
-set "PY=%~dp0..\..\.venv\Scripts\python.exe"
-if not exist "%PY%" (
-    echo [error] MaiBot venv python not found: %PY%
-    echo         请确认插件位于 MaiBot\plugins\ 目录下，且已完成 MaiBot 安装
+set "MAIBOT_ROOT=%~dp0..\.."
+if not exist "%MAIBOT_ROOT%\.venv\Scripts\python.exe" (
+    echo [error] MaiBot root not found: %MAIBOT_ROOT%
+    echo         请确认插件位于 MaiBot\plugins\ 目录下
     pause
     exit /b 1
 )
+set "PY=%MAIBOT_ROOT%\.venv\Scripts\python.exe"
+set "DATA_PLUGIN=%MAIBOT_ROOT%\data\plugins\ggsfly.stellasora-plugin"
+set "CACHE_PLUGIN=%MAIBOT_ROOT%\temp\plugins\ggsfly.stellasora-plugin\cache"
+if not exist "%DATA_PLUGIN%" mkdir "%DATA_PLUGIN%"
+if not exist "%CACHE_PLUGIN%" mkdir "%CACHE_PLUGIN%"
 echo [info] using venv python: %PY%
+echo [info] data dir: %DATA_PLUGIN%
+echo [info] cache dir: %CACHE_PLUGIN%
 echo.
 
 rem ---- resolve proxy argument --------------------------------
@@ -63,18 +75,18 @@ if exist "%LOCAL_DATA%\EN\language\en_US" (
         if errorlevel 1 echo [warn] git pull failed, using local data as-is
         echo.
         echo [2/3] incremental dictionary update from local clone ...
-        "%PY%" tools\update_dict.py --mode local --source "%LOCAL_DATA%"
+        "%PY%" tools\update_dict.py --mode local --source "%LOCAL_DATA%" --output "%DATA_PLUGIN%"
         goto sync_offline
     )
 )
 
 echo [1/3] local clone not found, fetching from GitHub (remote mode) ...
-"%PY%" tools\update_dict.py --mode remote %PROXY_ARGS%
+"%PY%" tools\update_dict.py --mode remote --output "%DATA_PLUGIN%" %PROXY_ARGS%
 
 :sync_offline
 echo.
 echo [3/3] syncing offline guides / presets / ss-data / leaderboard ...
-"%PY%" tools\sync_data.py --all %PROXY_ARGS%
+"%PY%" tools\sync_data.py --all --offline-dir "%DATA_PLUGIN%\offline" --cache-dir "%CACHE_PLUGIN%" %PROXY_ARGS%
 
 :runtest
 echo.

@@ -42,7 +42,7 @@ from build_dict import (  # noqa: E402
     write_json,
 )
 
-from net_common import resolve_proxy as _resolve_proxy
+from net_common import host_data_dir, resolve_proxy as _resolve_proxy
 
 REPO_URL = "https://github.com/AutumnVN/ss-data.git"
 
@@ -138,8 +138,8 @@ def main() -> int:
     parser.add_argument("--source", default=None,
                         help="ss-data 根目录（仅 local 模式需要；仍兼容旧 StellaSoraData 布局）")
     parser.add_argument("--output",
-                        default=str(Path(__file__).resolve().parents[1] / "data"),
-                        help="字典输出目录（含 dict.json / names.json）")
+                        default=str(host_data_dir()),
+                        help="字典输出目录（含 dict.json / names.json，默认 <宿主>/data/plugins/ggsfly.stellasora-plugin）")
     parser.add_argument(
         "--proxy",
         type=str,
@@ -191,8 +191,8 @@ def main() -> int:
     )
     stale = sorted(set(old_dict) - set(new_dict))
 
-    # 3. 应用人工修正层（overrides.json）后写主表 + 重建名字索引 + 写报告
-    overrides = load_overrides(output_dir)
+    # 3. 应用人工修正层（overrides.json，位置固定于插件根目录）后写主表 + 重建名字索引 + 写报告
+    overrides = load_overrides(Path(__file__).resolve().parents[1])
     merged = apply_entry_overrides(merged, overrides["entries"])
     merged = apply_replacement_overrides(merged, overrides["replacements"])
     name_index = build_name_index(merged)

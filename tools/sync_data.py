@@ -29,11 +29,13 @@ if __package__:
     from .dict_lookup import DictLookup
     from .fetcher_google_doc import GoogleDocFetcher
     from .fetcher_stelladb import StelladbFetcher, _atomic_write, _read_offline_file
+    from .net_common import host_cache_dir, host_data_dir
     from .team_table import FIXED_ELEMENTS, build_team_table
 else:
     from dict_lookup import DictLookup
     from fetcher_google_doc import GoogleDocFetcher
     from fetcher_stelladb import StelladbFetcher, _atomic_write, _read_offline_file
+    from net_common import host_cache_dir, host_data_dir
     from team_table import FIXED_ELEMENTS, build_team_table
 
 logger = logging.getLogger("stellasora.sync_data")
@@ -51,8 +53,9 @@ LB_SETS = ["meta", "blitz_season"]
 # 全量同步项（--all 顺序）
 SYNC_ALL_ITEMS = list(ELEMENTS) + ["index", "presets"] + SS_DATA_SETS + LB_SETS
 
-_DEFAULT_OFFLINE_DIR = Path(__file__).resolve().parents[1] / "data" / "offline"
-_DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / ".cache"
+_DEFAULT_DATA_DIR = host_data_dir()
+_DEFAULT_OFFLINE_DIR = _DEFAULT_DATA_DIR / "offline"
+_DEFAULT_CACHE_DIR = host_cache_dir()
 
 
 def _resolve_sync_item(
@@ -125,8 +128,8 @@ def sync_offline_data(
         element: 单项名（见 SYNC_ALL_ITEMS：元素名 / index / presets /
                  ss-data 数据集 / 榜单数据集）
         sync_all: 是否全量同步 SYNC_ALL_ITEMS 全部条目
-        cache_dir: 网络缓存目录（默认 data/.cache）
-        offline_dir: 离线数据存储目录（默认 data/offline）
+        cache_dir: 网络缓存目录（默认 <宿主>/temp/plugins/ggsfly.stellasora-plugin/cache）
+        offline_dir: 离线数据存储目录（默认 <宿主>/data/plugins/ggsfly.stellasora-plugin/offline）
         proxy: 代理地址，如 "http://127.0.0.1:7890"。
                传入空字符串 "" 表示强制直连；
                传入 None 则自动读取环境变量 HTTPS_PROXY/HTTP_PROXY，否则使用默认代理。
@@ -335,13 +338,13 @@ def main() -> int:
         "--offline-dir",
         type=str,
         default=None,
-        help="自定义离线数据存储根目录 (默认 data/offline)",
+        help="自定义离线数据存储根目录 (默认 <宿主>/data/plugins/ggsfly.stellasora-plugin/offline)",
     )
     parser.add_argument(
         "--cache-dir",
         type=str,
         default=None,
-        help="自定义网络缓存目录 (默认 data/.cache)",
+        help="自定义网络缓存目录 (默认 <宿主>/temp/plugins/ggsfly.stellasora-plugin/cache)",
     )
 
     args = parser.parse_args()

@@ -2,7 +2,18 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [1.2.0] - 2026-09-13
+## [1.2.1] - 2026-09-15
+
+### 权限收紧
+
+- **`/st_update` 升级为操作员级别命令**：`@Command` 声明 `permission="operator"`，由宿主（MaiBot 1.2.0+）统一鉴权。未在宿主 `bot_config.toml` 的 `[plugin].permission` 操作员列表（或命令级放行规则）中的用户无法触发全量同步落盘；插件内黑白名单仍作为聊天范围约束叠加生效。
+
+### 数据目录迁移（宿主授权目录）
+
+- **运行时数据彻底迁出插件源码目录**：字典（dict/names）、离线攻略 `offline/`、更新报告全部写入宿主分配的 `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/`，网络缓存与直发成品缓存写入 `<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/`，插件安装目录不再产生任何持久化写入，避免插件更新时的 git/权限冲突。
+- **删除插件源码内 `data/` 目录**；`overrides.json` 移至插件根目录，所有读取统一指向根目录与宿主目录，**不做任何旧路径回退**。
+- `tools/sync_data.py` / `tools/update_dict.py` / `tools/build_dict.py` 默认输出与 `update_dictionary.bat` 全部对齐宿主持久目录。
+- **依赖版本声明**：`sdk.min_version` 保持 `2.8.1`；`host_application.min_version` 提高至 `1.2.0`（操作员命令统一鉴权自此版本支持）。
 
 > 版本跨度为 1.1.0 → 1.2.0：本次将原 1.1.x 开发分支的全部变更合并为 1.2.0 发布。
 

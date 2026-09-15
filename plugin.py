@@ -55,6 +55,7 @@ from service import (  # noqa: E402
     query_what,
     reload_team_table,
 )
+from service import set_data_dir as service_set_data_dir  # noqa: E402
 from sync_data import sync_offline_data  # noqa: E402
 
 logger = logging.getLogger("stellasora.plugin")
@@ -260,6 +261,8 @@ class StellaSoraPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._cache_dir: Path | None = None
+        self._data_dir: Path | None = None
+        self._net_cache_dir: Path | None = None
         self._answer_cache: CacheManager | None = None
         self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
         self._sync_task: asyncio.Task[Any] | None = None
@@ -318,7 +321,14 @@ class StellaSoraPlugin(MaiBotPlugin):
                 await asyncio.sleep(delay)
                 try:
                     self.ctx.logger.info("开始执行每日 17:00 离线数据全量定时同步...")
-                    await asyncio.to_thread(sync_offline_data, sync_all=True)
+                    offline_dir = Path(self.ctx.paths.data_dir) / "offline"
+                    cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+                    await asyncio.to_thread(
+                        sync_offline_data,
+                        sync_all=True,
+                        offline_dir=offline_dir,
+                        cache_dir=cache_dir,
+                    )
                     # 表缓存失效接线：定时同步产出新统一表后立即失效表缓存
                     reload_team_table()
                     # 清空直发成品缓存（磁盘 answers 与内存）
@@ -332,20 +342,25 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.info("每日定时同步后台任务已取消并优雅退出")
 
     async def on_load(self) -> None:
-        """插件加载：准备运行时缓存目录并同步 overrides 配置，启动每日 17:00 定时同步任务。
+        """插件加载：配置数据/缓存目录、同步 overrides 配置，启动每日 17:00 定时同步任务。
 
-        字典缓存放 runtime_dir（非持久，可随时重建）；
-        字典本体在插件包内 data/（只读）。
+        持久数据（dict/names/offline）读宿主分配的 ctx.paths.data_dir，
+        网络缓存与直发成品缓存写 ctx.paths.runtime_dir（非持久，可随时重建）。
         """
+        self._data_dir = Path(self.ctx.paths.data_dir)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._net_cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+        self._net_cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        service_set_data_dir(self._data_dir, self._net_cache_dir)
         self._apply_overrides_config()
         # 答案相关配置指纹基线：加载后的首次空更新不清缓存
         self._answer_cfg_fp = self._answer_relevant_fingerprint()
         self._sync_task = asyncio.create_task(self._schedule_daily_sync())
         # 后台预热共享服务（字典解析 + 替换器编译 + 表加载），消除首次查询冷启动
         self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
-        self.ctx.logger.info("星塔旅人插件已加载，缓存目录: %s", self._cache_dir)
+        self.ctx.logger.info("星塔旅人插件已加载，数据目录: %s", self._data_dir)
 
     async def on_unload(self) -> None:
         """插件卸载：取消每日定时同步任务并清空运行时缓存引用（文件留给磁盘回收）。"""
@@ -424,6 +439,13 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
             self._cache_dir.mkdir(parents=True, exist_ok=True)
         return self._cache_dir
+
+    def _net_cache_dir_ready(self) -> Path:
+        """网络抓取缓存目录（runtime_dir/cache，可随时重建）。"""
+        if self._net_cache_dir is None:
+            self._net_cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+            self._net_cache_dir.mkdir(parents=True, exist_ok=True)
+        return self._net_cache_dir
 
     def _get_answer_cache(self) -> CacheManager:
         """获取直发成品缓存管理器（懒创建并复用，同步当前 TTL 配置）。
@@ -801,7 +823,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         text = await asyncio.to_thread(
             query_what,
             query,
-            self._cache_dir_ready(),
+            self._net_cache_dir_ready(),
             effective_question,
             as_of,
         )
@@ -1000,9 +1022,14 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     # ===== Command 指令 =====
 
-    @Command("st_update", description="手动触发星塔旅人全量离线数据更新（攻略/预设码/ss-data/榜单）", pattern=r"^/st_update")
+    @Command(
+        "st_update",
+        description="手动触发星塔旅人全量离线数据更新（攻略/预设码/ss-data/榜单）",
+        pattern=r"^/st_update",
+        permission="operator",
+    )
     async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """手动触发星塔旅人全量攻略与预设码数据离线更新。"""
+        """手动触发星塔旅人全量攻略与预设码数据离线更新（仅宿主操作员可触发）。"""
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人更新指令。", 1
 
@@ -1014,7 +1041,14 @@ class StellaSoraPlugin(MaiBotPlugin):
                 self.ctx.logger.warning("发送更新开始提示异常: %s", exc)
 
         try:
-            sync_res = await asyncio.to_thread(sync_offline_data, sync_all=True)
+            offline_dir = Path(self.ctx.paths.data_dir) / "offline"
+            cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+            sync_res = await asyncio.to_thread(
+                sync_offline_data,
+                sync_all=True,
+                offline_dir=offline_dir,
+                cache_dir=cache_dir,
+            )
             self.ctx.logger.info("离线数据同步完成: %s", sync_res)
         except Exception as exc:
             self.ctx.logger.exception("星塔旅人离线数据同步异常: %s", exc)

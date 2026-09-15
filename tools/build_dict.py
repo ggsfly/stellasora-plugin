@@ -13,7 +13,7 @@
 
 可选参数：
     --source <path>   : 本地 ss-data 根目录（必填；仍兼容旧 StellaSoraData 布局）
-    --output <dir>    : 输出目录（默认 plugins/stellasora/data）
+    --output <dir>    : 输出目录（默认 <宿主>/data/plugins/ggsfly.stellasora-plugin）
     --languages a,b   : 源语言目录列表（默认 en,cn）。JP/KR/TW 不提交进 dict，仅生成到 _archive/
     --archive-dir <d> : JP/KR/TW 归档目录（默认 _archive）
 
@@ -31,6 +31,9 @@ import argparse
 import json
 import re
 import sys
+
+import net_common
+from net_common import host_data_dir
 
 # 游戏文本中的 UI 样式标签（<color=#xxx>...</color>）——纯文本输出无意义，
 # 且会让 term_replace 的 .2 整段模式与 stelladb 清洗后文本错位，构建时剥离
@@ -165,8 +168,9 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def load_overrides(output_dir: Path) -> Dict:
-    """读取 data/overrides.json（人工修正层）；文件不存在返回空配置。
+    """读取插件根目录 overrides.json（人工修正层）；文件不存在返回空配置。
 
+    调用方传插件根目录（Path 解析后 === /overrides.json）。
     结构：
         { "entries": { "<id>": {"cn": "...", ...} },
           "aliases": { "<俗称>": "<id>" },
@@ -267,8 +271,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--output",
-        default=str(Path(__file__).resolve().parents[1] / "data"),
-        help="输出目录（dict.json / names.json）",
+        default=str(host_data_dir()),
+        help="输出目录（dict.json / names.json，默认 <宿主>/data/plugins/ggsfly.stellasora-plugin）",
     )
     parser.add_argument(
         "--languages",
@@ -304,8 +308,8 @@ def main() -> int:
     main_dict = build_dict(en_data, cn_data, languages)
     print(f"[info] aligned dict: {len(main_dict):,} entries")
 
-    # 3. 应用人工修正层（overrides.json）后写主表与名字索引
-    overrides = load_overrides(output_dir)
+    # 3. 应用人工修正层（overrides.json，位置固定于插件根目录）后写主表与名字索引
+    overrides = load_overrides(Path(__file__).resolve().parents[1])
     main_dict = apply_entry_overrides(main_dict, overrides["entries"])
     main_dict = apply_replacement_overrides(main_dict, overrides["replacements"])
     name_index = build_name_index(main_dict)

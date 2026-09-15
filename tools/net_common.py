@@ -5,7 +5,29 @@ import os
 import time
 import urllib.request
 
-_OFFLINE_DIR = Path(__file__).resolve().parent.parent / "data" / "offline"
+_PLUGIN_ID = "ggsfly.stellasora-plugin"
+
+
+def host_root() -> Path:
+    """宿主（MaiBot）根目录。
+
+    以插件目录标准布局推导：tools/net_common.py 的上三级即 MaiBot 根目录。
+    Cookbook 数据一律写宿主 data/temp，不再落入插件源码目录。
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def host_data_dir() -> Path:
+    """宿主分配给插件的持久数据目录（data/plugins/<plugin_id>/）。"""
+    return host_root() / "data" / "plugins" / _PLUGIN_ID
+
+
+def host_cache_dir() -> Path:
+    """宿主分配给插件的网络缓存目录（temp/plugins/<plugin_id>/cache/）。"""
+    return host_root() / "temp" / "plugins" / _PLUGIN_ID / "cache"
+
+
+_OFFLINE_DIR = host_data_dir() / "offline"
 
 # 默认代理地址；可通过环境变量 HTTPS_PROXY / HTTP_PROXY 或构造函数 proxy 参数覆盖
 _DEFAULT_PROXY = "http://127.0.0.1:7890"

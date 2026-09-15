@@ -5,8 +5,9 @@
 插件（plugin.py）与本地实验脚本共用本模块，
 保证独立运行与插件运行行为一致。
 
-缓存目录参数化：插件运行时用 MaiBot 分配的 runtime_dir，
-CLI 运行时用 data/.cache。
+数据目录参数化：插件运行时用 MaiBot 分配的持久数据目录
+（ctx.paths.data_dir，由 on_load 调 set_data_dir 注入），
+CLI 运行时默认解析到宿主 data/plugins/<plugin_id>。
 """
 
 from __future__ import annotations
@@ -22,17 +23,43 @@ import threading
 
 from dict_lookup import DictLookup
 from fetcher_stelladb import StelladbFetcher, _read_offline_file
+from net_common import host_cache_dir, host_data_dir
 from text_clean import strip_game_markup
 import term_replace as _term_replace_module
 
 logger = logging.getLogger("stellasora.service")
 
-# 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地
-_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# 数据目录模块级常量：dict.json/names.json 等数据文件的唯一归属地。
+# 默认解析到宿主分配的持久数据目录（data/plugins/<plugin_id>/），
+# 插件运行时由 on_load 调用 set_data_dir() 显式覆盖为 ctx.paths.data_dir。
+_DATA_DIR = Path(host_data_dir())
 
-# 离线 infodocs 目录常量：how 链路按行读取
-# data/offline/infodocs/{element}.json 的数据定位（不依赖缓存目录）
-_INFODOCS_DIR = Path(__file__).resolve().parents[1] / "data" / "offline" / "infodocs"
+# 离线 infodocs 目录：how 链路按行读取 offline/infodocs/{element}.json
+_INFODOCS_DIR = _DATA_DIR / "offline" / "infodocs"
+
+# 插件根目录（overrides.json 位置，与 _DATA_DIR 无关）
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+# 网络缓存目录默认值（插件运行时由 set_data_dir 覆盖为 ctx.paths.runtime_dir/cache）
+_DEFAULT_CACHE_DIR = Path(host_cache_dir())
+
+
+def set_data_dir(data_dir: Path, cache_dir: Path | None = None) -> None:
+    """切换持久数据根目录与网络缓存目录（插件 on_load 调用，CLI/测试亦可用）。
+
+    重设数据目录后同步清空共享实例与表缓存，保证后续查询立即从新目录读取。
+    """
+    global _DATA_DIR, _INFODOCS_DIR, _DEFAULT_CACHE_DIR, _cached_overrides_aliases
+    resolved = Path(data_dir).resolve()
+    if cache_dir is not None:
+        _DEFAULT_CACHE_DIR = Path(cache_dir).resolve()
+    with _init_lock:
+        if resolved != _DATA_DIR:
+            _DATA_DIR = resolved
+            _INFODOCS_DIR = resolved / "offline" / "infodocs"
+            _instances.clear()
+            _cached_overrides_aliases = None
+        reload_team_table()
 
 # 统一队伍-槽位表缓存（data/offline/presets/team_table.json）
 _team_table_cache: Optional[Dict[str, Any]] = None
@@ -112,10 +139,10 @@ _cached_overrides_aliases: Optional[Dict[str, str]] = None
 
 
 def _get_overrides_json_aliases() -> Dict[str, str]:
-    """读取 data/overrides.json 中的别名映射（人工底层修正层）。"""
+    """读取插件根目录 overrides.json 中的别名映射（人工底层修正层）。"""
     global _cached_overrides_aliases
     if _cached_overrides_aliases is None:
-        path = _DATA_DIR / "overrides.json"
+        path = _PLUGIN_ROOT / "overrides.json"
         if path.is_file():
             try:
                 with path.open("r", encoding="utf-8") as f:
@@ -190,7 +217,7 @@ def _get_services(cache_dir: Path) -> tuple:
             _instances[key] = (
                 lookup,
                 cache_dir,
-                StelladbFetcher(cache_dir),
+                StelladbFetcher(cache_dir, offline_dir=_DATA_DIR / "offline"),
                 replacer,
             )
         else:
@@ -200,7 +227,7 @@ def _get_services(cache_dir: Path) -> tuple:
                 _instances[key] = (
                     lookup,
                     cache_dir,
-                    StelladbFetcher(cache_dir),
+                    StelladbFetcher(cache_dir, offline_dir=_DATA_DIR / "offline"),
                     replacer,
                 )
     return _instances[key]
@@ -209,12 +236,12 @@ def _get_services(cache_dir: Path) -> tuple:
 def _get_lookup() -> DictLookup:
     """只取共享 DictLookup（无 fetcher/缓存目录概念）：查词类纯离线路径专用。
 
-    已初始化时直接返回缓存实例；仅首次调用时以模块 data/.cache 作为 fetcher
-    缓存目录委托 _get_services 构建元组（fetcher 仅攻略查询路径实际使用）。
+    已初始化时直接返回缓存实例；仅首次调用时以模块默认网络缓存目录构建元组
+    （fetcher 仅攻略查询路径实际使用）。
     """
     entry = _instances.get(str(_DATA_DIR))
     if entry is None:
-        _get_services(_DATA_DIR / ".cache")
+        _get_services(_DEFAULT_CACHE_DIR)
         entry = _instances[str(_DATA_DIR)]
     return entry[0]
 

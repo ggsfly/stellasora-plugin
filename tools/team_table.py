@@ -164,8 +164,8 @@ def _make_slots(chars: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
 
 
 def _load_team_config() -> Tuple[Dict[str, Any], Dict[str, list]]:
-    """从 data/overrides.json 中加载队伍人工修正配置与热门队伍优先级清单。"""
-    overrides_path = Path(__file__).resolve().parents[1] / "data" / "overrides.json"
+    """从插件根目录 overrides.json 中加载队伍人工修正配置与热门队伍优先级清单。"""
+    overrides_path = Path(__file__).resolve().parents[1] / "overrides.json"
     team_overrides: Dict[str, Any] = {}
     team_priorities: Dict[str, list] = {}
     if overrides_path.is_file():

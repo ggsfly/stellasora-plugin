@@ -40,7 +40,7 @@ import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
+DATA_DIR = ROOT.parents[1] / "data" / "plugins" / "ggsfly.stellasora-plugin"
 DICT_PATH = DATA_DIR / "dict.json"
 NAMES_PATH = DATA_DIR / "names.json"
 sys.path.insert(0, str(ROOT / "tools"))
@@ -130,13 +130,17 @@ class _ListLogHandler(logging.Handler):
 
 
 def make_plugin(ttl: int = 0, dedup: int = 0):
-    """创建插件实例 + mock ctx（缓存/去重参数默认关闭以便隔离用例）。"""
+    """创建插件实例 + mock ctx（缓存/去重参数默认关闭以便隔离用例）。
+
+    data_dir 指向真实宿主持久数据目录（供读路径查询），runtime_dir 用临时目录
+    隔离直发/网络缓存，避免污染宿主运行时。
+    """
     p = plug.create_plugin()
     cache = Path(tempfile.mkdtemp(prefix="stellasora_test_all_"))
     ctx = PluginContext(
         plugin_id="ggsfly.stellasora-plugin",
         rpc_call=None,
-        paths=PluginPaths(data_dir=cache, runtime_dir=cache),
+        paths=PluginPaths(data_dir=DATA_DIR, runtime_dir=cache),
     )
     p._set_context(ctx)
     p._plugin_config_instance = plug.StellaSoraConfig()
@@ -1394,6 +1398,9 @@ async def run_manual_update() -> None:
     if info is not None:
         check("K3 指令名匹配 st_update", getattr(info, "name", "") == "st_update")
         check("K4 正则 pattern 匹配 ^/st_update", getattr(info, "command_pattern", "") == r"^/st_update")
+        md = getattr(info, "metadata", None) or {}
+        check("K4b 操作员级别权限声明 permission=operator",
+              md.get("permission") == "operator", f"metadata={md}")
 
     # 2. 鉴权失败拦截
     p.config.access_control.mode = "whitelist"
@@ -2971,6 +2978,35 @@ def run_section_o() -> None:
     test_raid_concept_page()
 
 
+def run_data_dir_redirect() -> None:
+    """Q: set_data_dir 重定向——数据目录切换后读取/缓存/实例全部准新目录，不回退源码目录。"""
+    print("--- Q 数据目录重定向 ---")
+    host_dir = DATA_DIR
+    src_data_dir = ROOT / "data"
+    check("Q0 插件源码目录不再有 data/", not src_data_dir.exists(),
+          f"{src_data_dir} 已删除")
+    with tempfile.TemporaryDirectory(prefix="stellasora_redirect_") as td:
+        fake_dir = Path(td)
+        # 切换到空临时目录：infodocs 应指向 fake，且不存在的表返回空而非读宿主数据
+        service.set_data_dir(fake_dir)
+        check("Q1 _DATA_DIR 已重定向到 fake 目录", service._DATA_DIR.resolve() == fake_dir.resolve(),
+              str(service._DATA_DIR))
+        check("Q2 _INFODOCS_DIR 派生自 fake/offline/infodocs",
+              service._INFODOCS_DIR == fake_dir / "offline" / "infodocs",
+              str(service._INFODOCS_DIR))
+        check("Q3 表不存在回空结构（不回退宿主）", service.load_team_table() == {"rows": [], "report": {}})
+        check("Q4 读取缺失不回写任何文件（fake 目录保持为空结构，宿主未被写盘）",
+              not (fake_dir / "offline" / "presets" / "team_table.json").exists()
+              and not (fake_dir / "dict.json").exists()
+              and not (fake_dir / ".cache").exists())
+        # 切回宿主目录：读取应恢复真实数据
+        service.set_data_dir(host_dir)
+        tbl = service.load_team_table()
+        check("Q5 切回宿主目录后表读取恢复", isinstance(tbl, dict) and len(tbl.get("rows", [])) > 0,
+              f"rows={len(tbl.get('rows', []))}")
+        service.reload_team_table()
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -2990,10 +3026,11 @@ SECTIONS = {
     "N": ("slot 查询服务", run_section_n),
     "P": ("热门优先级与属性泛查", run_section_p),
     "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
+    "Q": ("数据目录重定向", run_data_dir_redirect),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O"]
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P"}
 
 

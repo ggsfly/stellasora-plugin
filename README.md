@@ -17,8 +17,8 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 
 | 特性 | 说明 |
 |------|------|
-| **离线优先** | 优先读取本地持久化数据（`data/offline/`），无实时外部网络依赖 |
-| **双通道更新** | 每日 17:00 自动定时更新，支持管理员在聊天端发送 `/st_update` 手动触发 |
+| **离线优先** | 优先读取本地持久化数据（`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/`），无实时外部网络依赖 |
+| **双通道更新** | 每日 17:00 自动定时更新；支持操作员在聊天端发送 `/st_update` 手动触发（需宿主操作员权限） |
 | **直接发送模式** | 内部 LLM 加工后直发聊天，支持人格与表达风格注入（默认开启） |
 | **官方中文输出** | 4.8 万余条中英对照字典，术语与技能描述对齐官方译名 |
 | **模块化选段** | 按问题意图只提供相关模块给 LLM，资料不截断 |
@@ -36,17 +36,22 @@ MaiBot WebUI → 插件市场 → 搜索"星塔旅人" → 安装
 
 ### 方式二：手动安装
 
+> 建议将目录名与插件 ID 对齐（`ggsfly_stellasora-plugin`），避免与插件市场未来的安装目录同名冲突导致重复 ID 双杀（宿主会同时剔除两个同名插件）。
+
 ```bash
 # 克隆到 MaiBot 的 plugins 目录
 cd MaiBot/plugins
-git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
+git clone https://github.com/ggsfly/stellasora-plugin.git ggsfly_stellasora-plugin
 ```
 
 重启 MaiBot 后插件自动加载。
 
 ### 数据初始化（必须）
 
-数据文件（字典 `data/dict.json`、离线攻略 `data/offline/` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。
+数据文件（字典 `dict.json`、离线攻略 `offline/` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。数据写入宿主授权目录，插件源码目录保持干净：
+
+- **持久数据**：`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/`（dict/names/offline/报告）
+- **网络缓存**：`<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/cache/`
 
 **最简方式：双击插件目录下的 `update_dictionary.bat`**（自动使用 MaiBot 根目录 `.venv` 的 Python，自动完成字典构建与离线数据同步，详见下方「数据维护」）。
 
@@ -67,7 +72,7 @@ git clone https://github.com/ggsfly/stellasora-plugin.git stellasora
 ```toml
 [plugin]
 # 配置版本。变更会使直发成品缓存 key 变化（旧答案自动失效）；若 config.toml 钉死旧版本号，请手动同步以免命中旧缓存
-config_version = "1.2.0"
+config_version = "1.2.1"
 
 [access_control]
 # 鉴权模式：
@@ -118,16 +123,23 @@ alias = "土"
 official = "地"
 ```
 
-> **提示**：修改主程序全局人格配置（如 bot_config 的 personality/nickname/reply_style 等）不会触发插件配置热重载，已缓存的直发答案口吻最长 24 小时内保持原口吻。如需立即刷新口吻，可手动清空 data/webcache/answers/ 目录，或将 answer_cache_ttl 设置为 0 禁用后再改回。
+> **提示**：修改主程序全局人格配置（如 bot_config 的 personality/nickname/reply_style 等）不会触发插件配置热重载，已缓存的直发答案口吻最长 24 小时内保持原口吻。如需立即刷新口吻，可手动清空 `<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/webcache/answers/` 目录，或将 answer_cache_ttl 设置为 0 禁用后再改回。
 
 ### 建议配置
 
-公开部署时建议改为白名单模式，只允许自己的群使用：
+公开部署时建议改为白名单模式，只允许自己的群使用查询工具：
 
 ```toml
 [access_control]
 mode = "whitelist"
 whitelist = ["你的群号"]
+```
+
+公开部署时同时建议在宿主 `bot_config.toml` 配置操作员，确保 `/st_update` 只有你本人可触发：
+
+```toml
+[plugin]
+permission = ["qq:你的QQ号"]  # 操作员列表：仅列表内用户可执行操作员级（/st_update 等）命令
 ```
 
 ## 使用示例
@@ -156,11 +168,11 @@ whitelist = ["你的群号"]
 
 插件采用**本地离线优先**架构，平时查询无需联网。三类数据及其更新方式：
 
-| 数据 | 生成脚本 | 内容 |
-|------|---------|------|
-| 字典 `data/dict.json` + `names.json` | `tools/update_dict.py`（`update_dictionary.bat` 自动调用） | 官方中英对照译名（4.8 万余条） |
-| 离线攻略/预设码 `data/offline/` | `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 |
-| 更新报告 `data/_update_report.json` | 上述脚本产出 | 新增/更新/保留条目统计 |
+| 数据 | 生成脚本 | 内容 | 落盘位置 |
+|------|---------|------|---------|
+| 字典 `dict.json` + `names.json` | `tools/update_dict.py`（`update_dictionary.bat` 自动调用） | 官方中英对照译名（4.8 万余条） | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
+| 离线攻略/预设码 `offline/` | `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/` |
+| 更新报告 `_update_report.json` | 上述脚本产出 | 新增/更新/保留条目统计 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
 
 ### 1. 一键初始化 / 更新
 
@@ -178,7 +190,9 @@ whitelist = ["你的群号"]
 
 ### 3. 聊天端手动更新
 
-管理员在聊天中发送 `/st_update`，插件鉴权后异步执行全量同步，并重建统一队伍-槽位表 `team_table.json`。
+**操作员（管理员）** 在聊天中发送 `/st_update`，宿主统一鉴权后异步执行全量同步，并重建统一队伍-槽位表 `team_table.json`。
+
+> `/st_update` 为**操作员级别**命令（`permission="operator"`），由主程序统一鉴权。需要在 `bot_config.toml` 的 `[plugin].permission` 中把管理员账号（如 `qq:123456789`）加入操作员列表，或在 WebUI 命令设置中对该命令单独放行，否则所有用户都被拒绝。插件内的黑白名单（`access_control`）仍作为聊天范围约束叠加生效。
 
 ### 4. 命令行独立同步
 
