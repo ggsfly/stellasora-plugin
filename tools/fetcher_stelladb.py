@@ -198,16 +198,12 @@ class StelladbFetcher:
     def fetch_ssdata_dataset(self, name: str, force_update: bool = False) -> Optional[dict]:
         """获取 ss-data 数据集（character, disc, gacha, raid, item, word 等），本地优先。
 
-        离线文件优先取 ssdata/ 子目录；旧布局的扁平文件（offline/{name}.json）
-        仍作兼容回退。
+        离线文件固定取 ssdata/<name>.json。
         """
         offline_dir = self.offline_dir
         offline_file: Optional[Path] = None
         if offline_dir is not None:
             offline_file = offline_dir / "ssdata" / f"{name}.json"
-            flat = offline_dir / f"{name}.json"
-            if not offline_file.is_file() and flat.is_file():
-                offline_file = flat
         if not force_update and offline_file:
             offline_data = _read_offline_dataset(offline_file, name)
             if offline_data is not None:
@@ -240,16 +236,12 @@ class StelladbFetcher:
     def fetch_leaderboard_meta(self, force_update: bool = False) -> Optional[dict]:
         """获取 ssleaderboard 元数据，本地优先。
 
-        离线文件优先取 sslleaderboard/meta.json；旧布局的 sslleaderboard_meta.json
-        仍作兼容回退。
+        离线文件固定取 ssleaderboard/meta.json。
         """
         offline_dir = self.offline_dir
         offline_file: Optional[Path] = None
         if offline_dir is not None:
             offline_file = offline_dir / "ssleaderboard" / "meta.json"
-            flat = offline_dir / "ssleaderboard_meta.json"
-            if not offline_file.is_file() and flat.is_file():
-                offline_file = flat
         if not force_update and offline_file:
             offline_data = _read_offline_dataset(offline_file, "leaderboard")
             if offline_data is not None:
@@ -282,16 +274,12 @@ class StelladbFetcher:
     def fetch_leaderboard_season(self, force_update: bool = False) -> Optional[dict]:
         """获取 ssleaderboard 赛季数据，本地优先。
 
-        离线文件优先取 sslleaderboard/season.json；旧布局的
-        sslleaderboard_season.json 仍作兼容回退。
+        离线文件固定取 ssleaderboard/season.json。
         """
         offline_dir = self.offline_dir
         offline_file: Optional[Path] = None
         if offline_dir is not None:
             offline_file = offline_dir / "ssleaderboard" / "season.json"
-            flat = offline_dir / "ssleaderboard_season.json"
-            if not offline_file.is_file() and flat.is_file():
-                offline_file = flat
         if not force_update and offline_file:
             offline_data = _read_offline_dataset(offline_file, "season")
             if offline_data is not None:

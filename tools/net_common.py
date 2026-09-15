@@ -27,8 +27,6 @@ def host_cache_dir() -> Path:
     return host_root() / "temp" / "plugins" / _PLUGIN_ID / "cache"
 
 
-_OFFLINE_DIR = host_data_dir() / "offline"
-
 # 默认代理地址；可通过环境变量 HTTPS_PROXY / HTTP_PROXY 或构造函数 proxy 参数覆盖
 _DEFAULT_PROXY = "http://127.0.0.1:7890"
 
@@ -99,14 +97,13 @@ def read_offline_file(file_path: Path) -> Optional[str]:
 
 
 def resolve_offline_dir(cache_dir: Path, offline_dir: Optional[Path] = None) -> Optional[Path]:
-    """解析离线数据目录。"""
+    """解析离线数据目录：显式传入优先；缺省仅认 cache_dir 同级的 offline/，否则 None。
+
+    生产调用方（plugin/sync_data）一律显式传 offline_dir；None 表示该 fetcher
+    无离线数据可读（纯在线/测试场景），不猜路径、不回退宿主目录。
+    """
     if offline_dir is not None:
         return Path(offline_dir)
-    elif (cache_dir / "offline").is_dir():
+    if (cache_dir / "offline").is_dir():
         return cache_dir / "offline"
-    elif (cache_dir.parent / "offline").is_dir():
-        return cache_dir.parent / "offline"
-    elif cache_dir.name in ("webcache", ".cache", ".cache_test") or "stellasora" in str(cache_dir).lower():
-        return _OFFLINE_DIR
-    else:
-        return None
+    return None

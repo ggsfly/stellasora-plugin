@@ -12,7 +12,7 @@
   C 术语替换等价性  —— 单遍交替正则 vs 逐条 legacy 在代表样例上全等
   D 中文别名覆盖    —— [overrides.aliases] 模型、DictLookup 链式别名、动态配置
   E 索引页抓取      —— fetch_infodoc_index 缓存命中、URL 正确、异常降级空串
-  F how 表驱动查询  —— query_how_rows 按区块抓取、预设码行、rotation 字段、表交集（Task 3 新链路）
+  F how 表驱动查询  —— query_how_rows 按区块抓取、预设码行、rotation 字段、表交集
   G 直发端到端      —— 直发/缓存/去重/鉴权/人格开关/知识注入/SDK 透传（核心用例）
   H 输出格式        —— LLM 输出原样直发（verbatim trust）+ infodoc 输出规则关键词
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
@@ -1160,7 +1160,7 @@ async def run_direct_send() -> None:
           and "空白响应降级资料" in str(r28.get("content", ""))
           and "未找到相关攻略" not in str(r28.get("content", "")))
 
-    # G29-G30 表缓存 reload 接线（Task 3）：同步产出新统一表后 reload_team_table()
+    # G29-G30 表缓存 reload 接线：同步产出新统一表后 reload_team_table()
     # 使运行时表缓存即时失效——手动 /st_update 与每日 17:00 定时两通道均须接线。
     # plugin 以 from service import reload_team_table 绑定，故补丁挂在 plug 命名空间
     g29_calls: list = []
@@ -1348,8 +1348,8 @@ def run_tool_query_desc() -> None:
     how_desc = tool_descs.get("stellasora_how", "")
     how_required = tool_required.get("stellasora_how", {})
     desc = how_params.get("query", "")
-    # J1（契约翻转）：query 由旧"只传名字本身"改为支持空格分隔多名 + 兜底归一
-    check("J1 how.query 多名+兜底归一契约（取代旧'只传名字本身'）",
+    # J1 query 参数契约：支持空格分隔多名 + question 缺失时兜底归一
+    check("J1 how.query 多名+兜底归一契约",
           "空格分隔多个" in desc and "兜底归一" in desc and "只传名字本身" not in desc, desc)
     # J2 工具 description 契约：用途示例（配队/攻略/秘纹）保留；属性泛查支持宣称（"风队"示例）；
     # question 参数 required=True；query description 含多名写法
@@ -1358,7 +1358,7 @@ def run_tool_query_desc() -> None:
           and how_required.get("question") is True
           and "空格分隔多个" in desc,
           f"desc={how_desc}, required={how_required}")
-    # J3（契约翻转）：query 不再宣称元素中文名（水/火/风/地/光/暗）
+    # J3 query 参数契约：只收角色名，不宣称元素中文名（水/火/风/地/光/暗）
     check("J3 how.query 清除元素中文名宣称",
           not any(elem in desc for elem in ("水", "火", "风", "地", "光", "暗"))
           and "元素" not in desc, desc)
@@ -1420,7 +1420,7 @@ async def run_manual_update() -> None:
         return {"status": "ok"}
 
     plug.sync_offline_data = mock_sync_offline_data
-    # Task 3 reload 接线：手动更新同步成功后 reload_team_table() 失效表缓存
+    # reload 接线：手动更新同步成功后 reload_team_table() 失效表缓存
     # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
     reload_calls: list = []
     orig_reload = plug.reload_team_table
@@ -1548,7 +1548,7 @@ async def run_daily_sync_schedule() -> None:
         return {"status": "ok"}
 
     plug.sync_offline_data = mock_sync_offline_data
-    # Task 3 reload 接线：定时同步产出新统一表后 reload_team_table() 失效表缓存
+    # reload 接线：定时同步产出新统一表后 reload_team_table() 失效表缓存
     # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
     reload_calls: list = []
     orig_reload = plug.reload_team_table

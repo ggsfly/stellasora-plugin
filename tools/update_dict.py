@@ -4,7 +4,7 @@
 全字段字典更新脚本
 
 两种模式：
-  --mode local   从本地 ss-data 仓库读取（需 --source 参数；仍兼容旧 StellaSoraData 布局；建议先对本地仓库 git pull）
+  --mode local   从本地 ss-data 仓库读取（需 --source 参数；建议先对本地仓库 git pull）
   --mode remote  直接从 GitHub 拉取最新语言文件（git sparse clone，只下载 EN/language 与
                  CN/language 两个目录，需要本机安装 Git 并加入 PATH）
 
@@ -57,7 +57,7 @@ def load_current(dict_path: Path) -> Dict[str, Dict[str, str]]:
 
 
 def fetch_from_root(data_root: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """从 ss-data 根目录加载 EN/CN 全字段文本（兼容旧 StellaSoraData 布局）。"""
+    """从 ss-data 根目录加载 EN/CN 全字段文本。"""
     _en_bin, en_lang = collect_language_subdirs(data_root, "en")
     _cn_bin, cn_lang = collect_language_subdirs(data_root, "cn")
     if not en_lang.is_dir() or not cn_lang.is_dir():
@@ -136,7 +136,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["local", "remote"], default="local",
                         help="local=本地仓库（需 --source）；remote=GitHub 直拉（需 Git）")
     parser.add_argument("--source", default=None,
-                        help="ss-data 根目录（仅 local 模式需要；仍兼容旧 StellaSoraData 布局）")
+                        help="ss-data 根目录（仅 local 模式需要）")
     parser.add_argument("--output",
                         default=str(host_data_dir()),
                         help="字典输出目录（含 dict.json / names.json，默认 <宿主>/data/plugins/ggsfly.stellasora-plugin）")

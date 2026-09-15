@@ -179,7 +179,7 @@ permission = ["qq:你的QQ号"]  # 操作员列表：仅列表内用户可执行
 双击插件目录下的 `update_dictionary.bat`：
 
 - 自动使用 MaiBot 根目录 `.venv` 的 Python（`maibot_sdk` 只在其内）；
-- 自动检测本地 ss-data 克隆（亦兼容旧 StellaSoraData 布局）：有则 `git pull` 增量更新 + local 模式，无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
+- 自动检测本地 ss-data 克隆：有则 `git pull` 增量更新 + local 模式，无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
 - 随后执行 `sync_data.py --all` 全量同步离线数据，并运行一致性测试。
 
 代理：默认 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；亦可用 `HTTPS_PROXY` 环境变量。

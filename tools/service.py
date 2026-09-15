@@ -466,7 +466,7 @@ def query_what(term: str, cache_dir: Path, question: str = "", as_of: str = "") 
         text, ok = _build_character_material(st_fetcher, num_id, lookup, modules=modules)
         if ok and text:
             return text
-        # ss-data 渲染失败 → 统一"没有专属攻略页"文案（不再回退 trekker 抓取）
+        # ss-data 渲染失败 → 返回无专属攻略页文案
         return _no_page_message(term, res)
 
     # 4. 秘纹（disc）路由——按数字 id 成员判断，不按 cat 字符串
@@ -1301,8 +1301,7 @@ def _cn_by_en(lookup: Any, en_name: str) -> str:
     """用 lookup.lookup_term(en_name) 反查中文名；查不到原样返回 en_name。
 
     lookup_term 内部已覆盖 main_dict 精确命中、names.json 大小写索引与
-    自定义别名三层解析，故无需在本函数重复访问其私有索引（旧兜底与
-    lookup_term 的解析路径完全重合，恒不可达）。
+    自定义别名三层解析，无需在本函数重复访问其私有索引。
     """
     if not en_name:
         return ""
@@ -2331,8 +2330,8 @@ def _build_monster_material(
 
     返回 (material_text, True)；num_id 在 raid → duel → blitz 三个数据集中均不
     存在返回 ("", False)。modules 给定（模块化查询）时渲染 overview（恒出）+
-    modules 命中的 stats/mechanic 区块；modules=None 保持既有全量输出（raid
-    fixture 输出逐字节不变，O8 兜底）。
+    modules 命中的 stats/mechanic 区块；modules=None 输出全部区块
+    （overview/stats/mechanic）。
     """
     if not st:
         return "", False
