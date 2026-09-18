@@ -2145,6 +2145,74 @@ def run_section_n() -> None:
             f"emblem_cnt={mat_g15.count('纹章推荐：')}, "
             f"members={ {k: len(v) for k, v in seg_by_member.items()} }",
         )
+
+        # N16 上游误标补丁：fetch_infodoc 落盘前把 Freesia (Main Skill) 队首个
+        # Teresa (4★) 主技能段修正为 Freesia (5★)；旧串未命中（上游自改）恒等不破坏
+        from fetcher_stelladb import _apply_infodoc_fixes, _INFODOC_FIXES
+        mislabeled = "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)"
+        patched = _apply_infodoc_fixes(
+            "aqua",
+            mislabeled + "\n| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)",
+        )
+        check(
+            "N16 补丁层：Teresa 主技能段→Freesia (5★) 且不误伤其他 Teresa 段",
+            mislabeled not in patched
+            and "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)" in patched
+            and "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)" in patched,
+            f"patched={patched!r}",
+        )
+        check(
+            "N16b 补丁层：未知元素/无命中恒等不修改",
+            _apply_infodoc_fixes("umbra", mislabeled) == mislabeled
+            and _apply_infodoc_fixes("aqua", "no match here") == "no match here",
+        )
+        # 真实 aqua.json 已一次性修正：data 中主技能段不再以 Teresa 出现
+        aqua_data_fixed = json.loads((DATA_DIR / "offline" / "infodocs" / "aqua.json").read_text(encoding="utf-8"))["data"]
+        check(
+            "N16c 存量 aqua.json 已修正：Teresa 主技能段消除且 Freesia (5★) 存在",
+            mislabeled not in aqua_data_fixed
+            and "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)" in aqua_data_fixed,
+        )
+
+        # N17 同名 build first-wins：Karin boss shark→乙叶 Laser、翡冷翠主技能→乙叶 Weeping Sky
+        umbra_data = json.loads((DATA_DIR / "offline" / "infodocs" / "umbra.json").read_text(encoding="utf-8"))["data"]
+        karin_blk = service.extract_block_by_name(umbra_data, "Karin (Boss Shark) WIP")
+        firenze_blk = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
+        karin_desc0 = (karin_blk["segments"]["Otoha"]["description"] or [""])[0]
+        firenze_desc0 = (firenze_blk["segments"]["Otoha"]["description"] or [""])[0]
+        karin_emblem0 = (karin_blk["segments"]["Otoha"]["emblem"] or [""])[0]
+        firenze_emblem0 = (firenze_blk["segments"]["Otoha"]["emblem"] or [""])[0]
+        check(
+            "N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）",
+            karin_desc0.startswith("Otoha's laser build")
+            and "Ultimate DMG" in karin_emblem0
+            and firenze_desc0.startswith("Otoha's skill build")
+            and "Skill DMG" in firenze_emblem0,
+            f"karin_desc0={karin_desc0[:50]!r}, firenze_desc0={firenze_desc0[:50]!r}",
+        )
+
+        # N18 段头误判修复：描述行以角色名开头+★ Key Notes 不再被当新段头——
+        # Nazuna-Donna 的 Nazuna skill 应为真实段头值，且描述完整保留
+        nd_blk = service.extract_block_by_name(aqua_data_fixed, "Nazuna-Donna")
+        nazuna_seg = nd_blk["segments"]["Nazuna"]
+        check(
+            "N18 段头误判修复：Nazuna skill 为真实值且描述完整",
+            nazuna_seg["skill"] == "1/1/1/1 (Not needed)"
+            and len(nazuna_seg["description"]) == 1
+            and "Main slot" in nazuna_seg["description"][0],
+            f"skill={nazuna_seg['skill']!r}, desc_len={len(nazuna_seg['description'])}",
+        )
+
+        # N19 数据修正后 Freesia (Main Skill) 区块：成员定位正确（Freesia 主控）
+        fs_blk = service.extract_block_by_name(aqua_data_fixed, "Freesia (Main Skill)")
+        check(
+            "N19 Freesia (Main Skill) 结构：members 含 Freesia 主控 + 真 Teresa 支援",
+            fs_blk["members"] == ["Freesia", "Flora", "Iris", "Teresa"]
+            and fs_blk["roles"]["Freesia"] == "主控位"
+            and fs_blk["segments"]["Freesia"]["skill"] == "1/10/1/1 (Main Skill only)"
+            and fs_blk["segments"]["Teresa"]["skill"] == "1/1/1+/1 (Support Skill, otherwise not needed)",
+            f"members={fs_blk['members']}, roles={fs_blk['roles']}",
+        )
     finally:
         service.reload_team_table()
 

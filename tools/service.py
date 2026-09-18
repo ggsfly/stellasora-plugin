@@ -550,11 +550,16 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
         col_affix_idx.clear()
 
     def _close_segment() -> None:
-        """结束当前角色段：冲刷纹章转置并入队。"""
+        """结束当前角色段：冲刷纹章转置并入队。
+
+        同名段（同一角色在区块内出现多个 build，如 Otoha Laser/Weeping Sky）取
+        首个出现的段（first-wins）——infodoc 每队自上而下按优先级从高到低排列，
+        顶部段即该队应使用的 build；后段被跳过不覆盖。
+        """
         nonlocal seg, mode, emblem_band_anchor, band_col_start
         if seg is not None and seg.get("en"):
             _flush_emblem_into(seg)
-            segments[seg["en"]] = seg
+            segments.setdefault(seg["en"], seg)
             if seg["en"] not in members:
                 members.append(seg["en"])
                 roles[seg["en"]] = "主控位" if len(members) == 1 else "支援位"
@@ -596,10 +601,13 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
             continue
 
         # 角色行（"已知角色 + ★"行）：段内遇到新角色 → 自动收尾上一段并开新段
-        #（兼容两种形态：每段有 Description 头的常规布局，与无头行的变体）
+        #（兼容两种形态：每段有 Description 头的常规布局，与无头行的变体）。
+        # 段头形态判定：cells[0] 短文本且含 "(\d★" 星级标记——排除以角色名开头的
+        # 描述行（如 "Cosette is the staple support...★ Key Notes..."），
+        # 否则描述行会被误当新段头，覆盖真实段的 skill/description。
         char_match = None
         for name, r in name_res:
-            if cells and r.match(cells[0]) and any("★" in c for c in cells):
+            if cells and r.match(cells[0]) and len(cells[0]) <= 60 and re.search(r"\(\s*\d+\s*★", cells[0]):
                 char_match = name
                 break
 

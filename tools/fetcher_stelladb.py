@@ -1,6 +1,7 @@
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import json
+import logging
 import time
 import urllib.request
 
@@ -28,8 +29,38 @@ else:
 _SS_DATA_BASE = "https://raw.githubusercontent.com/AutumnVN/ss-data/refs/heads/main"
 _SS_LB_BASE = "https://raw.githubusercontent.com/AutumnVN/ssleaderboard/refs/heads/main"
 
+logger = logging.getLogger("stellasora.fetcher")
+
 # 模块级数据集缓存：(文件绝对路径, 数据集名称) -> (mtime, parsed_dict)
 _ssdata_cache: Dict[Tuple[Path, str], Tuple[float, dict]] = {}
+
+# 抓取后本地修正（上游脏数据补丁）：键为元素名，值为 (旧串, 新串) 替换对列表。
+# 每次 fetch_infodoc 抓取落盘前应用——上游不改也保证本地恒为修正后数据，
+# 且 17:00 st_update 重新抓取时自动重新修正（持久生效）。
+_INFODOC_FIXES: Dict[str, List[Tuple[str, str]]] = {
+    # 上游误标：Freesia (Main Skill) 队首个 Teresa (4★) 段实为 Freesia 的主技能 build
+    #（含 Ice Vortex 等 Freesia 专属数据），改回 Freesia (5★) 使成员定位与数据归属正确。
+    "aqua": [
+        (
+            "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)",
+            "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)",
+        ),
+    ],
+}
+
+
+def _apply_infodoc_fixes(elem_key: str, text: str) -> str:
+    """对抓取到的元素 infodoc 文本应用本地修正（_INFODOC_FIXES）。
+
+    逐个执行 (old, new) 替换；旧串未命中（上游已自改或结构变更）时记录
+    warning 并跳过，不改变文本——补丁幂等，重复抓取无副作用。
+    """
+    for old, new in _INFODOC_FIXES.get(elem_key, []):
+        if old in text:
+            text = text.replace(old, new)
+        else:
+            logger.warning("infodoc 修正未命中（上游可能已自改）: element=%s old=%r", elem_key, old[:60])
+    return text
 
 
 def _read_offline_dataset(file_path: Path, name: str) -> Optional[dict]:
@@ -124,6 +155,8 @@ class StelladbFetcher:
         url = f"https://stelladb.pages.dev/infodoc/{elem_key}"
         res = self.fetch_url(url, ignore_cache=force_update)
         if res:
+            # 抓取后本地修正（上游脏数据补丁）：落盘前替换，保证持久正确
+            res = _apply_infodoc_fixes(elem_key, res)
             target_file = self.offline_dir / "infodocs" / f"{elem_key}.json" if self.offline_dir else None
             if target_file:
                 payload = {
