@@ -644,28 +644,25 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
                 col_affix_idx = {}
                 emblem_band_anchor = None
                 band_col_start = 0
-                j = L + 1
+                # 纹章网格按固定列宽排列（每列 2 格：词条+数值），列锚自 L+1 起每 2 格一列。
+                # 逐列定宽解析：上游缺列（如施工中未填 80级）保留空列 None，
+                # 防止后列（90级）数据因压缩空列而上移错位到 80级。
+                p = L + 1
                 k = 0
-                while j < len(cs):
-                    c = cs[j]
-                    if not c:
-                        j += 1
-                        continue
-                    if _EMPTY_EMBLEM_RE.match(c):
+                while p < len(cs):
+                    affix = cs[p]
+                    value = cs[p + 1] if p + 1 < len(cs) else ""
+                    col_affix_idx[k] = p
+                    if _EMPTY_EMBLEM_RE.match(affix):
                         emblem_cols.append(None)
-                        col_affix_idx[k] = j
-                        k += 1
-                        j += 1
-                    elif j + 1 < len(cs) and _EMBLEM_VALUE_RE.match(cs[j + 1]):
-                        emblem_cols.append([f"{c} {cs[j + 1]}".strip()])
-                        col_affix_idx[k] = j
-                        k += 1
-                        j += 2
+                    elif value and _EMBLEM_VALUE_RE.match(value):
+                        emblem_cols.append([f"{affix} {value}".strip()])
+                    elif affix:
+                        emblem_cols.append([affix])
                     else:
-                        emblem_cols.append([c])
-                        col_affix_idx[k] = j
-                        k += 1
-                        j += 1
+                        emblem_cols.append(None)
+                    k += 1
+                    p += 2
                 continue
 
             # 数据行分派
