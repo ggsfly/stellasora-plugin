@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
 import time
+import urllib.error
 import urllib.request
 
 if __package__:
@@ -341,3 +342,101 @@ class StelladbFetcher:
             if offline_data is not None:
                 return offline_data
         return None
+
+    def fetch_leaderboard_board(self, season_id: str, force_update: bool = False) -> Tuple[Optional[dict], str]:
+        """获取当期赛季玩家榜瘦身数据，返回 (data, status)。
+
+        上游 {sid}.json 为 20MB 级单体文件（95% 体积是 Potentials/Notes 明细），
+        这里下载后仅提取各服玩家榜 Top 列表（_extract_board_top），raw 不落盘；
+        瘦身结果持久化到 ssleaderboard/{sid}_top.json 供 TTL 内零网络复用。
+
+        status: "ok"=成功（网络拉取或离线读取）；"not_found"=上游无该赛季文件
+        （当期未开榜，如 fe 赛季初）；"error"=网络/解析失败。
+        """
+        sid = str(season_id or "").strip().lower()
+        if not sid:
+            return None, "error"
+
+        offline_file: Optional[Path] = None
+        if self.offline_dir is not None:
+            offline_file = self.offline_dir / "ssleaderboard" / f"{sid}_top.json"
+        if not force_update and offline_file:
+            offline_data = _read_offline_dataset(offline_file, f"board_{sid}")
+            if offline_data is not None:
+                return offline_data, "ok"
+
+        url = f"{_SS_LB_BASE}/{sid}.json"
+        try:
+            req = urllib.request.Request(url, headers=self.headers)
+            with self._opener.open(req, timeout=60) as response:
+                if response.getcode() != 200:
+                    logger.warning("赛季榜单拉取失败: %s HTTP %s", sid, response.getcode())
+                    return None, "error"
+                raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                logger.info("赛季榜单文件不存在（当期可能未开榜）: %s", sid)
+                return None, "not_found"
+            logger.warning("赛季榜单拉取失败: %s HTTP %s", sid, exc.code)
+            return None, "error"
+        except Exception:
+            logger.warning("赛季榜单拉取异常: %s", sid, exc_info=True)
+            return None, "error"
+
+        slim = _extract_board_top(raw)
+        if slim is None:
+            logger.warning("赛季榜单解析失败（结构不符）: %s", sid)
+            return None, "error"
+
+        if offline_file:
+            payload = {
+                "url": url,
+                "name": f"board_{sid}",
+                "timestamp": int(time.time()),
+                "data": slim,
+            }
+            try:
+                _atomic_write(offline_file, json.dumps(payload, ensure_ascii=False, indent=2))
+            except Exception:
+                pass
+        return slim, "ok"
+
+
+def _extract_board_top(raw: Any) -> Optional[dict]:
+    """从赛季原始 JSON 提取玩家榜瘦身结构。
+
+    只保留渲染所需字段（各服 total / last_refresh / top 的 rank/id/name/score），
+    丢弃 Potentials/Notes/队伍明细等大体积字段与 Usage* 预聚合。
+    结构不符（缺 region 或全空）返回 None。
+    """
+    if not isinstance(raw, dict):
+        return None
+    region = raw.get("region")
+    if not isinstance(region, dict):
+        return None
+
+    slim_regions: Dict[str, dict] = {}
+    for rk, rd in region.items():
+        if not isinstance(rd, dict):
+            continue
+        top = []
+        for entry in rd.get("Rank") or []:
+            if not isinstance(entry, dict):
+                continue
+            top.append(
+                {
+                    "rank": entry.get("Rank"),
+                    "id": str(entry.get("Id") or ""),
+                    "name": str(entry.get("NickName") or "").strip(),
+                    "score": entry.get("Score") or 0,
+                }
+            )
+        slim_regions[str(rk)] = {
+            "total": rd.get("Total") or 0,
+            "last_refresh": str(rd.get("LastRefreshTime") or ""),
+            "top": top,
+        }
+
+    if not slim_regions:
+        return None
+    return {"regions": slim_regions}

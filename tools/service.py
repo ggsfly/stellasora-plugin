@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import threading
+import time
 
 from dict_lookup import DictLookup
 from fetcher_stelladb import StelladbFetcher, _read_offline_file
@@ -2776,3 +2777,123 @@ def _match_blitz_boss(
                         return True
     return False
 
+
+
+# ===== 排行榜命令（/st_bb・/st_fe）=====
+
+# 赛季前缀 → 中文模式名（与 ssleaderboard 仓库 sid 约定一致）
+_LB_MODE_CN = {"bb": "联合讨伐", "fe": "终焉绝响"}
+
+
+def _lb_load_top(offline_dir: Path, sid: str) -> Tuple[Optional[dict], float]:
+    """读取 {sid}_top.json 瘦身缓存，返回 (data, 距上次拉取的秒数)。
+
+    无文件 / 结构损坏 / 时间戳缺失一律返回 (None, inf)——由调用方决定重拉。
+    """
+    f = offline_dir / "ssleaderboard" / f"{sid}_top.json"
+    if not f.is_file():
+        return None, float("inf")
+    try:
+        payload = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None, float("inf")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("regions"), dict):
+        return None, float("inf")
+    ts = float(payload.get("timestamp") or 0)
+    return data, (time.time() - ts) if ts > 0 else float("inf")
+
+
+def _lb_format_age(seconds: float) -> str:
+    if seconds < 90:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟前"
+    return f"{int(seconds // 3600)} 小时前"
+
+
+def _lb_render_mode(
+    st: StelladbFetcher,
+    offline_dir: Path,
+    prefix: str,
+    sid: str,
+    ttl_seconds: float,
+) -> str:
+    """渲染单个模式的当期国服 Top100 段落。
+
+    TTL 内直读本地瘦身缓存；过期或缺失时重拉（force_update 跳过 fetcher 的
+    离线优先分支）。拉取失败但有历史缓存时降级展示陈旧数据——数据年龄由
+    页脚"更新于"自明。上游无当期赛季文件（fe 赛季初常态）输出"未开榜"。
+    """
+    mode_cn = _LB_MODE_CN.get(prefix, prefix.upper())
+    if not sid:
+        return f"【{mode_cn}】当期赛季指针缺失。"
+
+    match = re.fullmatch(r"[a-z]+(\d+)", sid)
+    season_num = match.group(1) if match else "?"
+    header = f"【{mode_cn} S{season_num}】"
+
+    data, age = _lb_load_top(offline_dir, sid)
+    if data is None or age > ttl_seconds:
+        slim, status = st.fetch_leaderboard_board(sid, force_update=True)
+        if status == "ok" and slim is not None:
+            data, age = slim, 0.0
+        elif status == "not_found":
+            return f"{header} 当期未开榜（上游尚未发布榜单数据）。"
+        elif data is None:
+            return f"{header} 榜单拉取失败，请稍后再试。"
+
+    cn = data["regions"].get("cn")
+    if not isinstance(cn, dict) or not cn.get("top"):
+        return f"{header} 国服暂无榜单数据。"
+
+    lines = [header]
+    for entry in cn["top"]:
+        rank = entry.get("rank")
+        name = entry.get("name") or "?"
+        score = int(entry.get("score") or 0)
+        lines.append(f"{rank}. {name} — {score:,}")
+    lines.append(f"（国服共 {int(cn.get('total') or 0):,} 人 · 更新于 {_lb_format_age(age)}）")
+    return "\n".join(lines)
+
+
+def query_lb_board(
+    mode: str,
+    ttl_minutes: int = 10,
+    cache_dir: Path | None = None,
+    st: Optional[StelladbFetcher] = None,
+) -> str:
+    """当期排行榜国服 Top100 文本（/st_bb・/st_fe 命令渲染，纯文本、无 LLM 参与）。
+
+    mode: "bb"=联合讨伐 / "fe"=终焉绝响。两榜独立成命令，避免单条消息过长；
+    各自跟随 season.json 的 BB_SEASON/FE_SEASON 指针，不写死赛季号。bb 指针
+    缺失时按 meta 键表取最大 bbNN 降级（与 _resolve_current_blitz 同款）；fe
+    严格跟随指针、缺失即报未开榜（与 _resolve_current_raid 同款"不猜、不兜底"）。
+    st 参数供测试注入假 fetcher。
+    """
+    prefix = str(mode or "").strip().lower()
+    if prefix not in _LB_MODE_CN:
+        return f"未知排行榜类型: {mode}"
+    if st is None:
+        _, _, st, _ = _get_services(cache_dir or _DEFAULT_CACHE_DIR)
+    if not st:
+        return "星塔旅人排行榜服务未初始化。"
+    offline_dir = _DATA_DIR / "offline"
+
+    ttl_seconds = max(0, int(ttl_minutes)) * 60
+    season = st.fetch_leaderboard_season(force_update=True)
+
+    if prefix == "bb":
+        sid = str((season or {}).get("BB_SEASON") or "")
+        if not sid:
+            meta = st.fetch_leaderboard_meta()
+            candidates = sorted(
+                (k for k in (meta or {}) if re.match(r"^bb\d+$", k)),
+                key=lambda k: int(k[2:]),
+                reverse=True,
+            )
+            sid = candidates[0] if candidates else ""
+    else:
+        sid = str((season or {}).get("FE_SEASON") or "")
+
+    return _lb_render_mode(st, offline_dir, prefix, sid, ttl_seconds)

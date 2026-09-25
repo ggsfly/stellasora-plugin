@@ -22,6 +22,7 @@
   M 统一队伍-槽位表构建器 —— 解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化
   N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略
   P 热门优先级与属性泛查 —— 元素泛查检测、热门过滤组级补齐（<3补冷门至3）、priority 字段固化、端到端集成
+  R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗与降级渲染（零网络）
 """
 from __future__ import annotations
 
@@ -50,7 +51,7 @@ import service  # noqa: E402
 import team_table  # noqa: E402
 from dict_lookup import DictLookup  # noqa: E402
 from fetcher_google_doc import GoogleDocFetcher  # noqa: E402
-from fetcher_stelladb import StelladbFetcher  # noqa: E402
+from fetcher_stelladb import StelladbFetcher, _extract_board_top  # noqa: E402
 from term_replace import TermReplacer  # noqa: E402
 from maibot_sdk.context import PluginContext, PluginPaths  # noqa: E402
 
@@ -3075,6 +3076,142 @@ def run_data_dir_redirect() -> None:
         service.reload_team_table()
 
 
+def run_section_r() -> None:
+    """R: /st_lb 排行榜命令——瘦身提取、指针跟随、TTL 缓存、空窗/降级渲染（零网络）。"""
+    print("--- R 排行榜命令 ---")
+    host_dir = DATA_DIR
+
+    class FakeBoardFetcher:
+        """duck-typed fetcher：season/meta 直返，board 调用记录并可编排状态。"""
+
+        def __init__(self, season, meta, boards):
+            self._season = season
+            self._meta = meta
+            self._boards = boards  # sid -> (slim, status)
+            self.board_calls = []
+
+        def fetch_leaderboard_season(self, force_update=False):
+            return self._season
+
+        def fetch_leaderboard_meta(self, force_update=False):
+            return self._meta
+
+        def fetch_leaderboard_board(self, sid, force_update=False):
+            self.board_calls.append((sid, force_update))
+            return self._boards.get(sid, (None, "error"))
+
+    slim = {
+        "regions": {
+            "cn": {
+                "total": 1234,
+                "last_refresh": "1789777540",
+                "top": [
+                    {"rank": 1, "id": "101", "name": "阿尔法", "score": 3139255},
+                    {"rank": 2, "id": "102", "name": "Beta", "score": 2880000},
+                ],
+            },
+            "en": {"total": 5, "last_refresh": "1", "top": [{"rank": 1, "id": "9", "name": "X", "score": 1}]},
+        }
+    }
+
+    # R1 瘦身提取
+    raw = {
+        "region": {
+            "cn": {
+                "Total": 1234,
+                "LastRefreshTime": "1789777540",
+                "Rank": [
+                    {"Id": 101, "NickName": "阿尔法", "Score": 3139255, "Rank": 1, "Teams": [{"Potentials": [1]}]},
+                    {"Id": "102", "NickName": " Beta ", "Score": None, "Rank": 2},
+                ],
+                "UsageByFloor": {"all": [{"id": 101}]},
+            }
+        },
+        "top_level_noise": 1,
+    }
+    slim2 = _extract_board_top(raw)
+    check("R1a 提取仅保留 rank/id/name/score",
+          slim2 and slim2["regions"]["cn"]["top"][0] == {"rank": 1, "id": "101", "name": "阿尔法", "score": 3139255},
+          str(slim2 and slim2["regions"]["cn"]["top"][0]))
+    check("R1b 丢弃 Usage/队伍明细", set(slim2["regions"]["cn"].keys()) == {"total", "last_refresh", "top"})
+    check("R1c Score 缺省 0、名字 strip",
+          slim2["regions"]["cn"]["top"][1]["score"] == 0 and slim2["regions"]["cn"]["top"][1]["name"] == "Beta")
+    check("R1d 结构不符返回 None",
+          _extract_board_top({"no": 1}) is None and _extract_board_top(None) is None
+          and _extract_board_top({"region": {}}) is None)
+
+    with tempfile.TemporaryDirectory(prefix="stellasora_lb_") as td:
+        service.set_data_dir(Path(td))
+        try:
+            offline_dir = Path(td) / "offline" / "ssleaderboard"
+            offline_dir.mkdir(parents=True)
+            top_file = offline_dir / "bb12_top.json"
+
+            def write_top(ts: float) -> None:
+                top_file.write_text(
+                    json.dumps({"url": "x", "name": "board_bb12", "timestamp": ts, "data": slim},
+                               ensure_ascii=False),
+                    encoding="utf-8")
+
+            # R2 指针跟随 + 新鲜缓存零网络 + 空窗渲染（双命令独立触发）
+            write_top(time.time())
+            fake = FakeBoardFetcher(
+                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
+                meta={"bb12": {"floor": {}}},
+                boards={"fe7": (None, "not_found")},
+            )
+            out_fe = service.query_lb_board("fe", ttl_minutes=10, st=fake)
+            out_bb = service.query_lb_board("bb", ttl_minutes=10, st=fake)
+            check("R2a 指针跟随拉取 fe7（不写死赛季）", fake.board_calls == [("fe7", True)],
+                  str(fake.board_calls))
+            check("R2b fe 空窗文案", "【终焉绝响 S7】 当期未开榜" in out_fe)
+            check("R2c bb 新鲜缓存零网络并正确渲染",
+                  "【联合讨伐 S12】" in out_bb and "1. 阿尔法 — 3,139,255" in out_bb
+                  and "（国服共 1,234 人 · 更新于 刚刚）" in out_bb)
+
+            # R3 过期缓存触发重拉
+            write_top(time.time() - 7200)
+            fake2 = FakeBoardFetcher(
+                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
+                meta={},
+                boards={"bb12": (slim, "ok"), "fe7": (None, "not_found")},
+            )
+            out2 = service.query_lb_board("bb", ttl_minutes=10, st=fake2)
+            check("R3a 过期缓存触发重拉", fake2.board_calls == [("bb12", True)])
+            check("R3b 重拉后页脚刷新", "更新于 刚刚" in out2 and "1. 阿尔法 — 3,139,255" in out2)
+
+            # R4 拉取失败降级陈旧缓存
+            fake3 = FakeBoardFetcher(
+                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
+                meta={},
+                boards={"bb12": (None, "error")},
+            )
+            out3 = service.query_lb_board("bb", ttl_minutes=10, st=fake3)
+            check("R4 拉取失败降级陈旧缓存并标注年龄",
+                  "1. 阿尔法 — 3,139,255" in out3 and "2 小时前" in out3)
+
+            # R5 BB_SEASON 缺失按 meta 最大 bbNN 降级
+            fake4 = FakeBoardFetcher(
+                season={"FE_SEASON": "fe7"},
+                meta={"bb11": {}, "bb12": {}},
+                boards={},
+            )
+            out4 = service.query_lb_board("bb", ttl_minutes=10, st=fake4)
+            check("R5 BB_SEASON 缺失按 meta 键表降级", "【联合讨伐 S12】" in out4)
+
+            # R6 ttl=0 强制每次重拉
+            fake5 = FakeBoardFetcher(
+                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
+                meta={},
+                boards={"bb12": (slim, "ok")},
+            )
+            service.query_lb_board("bb", ttl_minutes=0, st=fake5)
+            check("R6 ttl=0 强制重拉", fake5.board_calls == [("bb12", True)])
+        finally:
+            service.set_data_dir(host_dir)
+            service.reload_team_table()
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -3095,10 +3232,11 @@ SECTIONS = {
     "P": ("热门优先级与属性泛查", run_section_p),
     "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
     "Q": ("数据目录重定向", run_data_dir_redirect),
+    "R": ("排行榜命令", run_section_r),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q"]
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q", "R"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P"}
 
 

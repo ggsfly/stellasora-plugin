@@ -52,6 +52,7 @@ from service import (  # noqa: E402
     lookup_term,
     preheat_services,
     query_how_rows,
+    query_lb_board,
     query_what,
     reload_team_table,
 )
@@ -203,9 +204,22 @@ class QueryConfig(PluginConfigBase):
     )
 
 
+class LeaderboardConfig(PluginConfigBase):
+    """排行榜命令（/st_lb）配置。"""
+
+    __ui_label__ = "排行榜"
+    __ui_icon__ = "trophy"
+    __ui_order__ = 3
+
+    ttl_minutes: int = Field(
+        default=10,
+        description="排行榜瘦身缓存有效期（分钟）：有效期内 /st_bb・/st_fe 零网络直读本地缓存；"
+        "上游约每 5 分钟滚动更新一次，0=每次触发都重新拉取",
+    )
+
+
 class AliasEntry(PluginConfigBase):
     """单条中文别名映射（WebUI 列表编辑器每行 = 一个 AliasEntry）。"""
-
     alias: str = Field(
         default="",
         description="俗称/简称/别名",
@@ -240,6 +254,7 @@ class StellaSoraConfig(PluginConfigBase):
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     access_control: AccessControlConfig = Field(default_factory=AccessControlConfig)
     query: QueryConfig = Field(default_factory=QueryConfig)
+    leaderboard: LeaderboardConfig = Field(default_factory=LeaderboardConfig)
     overrides: OverridesConfig = Field(default_factory=OverridesConfig)
 
 
@@ -1068,6 +1083,46 @@ class StellaSoraPlugin(MaiBotPlugin):
                 self.ctx.logger.warning("发送更新完成提示异常: %s", exc)
 
         return True, "星塔旅人离线数据同步完成", 2
+
+    @Command(
+        "st_bb",
+        description="查询星塔旅人当期联合讨伐（Boss Blitz）排行榜国服 Top100，触发时按当期赛季指针拉取最新",
+        pattern=r"^/st_bb(?:\s+(?P<args>.+))?$",
+    )
+    async def handle_lb_bb(self, args: str = "", stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
+        """查询当期联合讨伐排行榜国服 Top100（所有人可用，受黑白名单约束）。"""
+        return await self._handle_lb_board("bb")
+
+    @Command(
+        "st_fe",
+        description="查询星塔旅人当期终焉绝响（Finale Echoing）排行榜国服 Top100，触发时按当期赛季指针拉取最新",
+        pattern=r"^/st_fe(?:\s+(?P<args>.+))?$",
+    )
+    async def handle_lb_fe(self, args: str = "", stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
+        """查询当期终焉绝响排行榜国服 Top100（所有人可用，受黑白名单约束）。"""
+        return await self._handle_lb_board("fe")
+
+    async def _handle_lb_board(self, mode: str, **kwargs: Any) -> tuple[bool, str, int]:
+        """排行榜双命令共用体：黑白名单闸门 + to_thread 渲染当期国服 Top100。
+
+        两榜独立成命令（/st_bb・/st_fe）避免单条消息过长；纯文本无 LLM 参与。
+        数据仅在用户触发时按 season.json 指针拉取当期赛季，TTL 内直读本地瘦身缓存。
+        """
+        if self._denied(**kwargs):
+            return False, "当前聊天无权限执行星塔旅人排行榜查询。", 1
+
+        ttl = int(self.config.leaderboard.ttl_minutes)
+        try:
+            text = await asyncio.to_thread(
+                query_lb_board,
+                mode,
+                ttl,
+                self._net_cache_dir_ready(),
+            )
+        except Exception as exc:
+            self.ctx.logger.exception("排行榜查询异常: %s", exc)
+            return False, f"星塔旅人排行榜查询失败: {exc}", 1
+        return True, text, 2
 
 
 def create_plugin() -> StellaSoraPlugin:
