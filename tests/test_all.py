@@ -9,21 +9,21 @@
 测试节（按此顺序执行；B 必须最先——其 json.load 计数断言依赖进程内首次触达 service）：
   B 字典单例与并发  —— dict.json 全进程只解析一次、_init_lock 并发安全、实例共享
   A 字典数据完整性  —— dict.json/names.json 合法性、字段完整、抽样一致、体积上限
-  C 术语替换等价性  —— 单遍交替正则 vs 逐条 legacy 在代表样例上全等
-  D 中文别名覆盖    —— [overrides.aliases] 模型、DictLookup 链式别名、动态配置
+  D 中文别名与术语替换 —— [overrides.aliases] 模型、DictLookup 链式别名、动态配置、单遍交替正则 vs legacy 等价
   E 索引页抓取      —— fetch_infodoc_index 缓存命中、URL 正确、异常降级空串
   F how 表驱动查询  —— query_how_rows 按区块抓取、预设码行、rotation 字段、表交集
-  G 直发端到端      —— 直发/缓存/去重/鉴权/人格开关/知识注入/SDK 透传（核心用例）
-  H 输出格式        —— LLM 输出原样直发（verbatim trust）+ infodoc 输出规则关键词
+  G 直发端到端      —— 合并转发直发/缓存/去重/鉴权/人格开关/知识注入/SDK 透传（核心用例）
+  H 输出格式        —— LLM 输出原样直发（verbatim trust，经合并转发）+ infodoc 输出规则关键词
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
   J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
   K 手动更新指令    —— @Command('st_update') 鉴权拦截、授权后台同步、缓存清空与异常降级
   L 定时自动同步    —— 每日 17:00 等待秒数计算、后台定时调度、同步完成清空缓存、on_unload 优雅取消
   M 统一队伍-槽位表构建器 —— 解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化
-  N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略
+  N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略；数据目录重定向（原 Q）
   P 热门优先级与属性泛查 —— 元素泛查检测、热门过滤组级补齐（<3补冷门至3）、priority 字段固化、端到端集成
-  R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗与降级渲染（零网络）
-  S 排行榜命令插件链路 —— kwargs 透传鉴权（白名单回归）、self-send 契约、拒绝不发送
+  O ss-data 与 what 五类 —— 关键词路由、卡池/讨伐/角色/秘纹/怪物资料、面板等级上限、参数回填、来源中文
+  R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗/降级、合并转发节点（零网络）
+  S 排行榜命令插件链路 —— kwargs 透传鉴权（白名单回归）、合并转发 self-send 契约、拒绝不发送
 """
 from __future__ import annotations
 
@@ -110,14 +110,29 @@ class MockLLM:
 
 
 class MockSend:
-    """模拟 ctx.send.text：记录 (stream_id, text) 发送历史。"""
+    """模拟 ctx.send：text 记录 (stream_id, text)，forward 记录 (stream_id, nodes)。
+
+    两个通道分开记录——text/forward 混写会掩盖"该走转发却发了文本"的回归。
+    """
 
     def __init__(self):
         self.sent = []
+        self.forwarded = []
 
     async def text(self, text, stream_id, **kwargs):
         self.sent.append((stream_id, text))
         return True
+
+    async def forward(self, messages, stream_id, **kwargs):
+        self.forwarded.append((stream_id, list(messages)))
+        return True
+
+
+def fwd_text(nodes) -> str:
+    """转发节点数组 → 节点文本拼接（单节点即全文），供内容断言。"""
+    return "\n".join(
+        seg.get("content", "") for node in nodes for seg in node.get("segments", [])
+    )
 
 
 class _ListLogHandler(logging.Handler):
@@ -254,9 +269,8 @@ def run_dict_data() -> None:
           f"dict {dict_size:,}B / names {names_size:,}B")
 
 
-# ===== 节 C：术语替换等价性（代表样例精简版） =====
-
-# 覆盖关键歧义类：长名抢短名、词边界、占位符、预设码、混合中文、空串、纯中文
+# 术语替换等价性样例（在 D 节内执行）：覆盖关键歧义类——长名抢短名、词边界、
+# 占位符、预设码、混合中文、空串、纯中文
 REPLACE_SAMPLES = [
     "",
     "这是一句纯中文，不含任何英文术语。",
@@ -271,31 +285,17 @@ REPLACE_SAMPLES = [
 ]
 
 
-def run_term_replace() -> None:
-    print("--- C 术语替换等价性 ---")
-    replacer = TermReplacer(DATA_DIR)
-    print(f"[info] mapping 词条数: {len(replacer.mapping):,}")
-    mismatched = []
-    for sample in REPLACE_SAMPLES:
-        if replacer.replace(sample) != replacer.replace_legacy(sample):
-            mismatched.append(sample[:40])
-    check("C1 单遍交替正则与 legacy 等价（代表样例）", not mismatched, f"分歧 {mismatched}")
-    replaced = replacer.replace("Skill DMG and Crit Rate")
-    check("C2 英转中实际生效", "技能伤害" in replaced and "Crit Rate" not in replaced, replaced)
-
-
-# ===== 节 D：中文别名覆盖 =====
+# ===== 节 D：中文别名与术语替换 =====
 
 def run_overrides() -> None:
-    print("--- D 中文别名覆盖 ---")
+    print("--- D 中文别名与术语替换 ---")
     cfg = plug.StellaSoraConfig()
-    check("D1 默认 aliases 非空且为 AliasEntry",
+    check("D1 默认别名模型（非空 AliasEntry、首条春科→科洛妮丝（新春）、无 replacements 残留）",
           len(cfg.overrides.aliases) > 0
-          and all(isinstance(a, plug.AliasEntry) for a in cfg.overrides.aliases))
-    check("D2 默认春科→科洛妮丝（新春）",
-          cfg.overrides.aliases[0].alias == "春科"
-          and cfg.overrides.aliases[0].official == "科洛妮丝（新春）")
-    check("D3 overrides 不再包含 replacements", not hasattr(cfg.overrides, "replacements"))
+          and all(isinstance(a, plug.AliasEntry) for a in cfg.overrides.aliases)
+          and cfg.overrides.aliases[0].alias == "春科"
+          and cfg.overrides.aliases[0].official == "科洛妮丝（新春）"
+          and not hasattr(cfg.overrides, "replacements"))
 
     lookup = DictLookup(DATA_DIR, custom_aliases={"土": "地", "花玲": "花铃", "春科": "科洛妮丝（新春）"})
     res_tu = lookup.lookup_term("土")
@@ -313,6 +313,17 @@ def run_overrides() -> None:
     check("D8 TermReplacer 无 custom_replacements",
           "custom_replacements" not in sig.parameters
           and not hasattr(TermReplacer, "set_custom_replacements"))
+
+    # —— 术语替换等价性（原 C 节，与别名同属中文归一化主题）——
+    replacer = TermReplacer(DATA_DIR)
+    print(f"[info] mapping 词条数: {len(replacer.mapping):,}")
+    mismatched = []
+    for sample in REPLACE_SAMPLES:
+        if replacer.replace(sample) != replacer.replace_legacy(sample):
+            mismatched.append(sample[:40])
+    check("C1 单遍交替正则与 legacy 等价（代表样例）", not mismatched, f"分歧 {mismatched}")
+    replaced = replacer.replace("Skill DMG and Crit Rate")
+    check("C2 英转中实际生效", "技能伤害" in replaced and "Crit Rate" not in replaced, replaced)
 
 
 # ===== 节 E：索引页抓取 =====
@@ -720,7 +731,7 @@ async def run_direct_send() -> None:
 
     # ===== G 节 fixture 表衔接：monkeypatch service.load_team_table 返回 fixture 表
     # dict（rows+report），handle_how 真实路径经 load_team_table 即得 fixture——不写磁盘。
-    # 未关联行（guide_ref=None）只出队名+成员+预设码骨架；G29 小禾+格芮行挂真实
+    # 未关联行（guide_ref=None）只出队名+成员+预设码骨架；G9c 小禾+格芮行挂真实
     # Terra Mark (S. Coronis Ver.) guide_ref，验证按区块抓取真实离线数据。
     import unittest.mock
 
@@ -781,9 +792,13 @@ async def run_direct_send() -> None:
     g_team_table_patch.start()
     llm, send = ctx.llm, ctx.send
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g1")
-    check("G1 直发成功且引导调 wait 禁 reply",
-          "已直接发送" in r["content"] and "wait 工具" in r["content"] and len(send.sent) == 1
-          and send.sent[0][0] == "stream_g1")
+    check("G1 直发成功且引导调 wait 禁 reply（经合并转发）",
+          "已直接发送" in r["content"] and "wait 工具" in r["content"] and len(send.forwarded) == 1
+          and send.forwarded[0][0] == "stream_g1")
+    check("G1b 转发卡整卡单节点（署名+全文）",
+          len(send.forwarded[0][1]) == 1
+          and send.forwarded[0][1][0].get("nickname") == "星塔旅人"
+          and fwd_text(send.forwarded[0][1]) == "mock LLM 攻略成品")
     check("G2 prompt 注入人格与表达风格",
           "你的名字是麦麦" in llm.calls[0]["prompt"] and "表达风格" in llm.calls[0]["prompt"])
     check("G3 SDK 透传 task_name=utils", llm.calls[0].get("task_name") == "utils")
@@ -791,7 +806,7 @@ async def run_direct_send() -> None:
     # G4-G6 失败分支：LLM 软失败→降级回传原始资料 / 硬异常→降级回传 / stream 缺失→未找到
     # （修复点2：资料查询成功但 LLM 加工失败时不再谎报"未找到"，而是带系统说明回传原始资料）
     ctx.llm = MockLLM(fail=True)
-    n_sent = len(send.sent)
+    n_sent, n_fwd = len(send.sent), len(send.forwarded)
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g4")
     relay_content = str(r.get("content", ""))
     check("G4 LLM 软失败→降级回传原始资料（前缀+原文+非未找到+不直发）",
@@ -799,7 +814,7 @@ async def run_direct_send() -> None:
           and plug._FAILURE_RELAY_PREFIX in relay_content
           and "夏花" in relay_content
           and "未找到相关攻略" not in relay_content
-          and len(send.sent) == n_sent)
+          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
     ctx.llm = MockLLM(hard_fail=True)
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g5")
     relay_content = str(r.get("content", ""))
@@ -827,10 +842,10 @@ async def run_direct_send() -> None:
     check("G8 人格开关生效", no_persona and "你的名字是麦麦" in llm.calls[-1]["prompt"])
 
     # G9 修复点3：联合查询（≥2 角色名）不再强制回传——direct_send=true 时直发聊天
-    n_sent = len(send.sent)
+    n_fwd = len(send.forwarded)
     ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9")
-    check("G9 联合查询（≥2 角色名）改直发（send 一次+已发送确认+联合问题入 prompt）",
-          len(send.sent) == n_sent + 1
+    check("G9 联合查询（≥2 角色名）改直发（转发一次+已发送确认+联合问题入 prompt）",
+          len(send.forwarded) == n_fwd + 1
           and "已直接发送" in str(ret.get("content", ""))
           and "wait 工具" in str(ret.get("content", ""))
           and "你的名字是麦麦" in llm.calls[-1]["prompt"]
@@ -838,14 +853,14 @@ async def run_direct_send() -> None:
 
     # G9b alternative：direct_send=false → 回传行为正常（加工成品回传 planner，不直发聊天）
     p._plugin_config_instance.query.direct_send = False
-    n_sent = len(send.sent)
+    n_sent, n_fwd = len(send.sent), len(send.forwarded)
     ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9b")
     check("G9b direct_send=false 联合查询回传（客观体+系统说明包装+不直发）",
           "客观" in llm.calls[-1]["prompt"]
           and "你的名字是麦麦" not in llm.calls[-1]["prompt"]
           and "系统说明" in str(ret.get("content", ""))
           and "mock LLM 攻略成品" in str(ret.get("content", ""))
-          and len(send.sent) == n_sent)
+          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
     p._plugin_config_instance.query.direct_send = True
 
     # G9c 未命中（用户裁定更新）：单角色表未命中 + 直发模式 → 提示文本直接发送到聊天，
@@ -873,18 +888,18 @@ async def run_direct_send() -> None:
 
     # G9d2 回传模式未命中：direct_send=false 维持旧行为（返回"未找到相关攻略。"给 planner，不直发）
     p._plugin_config_instance.query.direct_send = False
-    n_sent = len(send.sent)
+    n_sent, n_fwd = len(send.sent), len(send.forwarded)
     r_relay_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9d2")
     check("G9d2 回传模式未命中→返回planner原文（不直发）",
           r_relay_miss == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-          and len(send.sent) == n_sent)
+          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
     p._plugin_config_instance.query.direct_send = True
 
     # G9e presets=true 直发：资料含"预设码："行（码原文）——透传至 LLM prompt
-    n_sent = len(send.sent)
+    n_fwd = len(send.forwarded)
     await p.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_g9e")
     check("G9e presets=true 资料+prompt 含预设码行",
-          len(send.sent) == n_sent + 1
+          len(send.forwarded) == n_fwd + 1
           and "预设码：" in llm.calls[-1]["prompt"]
           and "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in llm.calls[-1]["prompt"])
 
@@ -918,14 +933,14 @@ async def run_direct_send() -> None:
     llm2, send2 = ctx2.llm, ctx2.send
     await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
     r2b = await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
-    check("G10 同流同 query 去重拦截（LLM/send 各一次）",
-          "勿重复发送" in r2b.get("content", "") and len(llm2.calls) == 1 and len(send2.sent) == 1)
+    check("G10 同流同 query 去重拦截（LLM/转发各一次）",
+          "勿重复发送" in r2b.get("content", "") and len(llm2.calls) == 1 and len(send2.forwarded) == 1)
 
     ctx2.llm, ctx2.send = MockLLM(), MockSend()
     p2._recent_direct.clear()
     await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup11")
     r11 = await p2.handle_how(query="猫眼", group_id="g1", stream_id="stream_dedup11")
-    check("G11 不同 query 不拦截", "已直接发送" in r11.get("content", "") and len(ctx2.send.sent) == 2)
+    check("G11 不同 query 不拦截", "已直接发送" in r11.get("content", "") and len(ctx2.send.forwarded) == 2)
 
     ctx2.llm, ctx2.send = MockLLM(), MockSend()
     p2._recent_direct.clear()
@@ -940,21 +955,21 @@ async def run_direct_send() -> None:
     llm15.answer = "夏花纹章推荐成品攻略"
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
     r15b = await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    check("G13 缓存命中（LLM 一次/send 两次/内容相同）",
-          len(llm15.calls) == 1 and len(send15.sent) == 2
-          and send15.sent[0][1] == send15.sent[1][1] == "夏花纹章推荐成品攻略"
+    check("G13 缓存命中（LLM 一次/转发两次/内容相同）",
+          len(llm15.calls) == 1 and len(send15.forwarded) == 2
+          and fwd_text(send15.forwarded[0][1]) == fwd_text(send15.forwarded[1][1]) == "夏花纹章推荐成品攻略"
           and "已直接发送" in r15b.get("content", ""))
 
     # G14 配置更新去抖：无答案相关变化 → 保留缓存；相关字段实质变化 → 清缓存
     await p15.on_config_update(scope="self", config_data={}, version="1.2.3")
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15c")
     check("G14a 无实质变化的配置更新保留缓存（LLM 仍 1 次）",
-          len(llm15.calls) == 1 and len(send15.sent) == 3)
+          len(llm15.calls) == 1 and len(send15.forwarded) == 3)
 
     p15._plugin_config_instance.query.llm_model = "alternate"  # 答案相关字段实质变化（不在缓存 key 内，证明清的是缓存）
     await p15.on_config_update(scope="query", config_data={}, version="1.2.3")
     await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.sent) == 4)
+    check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.forwarded) == 4)
 
     # G14b 别名变更进入答案指纹（回归：AliasEntry 为 pydantic 模型，须先转纯 dict
     # 才能 json.dumps；旧实现直接序列化抛 TypeError 被吞 → 别名恒不入指纹、变更不清缓存）
@@ -971,7 +986,7 @@ async def run_direct_send() -> None:
     await p18.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_cache18")
     await p18.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_cache18")
     check("G15 presets 独立缓存键（1→2→命中 2）",
-          len(llm18.calls) == 2 and len(send18.sent) == 3)
+          len(llm18.calls) == 2 and len(send18.forwarded) == 3)
 
     # G16 游戏知识内联验证：how 模板已内联游戏知识，直发 prompt 恒含知识标头
     p19, ctx19 = make_plugin()
@@ -1059,23 +1074,9 @@ async def run_direct_send() -> None:
         ctx_logger.removeHandler(ctx_handler)
         module_logger.removeHandler(module_handler)
 
-    # G22-G28 修复点2：LLM 加工失败降级回传（资料非空 → 系统说明+原始资料；不再谎报"未找到"）
+    # 修复点2：LLM 加工失败降级回传（资料非空 → 系统说明+原始资料；不再谎报"未找到"）。
+    # 硬异常经 handle_how 真实链路已由 G5 覆盖，不再单测。
     relay_prefix = plug._FAILURE_RELAY_PREFIX
-
-    # G22 硬异常 + direct=True：返回工具结果（非聊天直发），内容=前缀+资料原文
-    p22, ctx22 = make_plugin()
-    await p22.on_load()
-    ctx22.llm = MockLLM(hard_fail=True)
-    r22 = await p22._direct_send(
-        tool_name="stellasora_how", question="夏花攻略", material="测试原始攻略资料XYZ",
-        direct=True, query="夏花", stream_id="stream_g22",
-    )
-    check("G22 LLM 硬异常降级回传（前缀+资料原文+非未找到+不直发聊天）",
-          str(r22.get("content", "")).startswith("[系统说明")
-          and relay_prefix in str(r22.get("content", ""))
-          and "测试原始攻略资料XYZ" in str(r22.get("content", ""))
-          and "未找到相关攻略" not in str(r22.get("content", ""))
-          and ctx22.send.sent == [])
 
     # G23 direct=False（回传路径）统一降级语义：前缀+资料原文
     p23b, ctx23b = make_plugin()
@@ -1138,17 +1139,6 @@ async def run_direct_send() -> None:
           and str(r26b.get("content", "")).startswith("[系统说明")
           and ctx26.send.sent == [])
 
-    # G27 软失败（success=False）经 handle_how 真实链路降级回传
-    p27, ctx27 = make_plugin()
-    await p27.on_load()
-    ctx27.llm = MockLLM(fail=True)
-    r27 = await p27.handle_how(query="夏花", group_id="g1", stream_id="stream_g27")
-    check("G27 软失败经真实链路降级回传（前缀+含资料+非未找到）",
-          str(r27.get("content", "")).startswith("[系统说明")
-          and relay_prefix in str(r27.get("content", ""))
-          and "夏花" in str(r27.get("content", ""))
-          and "未找到相关攻略" not in str(r27.get("content", "")))
-
     # G28 加工成功（响应纯空白视为失败）→ 降级回传：success=True 但 response 空白
     p28, ctx28 = make_plugin()
     await p28.on_load()
@@ -1162,53 +1152,9 @@ async def run_direct_send() -> None:
           and "空白响应降级资料" in str(r28.get("content", ""))
           and "未找到相关攻略" not in str(r28.get("content", "")))
 
-    # G29-G30 表缓存 reload 接线：同步产出新统一表后 reload_team_table()
-    # 使运行时表缓存即时失效——手动 /st_update 与每日 17:00 定时两通道均须接线。
-    # plugin 以 from service import reload_team_table 绑定，故补丁挂在 plug 命名空间
-    g29_calls: list = []
-    g29_patch = unittest.mock.patch.object(plug, "reload_team_table", side_effect=lambda: g29_calls.append(True))
-    g29_patch.start()
-    try:
-        # G29 手动更新通道：handle_update（授权路径）同步成功后调用 reload
-        p29, ctx29 = make_plugin()
-        await p29.on_load()
-        orig_sync29 = plug.sync_offline_data
-        plug.sync_offline_data = lambda **kwargs: {"status": "ok"}
-        try:
-            n_reloads = len(g29_calls)
-            await p29.handle_update(stream_id="stream_g29", group_id="any_group")
-            check("G29 handle_update 同步后调用 reload_team_table", len(g29_calls) == n_reloads + 1)
-        finally:
-            plug.sync_offline_data = orig_sync29
-
-        # G30 定时同步通道：_schedule_daily_sync 内 sync 完成后调用 reload
-        p30, ctx30 = make_plugin(ttl=3600)
-        orig_sync30 = plug.sync_offline_data
-        plug.sync_offline_data = lambda **kwargs: {"status": "ok"}
-        delays = [0.05, 3600.0]
-
-        def mock_calc_delay(*args, **kwargs):
-            return delays.pop(0) if delays else 3600.0
-
-        orig_calc30 = p30._calculate_delay_to_sync
-        p30._calculate_delay_to_sync = mock_calc_delay
-        n_reloads30 = len(g29_calls)
-        try:
-            await p30.on_load()
-            await asyncio.sleep(0.2)
-            check("G30 _schedule_daily_sync 同步后调用 reload_team_table",
-                  len(g29_calls) == n_reloads30 + 1,
-                  f"reload 次数={len(g29_calls)}（前值 {n_reloads30}）")
-        finally:
-            plug.sync_offline_data = orig_sync30
-            p30._calculate_delay_to_sync = orig_calc30
-            if p30._sync_task and not p30._sync_task.done():
-                p30._sync_task.cancel()
-                await asyncio.gather(p30._sync_task, return_exceptions=True)
-    finally:
-        g29_patch.stop()
-        g_team_table_patch.stop()
-        service.reload_team_table()
+    # G29/G30（表缓存 reload 接线）与 K20/L11 完全重复，已收敛到 K/L 节断言
+    g_team_table_patch.stop()
+    service.reload_team_table()
 
 
 # ===== 节 H：输出格式（verbatim trust + infodoc 输出规则） =====
@@ -1230,10 +1176,10 @@ async def run_output_format() -> None:
     )
     ctx.llm = MockLLM(answer=markdown_response)
     res1 = await p.handle_how(query="夏花", question="夏花怎么玩", group_id="g1", stream_id="s_h1")
-    sent1 = ctx.send.sent[0][1]
+    sent1 = fwd_text(ctx.send.forwarded[0][1])
     res2 = await p.handle_how(query="夏花", question="夏花怎么玩", group_id="g1", stream_id="s_h2")
-    sent2 = ctx.send.sent[1][1]
-    check("H1 LLM 输出原样直发（新鲜+缓存 verbatim）",
+    sent2 = fwd_text(ctx.send.forwarded[1][1])
+    check("H1 LLM 输出原样直发（新鲜+缓存 verbatim，经合并转发单节点）",
           sent1 == markdown_response and sent2 == markdown_response
           and "已直接发送" in res1["content"] and "已直接发送" in res2["content"])
 
@@ -2242,6 +2188,9 @@ def run_section_n() -> None:
     finally:
         service.reload_team_table()
 
+    # —— 数据目录重定向（原 Q 节，与表加载同属数据目录主题）——
+    run_data_dir_redirect()
+
 
 async def run_section_p() -> None:
     """测试热门优先级过滤与纯属性泛查：元素检测、组级补齐、全量豁免、build priority 固化。"""
@@ -2477,7 +2426,7 @@ def test_disc_material() -> None:
 
 
 def test_keyword_routes() -> None:
-    """O6: 关键词路由测试（排行榜已删除，不再命中）。"""
+    """O6: 关键词路由测试（排行榜走 /st_bb・/st_fe 命令，不占 what 关键词路由）。"""
     r_banner = service._route_what_keywords("当前卡池") == "banner"
     r_lb_none = service._route_what_keywords("赛季排行榜") is None
     r_none = service._route_what_keywords("夏花") is None
@@ -3073,8 +3022,8 @@ def run_section_o() -> None:
 
 
 def run_data_dir_redirect() -> None:
-    """Q: set_data_dir 重定向——数据目录切换后读取/缓存/实例全部准新目录，不回退源码目录。"""
-    print("--- Q 数据目录重定向 ---")
+    """数据目录重定向（原 Q 节，现挂 N 节末尾执行）：切换后读取/缓存/实例全部准新目录，不回退源码目录。"""
+    print("--- 数据目录重定向（原 Q） ---")
     host_dir = DATA_DIR
     src_data_dir = ROOT / "data"
     check("Q0 插件源码目录不再有 data/", not src_data_dir.exists(),
@@ -3102,7 +3051,7 @@ def run_data_dir_redirect() -> None:
 
 
 def run_section_r() -> None:
-    """R: /st_lb 排行榜命令——瘦身提取、指针跟随、TTL 缓存、空窗/降级渲染（零网络）。"""
+    """R: 排行榜命令渲染——瘦身提取、指针跟随、TTL 缓存、空窗/降级、合并转发节点（零网络）。"""
     print("--- R 排行榜命令 ---")
     host_dir = DATA_DIR
 
@@ -3185,14 +3134,17 @@ def run_section_r() -> None:
                 meta={"bb12": {"floor": {}}},
                 boards={"fe7": (None, "not_found")},
             )
-            out_fe = service.query_lb_board("fe", ttl_minutes=10, st=fake)
-            out_bb = service.query_lb_board("bb", ttl_minutes=10, st=fake)
+            nodes_fe, notice_fe = service.query_lb_board("fe", ttl_minutes=10, st=fake)
+            nodes_bb, notice_bb = service.query_lb_board("bb", ttl_minutes=10, st=fake)
             check("R2a 指针跟随拉取 fe7（不写死赛季）", fake.board_calls == [("fe7", True)],
                   str(fake.board_calls))
-            check("R2b fe 空窗文案", "【终焉绝响 S7】 当期未开榜" in out_fe)
-            check("R2c bb 新鲜缓存零网络并正确渲染",
-                  "【联合讨伐 S12】" in out_bb and "1. 阿尔法 — 3,139,255" in out_bb
-                  and "（国服共 1,234 人 · 更新于 刚刚）" in out_bb)
+            check("R2b fe 空窗文案走 notice（无节点）",
+                  "【终焉绝响 S7】 当期未开榜" in notice_fe and nodes_fe == [])
+            check("R2c bb 新鲜缓存零网络并正确渲染（表头节点+条目节点）",
+                  notice_bb == "" and len(nodes_bb) == 2
+                  and "【联合讨伐 S12】 国服 Top2 · 共 1,234 人 · 更新于 刚刚" in fwd_text(nodes_bb)
+                  and "第 1–2 名" in fwd_text(nodes_bb)
+                  and "1. 阿尔法 — 3,139,255" in fwd_text(nodes_bb))
 
             # R3 过期缓存触发重拉
             write_top(time.time() - 7200)
@@ -3201,9 +3153,9 @@ def run_section_r() -> None:
                 meta={},
                 boards={"bb12": (slim, "ok"), "fe7": (None, "not_found")},
             )
-            out2 = service.query_lb_board("bb", ttl_minutes=10, st=fake2)
+            out2, notice2 = service.query_lb_board("bb", ttl_minutes=10, st=fake2)
             check("R3a 过期缓存触发重拉", fake2.board_calls == [("bb12", True)])
-            check("R3b 重拉后页脚刷新", "更新于 刚刚" in out2 and "1. 阿尔法 — 3,139,255" in out2)
+            check("R3b 重拉后表头刷新", "更新于 刚刚" in fwd_text(out2) and "1. 阿尔法 — 3,139,255" in fwd_text(out2))
 
             # R4 拉取失败降级陈旧缓存
             fake3 = FakeBoardFetcher(
@@ -3211,9 +3163,9 @@ def run_section_r() -> None:
                 meta={},
                 boards={"bb12": (None, "error")},
             )
-            out3 = service.query_lb_board("bb", ttl_minutes=10, st=fake3)
+            out3, notice3 = service.query_lb_board("bb", ttl_minutes=10, st=fake3)
             check("R4 拉取失败降级陈旧缓存并标注年龄",
-                  "1. 阿尔法 — 3,139,255" in out3 and "2 小时前" in out3)
+                  "1. 阿尔法 — 3,139,255" in fwd_text(out3) and "2 小时前" in fwd_text(out3))
 
             # R5 BB_SEASON 缺失按 meta 最大 bbNN 降级
             fake4 = FakeBoardFetcher(
@@ -3221,8 +3173,8 @@ def run_section_r() -> None:
                 meta={"bb11": {}, "bb12": {}},
                 boards={},
             )
-            out4 = service.query_lb_board("bb", ttl_minutes=10, st=fake4)
-            check("R5 BB_SEASON 缺失按 meta 键表降级", "【联合讨伐 S12】" in out4)
+            out4, notice4 = service.query_lb_board("bb", ttl_minutes=10, st=fake4)
+            check("R5 BB_SEASON 缺失按 meta 键表降级", "【联合讨伐 S12】" in fwd_text(out4))
 
             # R6 ttl=0 强制每次重拉
             fake5 = FakeBoardFetcher(
@@ -3238,7 +3190,7 @@ def run_section_r() -> None:
 
 
 async def run_section_s() -> None:
-    """S: 排行榜命令插件链路——kwargs 透传鉴权、self-send 契约（宿主不发送返回文本）。"""
+    """S: 排行榜命令插件链路——kwargs 透传鉴权、合并转发 self-send 契约（宿主不发送返回文本）。"""
     print("--- S 排行榜命令插件链路 ---")
     p, ctx = make_plugin()
     await p.on_load()
@@ -3250,33 +3202,35 @@ async def run_section_s() -> None:
         check(f"S1 {handler} Command 元数据存在且指令名 {cmd_name}",
               info is not None and getattr(info, "name", "") == cmd_name)
 
-    sent_stub = "【联合讨伐 S11】\n1. 测试 — 1\n（国服共 1 人 · 更新于 刚刚）"
+    lb_nodes_stub = [
+        {"nickname": "星塔旅人", "segments": [{"type": "text", "content": "【联合讨伐 S11】 国服 Top1 · 共 1 人 · 更新于 刚刚"}]},
+        {"nickname": "星塔旅人", "segments": [{"type": "text", "content": "第 1–1 名\n1. 测试 — 1"}]},
+    ]
     orig_lb = plug.query_lb_board
-    plug.query_lb_board = lambda mode, ttl_minutes=10, cache_dir=None, **kw: sent_stub
+    plug.query_lb_board = lambda mode, ttl_minutes=10, cache_dir=None, **kw: (lb_nodes_stub, "")
     try:
-        # 2. kwargs 必须透传：白名单命中群号 → 放行并发送
+        # 2. kwargs 必须透传：白名单命中群号 → 放行并合并转发
         #（回归：_handle_lb_board 曾漏收 kwargs，_denied 空身份导致白名单模式全拒）
         p.config.access_control.mode = "whitelist"
         p.config.access_control.whitelist = ["id_ok"]
-        ctx.send.sent.clear()
         res = await p.handle_lb_bb(stream_id="stream_s1", group_id="id_ok", user_id="u1")
         check("S2 白名单群号命中放行", res[0] is True)
-        check("S3 榜单文本经 ctx.send.text 送达命令流",
-              len(ctx.send.sent) == 1 and ctx.send.sent[0][0] == "stream_s1"
-              and "【联合讨伐 S11】" in ctx.send.sent[0][1])
+        check("S3 榜单经 ctx.send.forward 送达命令流（节点即渲染产物）",
+              len(ctx.send.forwarded) == 1 and ctx.send.forwarded[0][0] == "stream_s1"
+              and ctx.send.forwarded[0][1] == lb_nodes_stub)
         check("S4 返回值为执行摘要而非全文", res[1] == "星塔旅人排行榜已发送" and res[2] == 2)
 
         # 3. 白名单未命中拒绝且不发送
-        ctx.send.sent.clear()
+        n_sent, n_fwd = len(ctx.send.sent), len(ctx.send.forwarded)
         res = await p.handle_lb_fe(stream_id="stream_s2", group_id="other_group")
         check("S5 白名单未命中拒绝", res[0] is False and res[2] == 1)
-        check("S6 拒绝路径不发送任何消息", len(ctx.send.sent) == 0)
+        check("S6 拒绝路径不发送任何消息",
+              len(ctx.send.sent) == n_sent and len(ctx.send.forwarded) == n_fwd)
 
         # 4. 私聊：group_id 缺失回落 user_id 匹配
-        ctx.send.sent.clear()
         res = await p.handle_lb_fe(stream_id="stream_s3", user_id="id_ok")
         check("S7 私聊 user_id 命中放行并发送",
-              res[0] is True and len(ctx.send.sent) == 1 and ctx.send.sent[0][0] == "stream_s3")
+              res[0] is True and len(ctx.send.forwarded) == 2 and ctx.send.forwarded[1][0] == "stream_s3")
     finally:
         plug.query_lb_board = orig_lb
 
@@ -3286,8 +3240,7 @@ async def run_section_s() -> None:
 SECTIONS = {
     "B": ("字典单例与并发", run_singleton),
     "A": ("字典数据完整性", run_dict_data),
-    "C": ("术语替换等价性", run_term_replace),
-    "D": ("中文别名覆盖", run_overrides),
+    "D": ("中文别名与术语替换", run_overrides),
     "E": ("索引页抓取", run_fetcher_index),
     "F": ("how 表驱动查询", run_query_how_section),
     "G": ("直发端到端", run_direct_send),
@@ -3300,13 +3253,13 @@ SECTIONS = {
     "N": ("slot 查询服务", run_section_n),
     "P": ("热门优先级与属性泛查", run_section_p),
     "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
-    "Q": ("数据目录重定向", run_data_dir_redirect),
     "R": ("排行榜命令", run_section_r),
     "S": ("排行榜命令插件链路", run_section_s),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q", "R", "S"]
+# （原 C 并入 D、原 Q 挂 N 节末尾）
+ORDER = ["B", "A", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "R", "S"]
 ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P", "S"}
 
 

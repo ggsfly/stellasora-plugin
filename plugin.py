@@ -24,6 +24,9 @@ from maibot_sdk.types import ToolParamType, ToolParameterInfo
 
 MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增长
 
+# 直发成品合并转发卡的节点署名；user_id 留空由适配器回落机器人自身账号
+_FORWARD_NICKNAME = "星塔旅人"
+
 # 工具 RPC 预算与插件内 LLM 调用预算（毫秒）。
 # 宿主默认工具超时 60s（component_timeout.DEFAULT_COMPONENT_RPC_TIMEOUT_MS），
 # 插件能力 RPC 默认超时 30s（runner rpc_client 默认值）——两者叠加会造成
@@ -143,7 +146,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.2.0", description="配置版本")
+    config_version: str = Field(default="1.3.0", description="配置版本")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -569,6 +572,32 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("构建人格块失败，将使用无人格模式: %s", exc)
             return ""
 
+    async def _send_direct_answer(self, answer: str, stream_id: str, use_forward: bool) -> bool:
+        """直发成品统一出口：how 走合并转发（长文收进转发卡不刷屏），what 维持文本。
+
+        forward 为整卡单节点；processed_plain_text 传成品摘要，供消息历史展示
+        （宿主默认"[转发消息]"无信息量）。宿主侧失败返回 False（不抛异常），
+        传输异常同样归一为 False。
+        """
+        try:
+            if use_forward:
+                return bool(
+                    await self.ctx.send.forward(
+                        [
+                            {
+                                "nickname": _FORWARD_NICKNAME,
+                                "segments": [{"type": "text", "content": answer}],
+                            }
+                        ],
+                        stream_id,
+                        processed_plain_text=answer[:120],
+                    )
+                )
+            return bool(await self.ctx.send.text(answer, stream_id))
+        except Exception:
+            self.ctx.logger.exception("直发成品发送异常: stream=%s", stream_id)
+            return False
+
     async def _direct_send(
         self,
         *,
@@ -578,11 +607,13 @@ class StellaSoraPlugin(MaiBotPlugin):
         direct: bool = True,
         presets: bool = False,
         query: str = "",
+        use_forward: bool = False,
         **kwargs,
     ) -> dict:
         """攻略加工：LLM 把攻略资料加工成中文成品。
 
-        direct=True（默认）：加工后 ctx.send 直发聊天，返回"已发送"。
+        direct=True（默认）：加工后发送聊天——how（use_forward=True）以合并转发
+          整卡送达，what 为普通文本；返回"已发送"。
           加工 prompt 注入 bot 人格——成品即最终回复，需要与 bot 口吻一致。
         direct=False：加工后返回 LLM 成品给 planner，由 replyer 组织回复。
           加工 prompt **不注入人格**——中间产物保持客观攻略体，人格由
@@ -622,12 +653,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             cached_answer = cache.get(cache_key)
             if cached_answer:
                 self.ctx.logger.info("直接发送缓存命中: key=%s", cache_key)
-                try:
-                    sent = await self.ctx.send.text(cached_answer, stream_id)
-                except Exception:
-                    self.ctx.logger.exception("直接发送模式消息发送异常")
-                    return not_found
-                if not sent:
+                if not await self._send_direct_answer(cached_answer, stream_id, use_forward):
                     self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
                     return not_found
                 # 发送成功即登记去重守卫，保证重复可拦截
@@ -723,12 +749,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             )
             return {"name": tool_name, "content": wrapped}
 
-        try:
-            sent = await self.ctx.send.text(answer, stream_id)
-        except Exception:
-            self.ctx.logger.exception("直接发送模式消息发送异常")
-            return not_found
-        if not sent:
+        if not await self._send_direct_answer(answer, stream_id, use_forward):
             self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
             return not_found
 
@@ -869,7 +890,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         "stellasora_how",
         description="查询星塔旅人游戏中配队、纹章搭配、秘纹搭配、技能升级优先度等操作指南。"
                     "输入：query 传角色名（可空格分隔多个，如'XX YY'）；纯属性泛查直接传属性词（如'风队'）。"
-                    "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
+                    "输出：开启直接发送时攻略已以合并转发发送到聊天，返回后调 wait 结束本轮；"
                     "关闭直接发送时返回攻略正文，用 reply 组织回复。"
                     "适用：用户问'XX怎么配队''XX纹章怎么选''XX秘纹推荐''XX先升级什么技能'，"
                     "以及'XX的攻略/怎么玩'或'X系/属性队'时；用户问'XX的完整资料'则改用 stellasora_what。"
@@ -992,7 +1013,8 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
         """how 查询的直发/回传公共路径（未找到直发提示 + 去重守卫 + LLM 加工）。
 
-        直发判定由配置 direct_send 决定。
+        直发判定由配置 direct_send 决定；直发成品经合并转发整卡送达
+        （_send_direct_answer），未找到提示仍为单行文本。
         未找到语义（用户裁定）：direct_send=true 时不再回传 planner——
         直接向聊天发送用户可读提示并返回"已发送"确认，planner 只需 wait 结束本轮，
         避免 planner 拿到否定结果后再组织一轮多余回复；direct_send=false 维持回传。
@@ -1032,6 +1054,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             direct=direct,
             presets=presets,
             query=query,
+            use_forward=True,
             **kwargs,
         )
 
@@ -1107,8 +1130,8 @@ class StellaSoraPlugin(MaiBotPlugin):
 
         kwargs 必须从命令 handler 透传（宿主注入的 group_id/user_id 为 _denied
         依据，漏传即空身份导致白名单模式全拒）。宿主对命令返回值只记日志不发送
-        （/st_update 同款 self-send 约定），榜单文本须经 ctx.send.text 送达聊天，
-        返回值仅作执行摘要。
+        （/st_update 同款 self-send 约定），返回值仅作执行摘要。渲染结果
+        (nodes, notice)：单行提示走文本，榜单走合并转发——长文本收进转发卡不刷屏。
         """
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人排行榜查询。", 1
@@ -1116,7 +1139,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
         ttl = int(self.config.leaderboard.ttl_minutes)
         try:
-            text = await asyncio.to_thread(
+            nodes, notice = await asyncio.to_thread(
                 query_lb_board,
                 mode,
                 ttl,
@@ -1127,10 +1150,16 @@ class StellaSoraPlugin(MaiBotPlugin):
             return False, f"星塔旅人排行榜查询失败: {exc}", 1
 
         try:
-            await self.ctx.send.text(text, effective_stream_id)
+            if notice:
+                sent = await self.ctx.send.text(notice, effective_stream_id)
+            else:
+                sent = await self.ctx.send.forward(nodes, effective_stream_id)
         except Exception as exc:
             self.ctx.logger.exception("排行榜发送异常: %s", exc)
             return False, f"星塔旅人排行榜发送失败: {exc}", 1
+        if not sent:
+            self.ctx.logger.error("排行榜发送失败: stream=%s", effective_stream_id)
+            return False, "星塔旅人排行榜发送失败", 1
         return True, "星塔旅人排行榜已发送", 2
 
 

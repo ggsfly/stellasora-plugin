@@ -2,6 +2,21 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.0] - 2026-09-25
+
+### 变更
+
+- **排行榜 `/st_bb`・`/st_fe` 改为合并转发发送**：渲染层（`query_lb_board`/`_lb_render_mode`）改为返回 `(nodes, notice)` 结构——单行提示（当期未开榜/指针缺失/拉取失败/国服空/参数错误）仍走纯文本，榜单走 `ctx.send.forward` 合并转发卡：表头节点（赛季 + 实际上榜条数 + 总人数 + 数据年龄）+ 每 25 名一个节点，长榜单收进转发卡不刷群聊屏幕。发送失败（forward 返回 False）记日志并返回失败摘要，不回退文本。
+- **how 链路直发改为合并转发（整卡单节点）**：`_direct_send` 新增 `use_forward` 参数并抽出的统一发送出口 `_send_direct_answer`——how 成品以单节点合并转发卡送达（`processed_plain_text` 传前 120 字摘要供消息历史展示），what 链路维持普通文本；未找到提示与 `/st_update` 进度提示仍为单行文本。forward 返回 False 时维持既有失败语义（不写成品缓存、不登记去重），无文本兜底。
+
+### 修复
+
+- **`_manifest.json` 补声明 `send.forward` 能力**：宿主对插件能力按 manifest 强制鉴权，漏声明时 `send.forward` 调用会被拒绝——本次随功能一并声明。
+
+### 测试
+
+- `test_all.py` 精简与适配（245 项断言）：MockSend 拆分 `sent`/`forwarded` 双通道（防"该转发却发文本"回归掩盖）；R 节改断言 `(nodes, notice)` 与新表头格式；S 节桩改返回节点数组、断言 forward 通道，拒绝路径增补双通道不发送校验；新增 G1b 转发卡单节点结构断言。精简重复用例：删 G29/G30（与 K20/L11 完全重复）、G22/G27（LLM 降级与 G5/G4 同质），未找到提示三处断言（G9c/G9d/P4d）保留 text 断言；原 C 节并入 D（中文归一化主题）、原 Q 节挂 N 节末尾，调度表与模块 docstring 同步。
+
 ## [1.3.0] - 2026-09-25
 
 ### 新功能

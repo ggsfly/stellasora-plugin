@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Collection, Dict, List, Optional, Set, Tuple
 
 import json
 import logging
@@ -2784,6 +2784,18 @@ def _match_blitz_boss(
 # 赛季前缀 → 中文模式名（与 ssleaderboard 仓库 sid 约定一致）
 _LB_MODE_CN = {"bb": "联合讨伐", "fe": "终焉绝响"}
 
+# 合并转发节点署名；user_id 留空，由适配器回落到机器人自身账号
+_LB_FORWARD_NICKNAME = "星塔旅人"
+
+# 每个转发节点承载的排名条数：Top100 拆成表头 + 4 块共 5 节点，
+# 卡片预览有层次且单节点不至于过长
+_LB_FORWARD_CHUNK = 25
+
+
+def _lb_node(text: str) -> Dict[str, Any]:
+    """构造一个纯文本合并转发节点（宿主 send.forward 节点契约）。"""
+    return {"nickname": _LB_FORWARD_NICKNAME, "segments": [{"type": "text", "content": text}]}
+
 
 def _lb_load_top(offline_dir: Path, sid: str) -> Tuple[Optional[dict], float]:
     """读取 {sid}_top.json 瘦身缓存，返回 (data, 距上次拉取的秒数)。
@@ -2818,16 +2830,18 @@ def _lb_render_mode(
     prefix: str,
     sid: str,
     ttl_seconds: float,
-) -> str:
-    """渲染单个模式的当期国服 Top100 段落。
+) -> Tuple[List[Dict[str, Any]], str]:
+    """渲染单个模式的当期国服榜单为合并转发节点。
 
-    TTL 内直读本地瘦身缓存；过期或缺失时重拉（force_update 跳过 fetcher 的
-    离线优先分支）。拉取失败但有历史缓存时降级展示陈旧数据——数据年龄由
-    页脚"更新于"自明。上游无当期赛季文件（fe 赛季初常态）输出"未开榜"。
+    返回 (nodes, notice) 且恰一非空：notice 为单行提示（指针缺失/未开榜/
+    拉取失败/国服空），由调用方走纯文本；nodes 为合并转发节点数组，由调用方
+    走 send.forward。TTL 内直读本地瘦身缓存；过期或缺失时重拉（force_update
+    跳过 fetcher 的离线优先分支）。拉取失败但有历史缓存时降级展示陈旧数据——
+    数据年龄由表头"更新于"自明。上游无当期赛季文件（fe 赛季初常态）输出"未开榜"。
     """
     mode_cn = _LB_MODE_CN.get(prefix, prefix.upper())
     if not sid:
-        return f"【{mode_cn}】当期赛季指针缺失。"
+        return [], f"【{mode_cn}】当期赛季指针缺失。"
 
     match = re.fullmatch(r"[a-z]+(\d+)", sid)
     season_num = match.group(1) if match else "?"
@@ -2839,22 +2853,30 @@ def _lb_render_mode(
         if status == "ok" and slim is not None:
             data, age = slim, 0.0
         elif status == "not_found":
-            return f"{header} 当期未开榜（上游尚未发布榜单数据）。"
+            return [], f"{header} 当期未开榜（上游尚未发布榜单数据）。"
         elif data is None:
-            return f"{header} 榜单拉取失败，请稍后再试。"
+            return [], f"{header} 榜单拉取失败，请稍后再试。"
 
     cn = data["regions"].get("cn")
     if not isinstance(cn, dict) or not cn.get("top"):
-        return f"{header} 国服暂无榜单数据。"
+        return [], f"{header} 国服暂无榜单数据。"
 
-    lines = [header]
-    for entry in cn["top"]:
-        rank = entry.get("rank")
-        name = entry.get("name") or "?"
-        score = int(entry.get("score") or 0)
-        lines.append(f"{rank}. {name} — {score:,}")
-    lines.append(f"（国服共 {int(cn.get('total') or 0):,} 人 · 更新于 {_lb_format_age(age)}）")
-    return "\n".join(lines)
+    top = cn["top"]
+    total = int(cn.get("total") or 0)
+    # 表头写实际条数：赛季初上游 top 可能不足 100，写死"Top100"会失真
+    nodes = [
+        _lb_node(f"{header} 国服 Top{len(top)} · 共 {total:,} 人 · 更新于 {_lb_format_age(age)}")
+    ]
+    for start in range(0, len(top), _LB_FORWARD_CHUNK):
+        chunk = top[start:start + _LB_FORWARD_CHUNK]
+        lines = [f"第 {chunk[0].get('rank')}–{chunk[-1].get('rank')} 名"]
+        for entry in chunk:
+            rank = entry.get("rank")
+            name = entry.get("name") or "?"
+            score = int(entry.get("score") or 0)
+            lines.append(f"{rank}. {name} — {score:,}")
+        nodes.append(_lb_node("\n".join(lines)))
+    return nodes, ""
 
 
 def query_lb_board(
@@ -2862,22 +2884,24 @@ def query_lb_board(
     ttl_minutes: int = 10,
     cache_dir: Path | None = None,
     st: Optional[StelladbFetcher] = None,
-) -> str:
-    """当期排行榜国服 Top100 文本（/st_bb・/st_fe 命令渲染，纯文本、无 LLM 参与）。
+) -> Tuple[List[Dict[str, Any]], str]:
+    """当期排行榜国服榜单（/st_bb・/st_fe 命令渲染，无 LLM 参与）。
 
-    mode: "bb"=联合讨伐 / "fe"=终焉绝响。两榜独立成命令，避免单条消息过长；
-    各自跟随 season.json 的 BB_SEASON/FE_SEASON 指针，不写死赛季号。bb 指针
-    缺失时按 meta 键表取最大 bbNN 降级（与 _resolve_current_blitz 同款）；fe
-    严格跟随指针、缺失即报未开榜（与 _resolve_current_raid 同款"不猜、不兜底"）。
+    返回 (nodes, notice) 且恰一非空：notice 为单行提示（参数错误/未开榜等）
+    走纯文本；nodes 为合并转发节点数组（表头 + 每 _LB_FORWARD_CHUNK 名一节点）
+    走 send.forward。mode: "bb"=联合讨伐 / "fe"=终焉绝响。两榜独立成命令，避免
+    单条消息过长；各自跟随 season.json 的 BB_SEASON/FE_SEASON 指针，不写死赛季号。
+    bb 指针缺失时按 meta 键表取最大 bbNN 降级（与 _resolve_current_blitz 同款）；
+    fe 严格跟随指针、缺失即报未开榜（与 _resolve_current_raid 同款"不猜、不兜底"）。
     st 参数供测试注入假 fetcher。
     """
     prefix = str(mode or "").strip().lower()
     if prefix not in _LB_MODE_CN:
-        return f"未知排行榜类型: {mode}"
+        return [], f"未知排行榜类型: {mode}"
     if st is None:
         _, _, st, _ = _get_services(cache_dir or _DEFAULT_CACHE_DIR)
     if not st:
-        return "星塔旅人排行榜服务未初始化。"
+        return [], "星塔旅人排行榜服务未初始化。"
     offline_dir = _DATA_DIR / "offline"
 
     ttl_seconds = max(0, int(ttl_minutes)) * 60
