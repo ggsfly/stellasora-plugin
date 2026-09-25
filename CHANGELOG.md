@@ -11,6 +11,13 @@
 - **拉取后就地瘦身落盘**：上游赛季文件为 20MB 级单体 JSON（95% 体积为潜能/道具明细），仅在拉取时提取各服玩家榜 Top 列表（排名/UID/昵称/分数），瘦身结果（<200KB）持久化到 `offline/ssleaderboard/{sid}_top.json`，原始大文件不落盘。
 - **TTL 缓存**：瘦身缓存有效期可配（`[leaderboard] ttl_minutes`，默认 10 分钟），有效期内重复触发零网络；拉取失败时降级展示本地缓存并以"更新于"标注数据年龄。
 
+### 修复
+
+- **`/st_bb`・`/st_fe` 白名单模式全拒**：命令 handler 调共用体时未透传 kwargs，`_denied` 拿到空身份（group_id/user_id 皆空），白名单模式下对任何聊天一律拒绝（mode=off 因短路放行不受影响）。现 kwargs 完整透传，鉴权按聊天身份正常工作。
+- **排行榜命令结果不发送**：宿主对命令返回值只记日志、不自动发送（`/st_update` 同款 self-send 约定），原实现把榜单全文放在返回值里导致聊天无输出。现榜单文本经 `ctx.send.text` 主动送达命令流，返回值改为执行摘要；发送失败返回失败摘要。新增 S 节回归覆盖 kwargs 透传与 self-send 契约。
+- **N 节测试对上游锚点改名崩溃**：上游把 `Freesia (Main Skill)` 队伍锚点改名为 `Freesia (Main Skill) WIP`，N19 对 `extract_block_by_name` 返回的 `None` 直接下标导致 traceback 中断整个测试节。现 N17–N19 取块均加 None 守卫（上游漂移时报 FAIL 而非崩溃，后续节可继续执行），Freesia 主技能队按锚点前缀解析（兼容 WIP 后缀变化）。
+- **aqua 误标补丁层经复验保留**：上游 9 月下旬曾自改 Teresa→Freesia 误标后又回退（线上状态反复横跳），`_INFODOC_FIXES` 补丁层继续保留——无论上游处于哪一状态，每次同步落盘前自动修正保证本地数据恒正确；N16/N16b 补丁单测与 N16c 存量断言相应保留。
+
 ### 说明
 
 - 排行榜查询不暴露给 planner（无 @Tool、不进 what/how 路由词表），仅 `/st_bb`・`/st_fe` 斜杠命令可用；数据仅在用户触发时拉取，不进每日 17:00 定时同步与 `/st_update`。

@@ -23,6 +23,7 @@
   N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略
   P 热门优先级与属性泛查 —— 元素泛查检测、热门过滤组级补齐（<3补冷门至3）、priority 字段固化、端到端集成
   R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗与降级渲染（零网络）
+  S 排行榜命令插件链路 —— kwargs 透传鉴权（白名单回归）、self-send 契约、拒绝不发送
 """
 from __future__ import annotations
 
@@ -2147,10 +2148,12 @@ def run_section_n() -> None:
             f"members={ {k: len(v) for k, v in seg_by_member.items()} }",
         )
 
-        # N16 上游误标补丁：fetch_infodoc 落盘前把 Freesia (Main Skill) 队首个
-        # Teresa (4★) 主技能段修正为 Freesia (5★)；旧串未命中（上游自改）恒等不破坏
-        from fetcher_stelladb import _apply_infodoc_fixes, _INFODOC_FIXES
+        # N16 上游误标补丁：fetch_infodoc 落盘前把 Freesia 主技能队首个 Teresa (4★)
+        # 主技能段修正为 Freesia (5★)；旧串未命中（上游自改/回退）恒等不破坏。
+        # 上游曾自改又回退（反复横跳），补丁与单测长期保留
+        from fetcher_stelladb import _apply_infodoc_fixes
         mislabeled = "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)"
+        fixed_line = "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)"
         patched = _apply_infodoc_fixes(
             "aqua",
             mislabeled + "\n| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)",
@@ -2158,7 +2161,7 @@ def run_section_n() -> None:
         check(
             "N16 补丁层：Teresa 主技能段→Freesia (5★) 且不误伤其他 Teresa 段",
             mislabeled not in patched
-            and "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)" in patched
+            and fixed_line in patched
             and "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)" in patched,
             f"patched={patched!r}",
         )
@@ -2167,53 +2170,75 @@ def run_section_n() -> None:
             _apply_infodoc_fixes("umbra", mislabeled) == mislabeled
             and _apply_infodoc_fixes("aqua", "no match here") == "no match here",
         )
-        # 真实 aqua.json 已一次性修正：data 中主技能段不再以 Teresa 出现
-        aqua_data_fixed = json.loads((DATA_DIR / "offline" / "infodocs" / "aqua.json").read_text(encoding="utf-8"))["data"]
+        # 存量 aqua.json 断言：无论上游处于误标态还是自改态，落盘数据恒无主技能段误标
+        aqua_data = json.loads((DATA_DIR / "offline" / "infodocs" / "aqua.json").read_text(encoding="utf-8"))["data"]
         check(
-            "N16c 存量 aqua.json 已修正：Teresa 主技能段消除且 Freesia (5★) 存在",
-            mislabeled not in aqua_data_fixed
-            and "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)" in aqua_data_fixed,
+            "N16c 存量 aqua.json：Teresa 主技能误标消除且 Freesia (5★) 在位",
+            mislabeled not in aqua_data and fixed_line in aqua_data,
         )
 
         # N17 同名 build first-wins：Karin boss shark→乙叶 Laser、翡冷翠主技能→乙叶 Weeping Sky
         umbra_data = json.loads((DATA_DIR / "offline" / "infodocs" / "umbra.json").read_text(encoding="utf-8"))["data"]
         karin_blk = service.extract_block_by_name(umbra_data, "Karin (Boss Shark) WIP")
         firenze_blk = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
-        karin_desc0 = (karin_blk["segments"]["Otoha"]["description"] or [""])[0]
-        firenze_desc0 = (firenze_blk["segments"]["Otoha"]["description"] or [""])[0]
-        karin_emblem0 = (karin_blk["segments"]["Otoha"]["emblem"] or [""])[0]
-        firenze_emblem0 = (firenze_blk["segments"]["Otoha"]["emblem"] or [""])[0]
-        check(
-            "N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）",
-            karin_desc0.startswith("Otoha's laser build")
-            and "Ultimate DMG" in karin_emblem0
-            and firenze_desc0.startswith("Otoha's skill build")
-            and "Skill DMG" in firenze_emblem0,
-            f"karin_desc0={karin_desc0[:50]!r}, firenze_desc0={firenze_desc0[:50]!r}",
-        )
+        if karin_blk is None or firenze_blk is None:
+            check("N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）", False,
+                  f"区块缺失（上游可能改名锚点）: karin={karin_blk is not None}, firenze={firenze_blk is not None}")
+        else:
+            karin_seg = karin_blk.get("segments", {}).get("Otoha", {})
+            firenze_seg = firenze_blk.get("segments", {}).get("Otoha", {})
+            karin_desc0 = (karin_seg.get("description") or [""])[0]
+            firenze_desc0 = (firenze_seg.get("description") or [""])[0]
+            karin_emblem0 = (karin_seg.get("emblem") or [""])[0]
+            firenze_emblem0 = (firenze_seg.get("emblem") or [""])[0]
+            check(
+                "N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）",
+                karin_desc0.startswith("Otoha's laser build")
+                and "Ultimate DMG" in karin_emblem0
+                and firenze_desc0.startswith("Otoha's skill build")
+                and "Skill DMG" in firenze_emblem0,
+                f"karin_desc0={karin_desc0[:50]!r}, firenze_desc0={firenze_desc0[:50]!r}",
+            )
 
         # N18 段头误判修复：描述行以角色名开头+★ Key Notes 不再被当新段头——
         # Nazuna-Donna 的 Nazuna skill 应为真实段头值，且描述完整保留
-        nd_blk = service.extract_block_by_name(aqua_data_fixed, "Nazuna-Donna")
-        nazuna_seg = nd_blk["segments"]["Nazuna"]
+        nd_blk = service.extract_block_by_name(aqua_data, "Nazuna-Donna") or {}
+        nazuna_seg = nd_blk.get("segments", {}).get("Nazuna", {})
         check(
             "N18 段头误判修复：Nazuna skill 为真实值且描述完整",
-            nazuna_seg["skill"] == "1/1/1/1 (Not needed)"
-            and len(nazuna_seg["description"]) == 1
-            and "Main slot" in nazuna_seg["description"][0],
-            f"skill={nazuna_seg['skill']!r}, desc_len={len(nazuna_seg['description'])}",
+            nazuna_seg.get("skill") == "1/1/1/1 (Not needed)"
+            and len(nazuna_seg.get("description") or []) == 1
+            and "Main slot" in (nazuna_seg.get("description") or [""])[0],
+            f"skill={nazuna_seg.get('skill')!r}, desc_len={len(nazuna_seg.get('description') or [])}",
         )
 
-        # N19 数据修正后 Freesia (Main Skill) 区块：成员定位正确（Freesia 主控）
-        fs_blk = service.extract_block_by_name(aqua_data_fixed, "Freesia (Main Skill)")
-        check(
-            "N19 Freesia (Main Skill) 结构：members 含 Freesia 主控 + 真 Teresa 支援",
-            fs_blk["members"] == ["Freesia", "Flora", "Iris", "Teresa"]
-            and fs_blk["roles"]["Freesia"] == "主控位"
-            and fs_blk["segments"]["Freesia"]["skill"] == "1/10/1/1 (Main Skill only)"
-            and fs_blk["segments"]["Teresa"]["skill"] == "1/1/1+/1 (Support Skill, otherwise not needed)",
-            f"members={fs_blk['members']}, roles={fs_blk['roles']}",
-        )
+        # N19 Freesia 主技能队区块：成员定位正确（Freesia 主控）。
+        # 锚点名按前缀解析——上游会以 WIP 后缀标注队伍成熟度，改名不换队；
+        # 取块失败报 FAIL 而非下标崩溃（上游锚点漂移时后续节仍可执行）
+        def _anchor_names(text: str) -> list:
+            names = []
+            for line in text.split("\n"):
+                if "⏏" in line or "Back to Top" in line:
+                    cleaned = service._TOP_ANCHOR_RE.sub("", line).strip(" |").strip()
+                    cells = [c.strip() for c in cleaned.split("|") if c.strip()]
+                    if cells:
+                        names.append(cells[0])
+            return names
+
+        fs_name = next((n for n in _anchor_names(aqua_data) if n.startswith("Freesia (Main Skill")), None)
+        fs_blk = service.extract_block_by_name(aqua_data, fs_name) if fs_name else None
+        if fs_blk is None:
+            check("N19 Freesia 主技能队结构：members 含 Freesia 主控 + 真 Teresa 支援", False,
+                  f"未找到 Freesia (Main Skill) 前缀锚点，现有锚点={_anchor_names(aqua_data)}")
+        else:
+            check(
+                "N19 Freesia 主技能队结构：members 含 Freesia 主控 + 真 Teresa 支援",
+                fs_blk["members"] == ["Freesia", "Flora", "Iris", "Teresa"]
+                and fs_blk["roles"]["Freesia"] == "主控位"
+                and fs_blk["segments"]["Freesia"]["skill"] == "1/10/1/1 (Main Skill only)"
+                and fs_blk["segments"]["Teresa"]["skill"] == "1/1/1+/1 (Support Skill, otherwise not needed)",
+                f"members={fs_blk['members']}, roles={fs_blk['roles']}",
+            )
     finally:
         service.reload_team_table()
 
@@ -3212,6 +3237,50 @@ def run_section_r() -> None:
             service.reload_team_table()
 
 
+async def run_section_s() -> None:
+    """S: 排行榜命令插件链路——kwargs 透传鉴权、self-send 契约（宿主不发送返回文本）。"""
+    print("--- S 排行榜命令插件链路 ---")
+    p, ctx = make_plugin()
+    await p.on_load()
+
+    # 1. 命令注册元数据
+    for cmd_name, handler in (("st_bb", "handle_lb_bb"), ("st_fe", "handle_lb_fe")):
+        func = getattr(plug.StellaSoraPlugin, handler, None)
+        info = getattr(func, "__maibot_component_info__", None) if func else None
+        check(f"S1 {handler} Command 元数据存在且指令名 {cmd_name}",
+              info is not None and getattr(info, "name", "") == cmd_name)
+
+    sent_stub = "【联合讨伐 S11】\n1. 测试 — 1\n（国服共 1 人 · 更新于 刚刚）"
+    orig_lb = plug.query_lb_board
+    plug.query_lb_board = lambda mode, ttl_minutes=10, cache_dir=None, **kw: sent_stub
+    try:
+        # 2. kwargs 必须透传：白名单命中群号 → 放行并发送
+        #（回归：_handle_lb_board 曾漏收 kwargs，_denied 空身份导致白名单模式全拒）
+        p.config.access_control.mode = "whitelist"
+        p.config.access_control.whitelist = ["id_ok"]
+        ctx.send.sent.clear()
+        res = await p.handle_lb_bb(stream_id="stream_s1", group_id="id_ok", user_id="u1")
+        check("S2 白名单群号命中放行", res[0] is True)
+        check("S3 榜单文本经 ctx.send.text 送达命令流",
+              len(ctx.send.sent) == 1 and ctx.send.sent[0][0] == "stream_s1"
+              and "【联合讨伐 S11】" in ctx.send.sent[0][1])
+        check("S4 返回值为执行摘要而非全文", res[1] == "星塔旅人排行榜已发送" and res[2] == 2)
+
+        # 3. 白名单未命中拒绝且不发送
+        ctx.send.sent.clear()
+        res = await p.handle_lb_fe(stream_id="stream_s2", group_id="other_group")
+        check("S5 白名单未命中拒绝", res[0] is False and res[2] == 1)
+        check("S6 拒绝路径不发送任何消息", len(ctx.send.sent) == 0)
+
+        # 4. 私聊：group_id 缺失回落 user_id 匹配
+        ctx.send.sent.clear()
+        res = await p.handle_lb_fe(stream_id="stream_s3", user_id="id_ok")
+        check("S7 私聊 user_id 命中放行并发送",
+              res[0] is True and len(ctx.send.sent) == 1 and ctx.send.sent[0][0] == "stream_s3")
+    finally:
+        plug.query_lb_board = orig_lb
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -3233,11 +3302,12 @@ SECTIONS = {
     "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
     "Q": ("数据目录重定向", run_data_dir_redirect),
     "R": ("排行榜命令", run_section_r),
+    "S": ("排行榜命令插件链路", run_section_s),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
-ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q", "R"]
-ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P"}
+ORDER = ["B", "A", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "Q", "R", "S"]
+ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P", "S"}
 
 
 async def run_async_sections(keys: list) -> None:

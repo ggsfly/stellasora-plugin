@@ -38,6 +38,8 @@ _ssdata_cache: Dict[Tuple[Path, str], Tuple[float, dict]] = {}
 # 抓取后本地修正（上游脏数据补丁）：键为元素名，值为 (旧串, 新串) 替换对列表。
 # 每次 fetch_infodoc 抓取落盘前应用——上游不改也保证本地恒为修正后数据，
 # 且 17:00 st_update 重新抓取时自动重新修正（持久生效）。
+# aqua 误标上游曾自改又回退（反复横跳），补丁需长期保留；未命中 warning 仅在
+# 上游结构变更时出现，属设计内信号。
 _INFODOC_FIXES: Dict[str, List[Tuple[str, str]]] = {
     # 上游误标：Freesia (Main Skill) 队首个 Teresa (4★) 段实为 Freesia 的主技能 build
     #（含 Ice Vortex 等 Freesia 专属数据），改回 Freesia (5★) 使成员定位与数据归属正确。

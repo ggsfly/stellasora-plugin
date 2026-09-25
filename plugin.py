@@ -1091,7 +1091,7 @@ class StellaSoraPlugin(MaiBotPlugin):
     )
     async def handle_lb_bb(self, args: str = "", stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
         """查询当期联合讨伐排行榜国服 Top100（所有人可用，受黑白名单约束）。"""
-        return await self._handle_lb_board("bb")
+        return await self._handle_lb_board("bb", stream_id=stream_id, **kwargs)
 
     @Command(
         "st_fe",
@@ -1100,17 +1100,20 @@ class StellaSoraPlugin(MaiBotPlugin):
     )
     async def handle_lb_fe(self, args: str = "", stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
         """查询当期终焉绝响排行榜国服 Top100（所有人可用，受黑白名单约束）。"""
-        return await self._handle_lb_board("fe")
+        return await self._handle_lb_board("fe", stream_id=stream_id, **kwargs)
 
-    async def _handle_lb_board(self, mode: str, **kwargs: Any) -> tuple[bool, str, int]:
-        """排行榜双命令共用体：黑白名单闸门 + to_thread 渲染当期国服 Top100。
+    async def _handle_lb_board(self, mode: str, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
+        """排行榜双命令共用体：黑白名单闸门 → to_thread 渲染 → 主动发送。
 
-        两榜独立成命令（/st_bb・/st_fe）避免单条消息过长；纯文本无 LLM 参与。
-        数据仅在用户触发时按 season.json 指针拉取当期赛季，TTL 内直读本地瘦身缓存。
+        kwargs 必须从命令 handler 透传（宿主注入的 group_id/user_id 为 _denied
+        依据，漏传即空身份导致白名单模式全拒）。宿主对命令返回值只记日志不发送
+        （/st_update 同款 self-send 约定），榜单文本须经 ctx.send.text 送达聊天，
+        返回值仅作执行摘要。
         """
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人排行榜查询。", 1
 
+        effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
         ttl = int(self.config.leaderboard.ttl_minutes)
         try:
             text = await asyncio.to_thread(
@@ -1122,7 +1125,13 @@ class StellaSoraPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.exception("排行榜查询异常: %s", exc)
             return False, f"星塔旅人排行榜查询失败: {exc}", 1
-        return True, text, 2
+
+        try:
+            await self.ctx.send.text(text, effective_stream_id)
+        except Exception as exc:
+            self.ctx.logger.exception("排行榜发送异常: %s", exc)
+            return False, f"星塔旅人排行榜发送失败: {exc}", 1
+        return True, "星塔旅人排行榜已发送", 2
 
 
 def create_plugin() -> StellaSoraPlugin:
