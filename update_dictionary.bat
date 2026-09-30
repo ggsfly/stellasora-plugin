@@ -91,7 +91,8 @@ echo [3/3] syncing offline guides / presets / ss-data / leaderboard ...
 :runtest
 echo.
 echo running dictionary and offline data consistency tests ...
-"%PY%" tests\test_all.py A B C D M N
+rem C 节已并入 D（1.4.0 测试精简），Q 节挂 N 末尾——这里选数据一致性相关节
+"%PY%" tests\test_all.py A B D M N
 
 echo.
 echo Done.
