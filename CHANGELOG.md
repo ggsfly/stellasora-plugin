@@ -2,6 +2,20 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.1] - 2026-09-30
+
+### 新功能
+
+- **`/st_update` 全权化：字典重建并入 + 完成后插件自动重载**。修复"更新后新角色必须重启 MaiBot 才生效"：运行中进程的中英字典是进程内单例（只解析一次），`update_dictionary.bat` 重建 dict.json 后旧进程永远读旧字典，新角色在"名字→角色ID"一步就被挡住（离线数据本身一直是即时生效的）。现在操作员发 `/st_update` 即一条命令完成全部：字典重建（本地 ss-data 克隆优先，否则 GitHub remote）→ 离线数据全量同步 → 表/成品缓存失效接线 → **插件自 reload**（`ctx.component.reload_plugin`，宿主 purge 插件模块重 import，新字典即时捡新），不再需要重启 MaiBot。
+- **在飞闸门**：更新全程转后台执行（handler 秒回，规避宿主组件 RPC 超时），执行中重复触发 `/st_update` 被拒（"已有更新任务进行中"）；进度与结果消息发到触发流（含字典新增词条数、失败截断原因、重载未生效时提示重启 MaiBot）。
+- **字典落盘原子化**：`write_json` 改临时文件+replace——运行中进程的并发查询不会在重建窗口读到半截 dict.json。
+- 每日 17:00 定时同步保持离线数据（不含字典、不触发重载）；新角色入库仍需一次 `/st_update`。
+
+### 破坏性变更
+
+- **移除 `update_dictionary.bat`**：其全部职责（字典优先路径重建、离线全量同步）已由 `/st_update` 承接。命令行方式（`tools/update_dict.py` / `tools/sync_data.py`）保留可用，但经命令行重建的字典需重启 MaiBot 才生效（自动重载仅 `/st_update` 触发）。
+- `_manifest.json` capabilities 新增 `component.reload_plugin`（宿主强制鉴权声明）。
+
 ## [1.4.0] - 2026-09-25
 
 ### 变更

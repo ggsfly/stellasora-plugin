@@ -61,6 +61,7 @@ from service import (  # noqa: E402
 )
 from service import set_data_dir as service_set_data_dir  # noqa: E402
 from sync_data import sync_offline_data  # noqa: E402
+from update_dict import update_dict_via_preferred_path  # noqa: E402
 
 logger = logging.getLogger("stellasora.plugin")
 
@@ -285,6 +286,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
         self._sync_task: asyncio.Task[Any] | None = None
         self._preheat_task: asyncio.Task[None] | None = None
+        self._update_task: asyncio.Task[None] | None = None  # /st_update 后台任务（兼作在飞判定与强引用）
         self._answer_cfg_fp: str = ""  # 答案相关配置指纹（on_config_update 去抖）
         self._overrides_fp: tuple[tuple[str, str], ...] | None = None  # 别名配置指纹（跳过热重装）
 
@@ -376,12 +378,19 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 答案相关配置指纹基线：加载后的首次空更新不清缓存
         self._answer_cfg_fp = self._answer_relevant_fingerprint()
         self._sync_task = asyncio.create_task(self._schedule_daily_sync())
-        # 后台预热共享服务（字典解析 + 替换器编译 + 表加载），消除首次查询冷启动
+        # 后台预热共享服务（字典解析 + 替换器编译 + 表加载），消除首次查询冷启动。
+        # 必须 create_task 不 await：宿主 reload 等待窗口有限，on_load 同步做大活
+        # 会撞超时导致 reload 判定失败回滚
         self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
         self.ctx.logger.info("星塔旅人插件已加载，数据目录: %s", self._data_dir)
 
     async def on_unload(self) -> None:
-        """插件卸载：取消每日定时同步任务并清空运行时缓存引用（文件留给磁盘回收）。"""
+        """插件卸载：取消每日定时同步任务并清空运行时缓存引用（文件留给磁盘回收）。
+
+        _update_task 不取消也不等待：/st_update 的自 reload 正是从该协程发出的，
+        卸载流程若 await 它等于等待触发方自身，reload 会死锁；任务残余体随
+        purge 后自然排空（末步 reload 后即无操作）。
+        """
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()
             await asyncio.gather(self._sync_task, return_exceptions=True)
@@ -1062,50 +1071,109 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     @Command(
         "st_update",
-        description="手动触发星塔旅人全量离线数据更新（攻略/预设码/ss-data/榜单）",
+        description="触发星塔旅人全量数据更新：中英字典重建 + 攻略/预设码/ss-data/榜单离线同步，后台执行完成后插件自动重载生效（首次安装也用它初始化数据）",
         pattern=r"^/st_update",
         permission="operator",
     )
     async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """手动触发星塔旅人全量攻略与预设码数据离线更新（仅宿主操作员可触发）。"""
+        """全量更新入口：鉴权与在飞闸门后转后台执行，handler 秒回。
+
+        字典重建 + 离线同步全程可超宿主组件 RPC 的 60s 超时预算，必须 create_task
+        后台化；返回拦截等级 2 使触发消息不再进入 planner。_update_task 句柄兼作
+        任务强引用与在飞判定（后台化后连点会双写数据，必须拦）。
+        """
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人更新指令。", 1
 
-        effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
-        if effective_stream_id:
-            try:
-                await self.ctx.send.text("正在后台同步星塔旅人离线数据...", effective_stream_id)
-            except Exception as exc:
-                self.ctx.logger.warning("发送更新开始提示异常: %s", exc)
+        if self._update_task is not None and not self._update_task.done():
+            return False, "已有更新任务进行中，请稍候。", 1
 
+        effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
+        await self._send_update_msg(
+            "正在后台同步星塔旅人数据（字典+离线全量）...", effective_stream_id
+        )
+        self._update_task = asyncio.create_task(self._run_full_update(effective_stream_id))
+        return True, "已启动星塔旅人全量数据更新", 2
+
+    async def _send_update_msg(self, text: str, stream_id: str) -> None:
+        """向触发流发送更新进度消息；失败仅告警（进度丢失不影响更新本身）。"""
+        if not stream_id:
+            return
         try:
-            offline_dir = Path(self.ctx.paths.data_dir) / "offline"
-            cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+            await self.ctx.send.text(text, stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("发送更新进度消息异常: %s", exc)
+
+    async def _run_full_update(self, stream_id: str) -> None:
+        """/st_update 后台全流程：字典重建 → 离线全量同步 → 插件自 reload 使新字典生效。
+
+        字典/名字索引是进程内单例（只解析一次），磁盘重建后必须经 reload（宿主
+        purge 插件模块→重 import→on_load）才会捡新——不 reload 则新角色被旧字典
+        挡在名字解析门外（历史故障根因）。reload 锚定"字典阶段成功"：离线数据
+        本就即时生效，字典新而内存旧才是必须消除的状态。
+        """
+        data_root = Path(self.ctx.paths.data_dir)
+        cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+
+        # 1. 字典重建（dict.json/names.json 原子落盘；内存捡新在末步 reload）
+        try:
+            dict_stats = await asyncio.to_thread(update_dict_via_preferred_path, data_root)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # SystemExit 等 BaseException 不得静默击穿后台任务
+            self.ctx.logger.exception("字典更新异常")
+            await self._send_update_msg(
+                f"星塔旅人字典更新失败：{str(exc)[:200]}。插件未重载，可稍后重试 /st_update。",
+                stream_id,
+            )
+            return
+
+        # 2. 离线数据全量同步（infodocs/预设码+统一表/ss-data/榜单；产物即时生效）
+        sync_error: str | None = None
+        try:
             sync_res = await asyncio.to_thread(
                 sync_offline_data,
                 sync_all=True,
-                offline_dir=offline_dir,
+                offline_dir=data_root / "offline",
                 cache_dir=cache_dir,
             )
             self.ctx.logger.info("离线数据同步完成: %s", sync_res)
-        except Exception as exc:
-            self.ctx.logger.exception("星塔旅人离线数据同步异常: %s", exc)
-            return False, f"星塔旅人离线数据同步失败: {exc}", 1
+        except asyncio.CancelledError:
+            raise  # 停机/卸载取消：干净传播，不发失败消息也不 reload
+        except BaseException as exc:
+            self.ctx.logger.exception("星塔旅人离线数据同步异常")
+            sync_error = str(exc)[:200]
 
-        # 表缓存失效接线：同步产出新统一表后立即失效运行时表缓存，
-        # 后续 how 查询即时读取新表（在清空直发成品缓存之前执行）
+        # 3. 缓存失效接线：新表即时读取 + 成品缓存清空
+        #（answer 缓存仅事件循环侧访问，不得挪进 to_thread）
         reload_team_table()
-
-        # 清空直发成品缓存（磁盘文件与内存缓存）
         self._clear_answer_cache()
 
-        if effective_stream_id:
-            try:
-                await self.ctx.send.text("星塔旅人离线数据同步完成，缓存已刷新。", effective_stream_id)
-            except Exception as exc:
-                self.ctx.logger.warning("发送更新完成提示异常: %s", exc)
+        if sync_error:
+            await self._send_update_msg(
+                f"离线数据同步失败：{sync_error}（字典已更新，正在重载生效；"
+                "离线数据可稍后重跑 /st_update）",
+                stream_id,
+            )
+        else:
+            await self._send_update_msg(
+                f"星塔旅人数据更新完成（新增词条 {dict_stats.get('added', 0)}），"
+                "插件正在重载生效...",
+                stream_id,
+            )
 
-        return True, "星塔旅人离线数据同步完成", 2
+        # 4. 自 reload：协程最后一跳——成功时本实例随即销毁，其后不得再发送任何消息
+        try:
+            res = await self.ctx.component.reload_plugin(self.ctx.plugin_id)
+            ok = bool(res.get("success")) if isinstance(res, dict) else bool(res)
+        except Exception as exc:
+            self.ctx.logger.warning("插件自 reload 调用失败: %s", exc)
+            ok = False
+        if not ok:
+            # 宿主 reload 失败会回滚激活旧实例，本协程仍在旧实例上存活，可提示补救
+            await self._send_update_msg(
+                "数据已更新，但自动重载未生效，请重启 MaiBot 使新字典生效。", stream_id
+            )
 
     @Command(
         "st_bb",

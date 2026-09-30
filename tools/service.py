@@ -744,7 +744,7 @@ def _parse_block_body(block_lines: list, name_res: list) -> tuple:
 def load_team_table() -> Dict[str, Any]:
     """加载统一队伍-槽位表（data/offline/presets/team_table.json）。
 
-    缓存以文件 mtime 自愈：外部进程（bat 更新脚本/手动重建）覆写表文件后，
+    缓存以文件 mtime 自愈：外部进程（命令行手动重建）覆写表文件后，
     下次查询自动重读，不依赖进程内 reload_team_table() 调用。mtime 为 None
     表示测试注入，信任缓存。
 

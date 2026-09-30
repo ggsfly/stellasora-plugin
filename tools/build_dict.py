@@ -29,10 +29,15 @@ from pathlib import Path
 from typing import Dict, Iterable
 import argparse
 import json
+import logging
+import os
 import re
 import sys
+import time
 
 from net_common import host_data_dir
+
+logger = logging.getLogger("stellasora.build_dict")
 
 # 游戏文本中的 UI 样式标签（<color=#xxx>...</color>）——纯文本输出无意义，
 # 且会让 term_replace 的 .2 整段模式与 stelladb 清洗后文本错位，构建时剥离
@@ -159,11 +164,21 @@ def build_name_index(
 
 
 def write_json(path: Path, payload: dict) -> None:
+    """原子写 JSON：临时文件 + replace，杜绝读方在覆写窗口读到半截文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 使用 ensure_ascii=False 保留中文可读；压缩 separators 减少体积
-    with path.open("w", encoding="utf-8") as fp:
-        json.dump(payload, fp, ensure_ascii=False, separators=(",", ":"))
-    print(f"[ok] wrote {path} ({path.stat().st_size:,} bytes, {len(payload):,} entries)")
+    temp_file = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    try:
+        # 使用 ensure_ascii=False 保留中文可读；压缩 separators 减少体积
+        with temp_file.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, separators=(",", ":"))
+            fp.flush()
+            os.fsync(fp.fileno())
+        temp_file.replace(path)
+    except Exception:
+        if temp_file.exists():
+            temp_file.unlink(missing_ok=True)
+        raise
+    logger.info("wrote %s (%s bytes, %s entries)", path, f"{path.stat().st_size:,}", f"{len(payload):,}")
 
 
 def load_overrides(output_dir: Path) -> Dict:

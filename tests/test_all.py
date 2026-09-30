@@ -16,7 +16,7 @@
   H 输出格式        —— LLM 输出原样直发（verbatim trust，经合并转发）+ infodoc 输出规则关键词
   I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
   J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
-  K 手动更新指令    —— @Command('st_update') 鉴权拦截、授权后台同步、缓存清空与异常降级
+  K 手动更新指令    —— @Command('st_update') 鉴权拦截、后台化全流程（字典→同步→自 reload）、在飞闸门、缓存清空
   L 定时自动同步    —— 每日 17:00 等待秒数计算、后台定时调度、同步完成清空缓存、on_unload 优雅取消
   M 统一队伍-槽位表构建器 —— 解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化
   N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略；数据目录重定向（原 Q）
@@ -135,6 +135,18 @@ def fwd_text(nodes) -> str:
     )
 
 
+class MockComponent:
+    """模拟 ctx.component：记录 reload_plugin 调用（返回可控成功/失败）。"""
+
+    def __init__(self, fail: bool = False):
+        self.calls: list = []
+        self.fail = fail
+
+    async def reload_plugin(self, plugin_name, **kwargs):
+        self.calls.append(plugin_name)
+        return {"success": not self.fail}
+
+
 class _ListLogHandler(logging.Handler):
     """捕获指定 logger 的日志记录，供失败路径断言（caplog 等价物）。"""
 
@@ -172,6 +184,7 @@ def make_plugin(ttl: int = 0, dedup: int = 0):
     )
     ctx.llm = MockLLM()
     ctx.send = MockSend()
+    ctx.component = MockComponent()
     return p, ctx
 
 
@@ -1358,17 +1371,24 @@ async def run_manual_update() -> None:
     check("K6 拦截返回码为 1 且包含权限提示", denied_res[2] == 1 and "权限" in denied_res[1])
     check("K7 未授权不向聊天流发送消息", len(ctx.send.sent) == 0)
 
-    # 3. 授权通过调用全量同步并清空缓存
+    # 3. 授权调用：handler 秒回受理，后台全流程（字典→同步→缓存接线→自 reload）
     p.config.access_control.mode = "off"
     orig_sync = plug.sync_offline_data
+    orig_dict = plug.update_dict_via_preferred_path
     sync_called = []
+    dict_calls = []
+
+    def mock_update_dict(output, proxy=None):
+        dict_calls.append(output)
+        return {"mode": "remote", "added": 3, "updated": 1, "total": 50162}
 
     def mock_sync_offline_data(**kwargs):
         sync_called.append(kwargs)
         return {"status": "ok"}
 
+    plug.update_dict_via_preferred_path = mock_update_dict
     plug.sync_offline_data = mock_sync_offline_data
-    # reload 接线：手动更新同步成功后 reload_team_table() 失效表缓存
+    # reload 接线：后台同步产出新统一表后 reload_team_table() 失效表缓存
     # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
     reload_calls: list = []
     orig_reload = plug.reload_team_table
@@ -1383,27 +1403,79 @@ async def run_manual_update() -> None:
         cache_mgr._memory_cache["test_key"] = "cached_val"
 
         success, msg, code = await p.handle_update(stream_id="stream_k", group_id="any_group")
-        check("K8 授权调用返回成功 True", success is True)
-        check("K9 返回码为 2", code == 2)
-        check("K10 调用 sync_offline_data(sync_all=True)", len(sync_called) == 1 and sync_called[0].get("sync_all") is True)
-        check("K11 发送开始与完成两批提示消息", len(ctx.send.sent) >= 2 and any("正在后台同步" in t[1] for t in ctx.send.sent) and any("同步完成" in t[1] for t in ctx.send.sent))
+        check("K8 后台化：handler 立即返回受理 True", success is True)
+        check("K9 返回码为 2（拦截触发消息不进 planner）", code == 2)
+        # 后台任务含 to_thread，必须等待任务完成后再断言
+        await asyncio.wait_for(p._update_task, 15)
+        check("K10 字典先行更新且随后调用 sync_offline_data(sync_all=True)",
+              len(dict_calls) == 1 and len(sync_called) == 1 and sync_called[0].get("sync_all") is True)
+        check("K11 开始与完成两批提示消息（完成文案含重载预告）",
+              any("正在后台同步" in t[1] for t in ctx.send.sent)
+              and any("正在重载" in t[1] for t in ctx.send.sent))
         check("K12 磁盘 answers 缓存被清空", not dummy_file.exists())
         check("K13 内存 answers 缓存被清空", len(cache_mgr._memory_cache) == 0)
         check("K20 同步后调用 reload_team_table 失效表缓存", len(reload_calls) == 1)
+        check("K22 末步以 ctx.plugin_id 自 reload 恰一次",
+              ctx.component.calls == [p.ctx.plugin_id])
         service.reload_team_table()
     finally:
+        plug.update_dict_via_preferred_path = orig_dict
         plug.sync_offline_data = orig_sync
         plug.reload_team_table = orig_reload
 
-    # 4. 同步异常降级
+    # 4. 字典失败路径（原 K14/K15 后台化重写）：不走同步、不 reload、发截断失败消息
+    n_sync, n_reload, n_sent = len(sync_called), len(ctx.component.calls), len(ctx.send.sent)
+
+    def mock_dict_fail(output, proxy=None):
+        raise RuntimeError("git " + "down " * 60)  # >200 字符，验证截断
+
+    plug.update_dict_via_preferred_path = mock_dict_fail
+    try:
+        res = await p.handle_update(stream_id="stream_k23", group_id="any_group")
+        await asyncio.wait_for(p._update_task, 15)
+        # tail 含 handler 的开始提示，失败提示按内容筛
+        fail_msgs = [t[1] for t in ctx.send.sent[n_sent:] if "字典更新失败" in t[1]]
+        check("K23 字典失败→不同步不重载+失败消息（截断且预告可重试）",
+              res[0] is True and len(sync_called) == n_sync
+              and len(ctx.component.calls) == n_reload
+              and len(fail_msgs) == 1 and len(fail_msgs[0]) < 300 and "重试" in fail_msgs[0])
+    finally:
+        plug.update_dict_via_preferred_path = orig_dict
+
+    # 5. 同步失败但字典成功：失败消息照发，reload 仍执行（生效锚定字典阶段）
+    n_reload, n_sent = len(ctx.component.calls), len(ctx.send.sent)
+
     def mock_sync_fail(**kwargs):
         raise RuntimeError("network down")
 
     plug.sync_offline_data = mock_sync_fail
     try:
-        fail_res = await p.handle_update(stream_id="stream_fail", group_id="any_group")
-        check("K14 同步异常返回 False", fail_res[0] is False)
-        check("K15 异常返回码为 1 且包含错误信息", fail_res[2] == 1 and "network down" in fail_res[1])
+        res = await p.handle_update(stream_id="stream_k24", group_id="any_group")
+        await asyncio.wait_for(p._update_task, 15)
+        tail = ctx.send.sent[n_sent:]
+        check("K24 同步失败不挡 reload（字典已更新语义）且消息含离线重试提示",
+              res[0] is True and len(ctx.component.calls) == n_reload + 1
+              and any("离线数据同步失败" in t[1] and "字典已更新" in t[1] for t in tail))
+    finally:
+        plug.sync_offline_data = orig_sync
+
+    # 6. 在飞闸门：首个任务未完时第二次 /st_update 被拒且不新建/替换任务
+    gate_release = threading.Event()
+
+    def mock_sync_slow(**kwargs):
+        gate_release.wait(5)
+        return {"status": "ok"}
+
+    plug.sync_offline_data = mock_sync_slow
+    try:
+        res1 = await p.handle_update(stream_id="stream_k25a", group_id="any_group")
+        in_flight = p._update_task
+        res2 = await p.handle_update(stream_id="stream_k25b", group_id="any_group")
+        check("K25 在飞连点被拒（False/码1/进行中文案）且任务句柄未被替换",
+              res1[0] is True and res2[0] is False and res2[2] == 1
+              and "已有更新任务进行中" in res2[1] and p._update_task is in_flight)
+        gate_release.set()
+        await asyncio.wait_for(p._update_task, 15)
     finally:
         plug.sync_offline_data = orig_sync
 

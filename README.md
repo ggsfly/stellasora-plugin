@@ -18,9 +18,9 @@ MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里�
 | 特性 | 说明 |
 |------|------|
 | **离线优先** | 优先读取本地持久化数据（`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/`），无实时外部网络依赖 |
-| **双通道更新** | 每日 17:00 自动定时更新；支持操作员在聊天端发送 `/st_update` 手动触发（需宿主操作员权限） |
+| **全权更新命令** | 操作员 `/st_update` 一键完成字典重建+离线全量同步并自动重载插件生效；每日 17:00 后台定时静默同步离线数据 |
 | **直接发送模式** | 内部 LLM 加工后直发聊天（攻略指南为合并转发卡，长文不刷屏），支持人格与表达风格注入（默认开启） |
-| **官方中文输出** | 4.8 万余条中英对照字典，术语与技能描述对齐官方译名 |
+| **官方中文输出** | 全量中英对照字典，术语与技能描述对齐官方译名 |
 | **模块化选段** | 按问题意图只提供相关模块给 LLM，资料不截断 |
 | **表驱动查询** | 基于统一队伍-槽位表（`team_table.json`）按成员交集抽取区块，降低 token 消耗 |
 | **分组与详略策略** | 同区块多队伍合并展示；问询角色详述，其余成员作为队友并集简列 |
@@ -49,14 +49,14 @@ git clone https://github.com/ggsfly/stellasora-plugin.git ggsfly_stellasora-plug
 
 ### 数据初始化（必须）
 
-数据文件（字典 `dict.json`、离线攻略 `offline/` 等）**不随仓库分发**，安装后需运行一次更新脚本在本地生成。数据写入宿主授权目录，插件源码目录保持干净：
+数据文件（字典 `dict.json`、离线攻略 `offline/` 等）**不随仓库分发**，安装后需生成一次。数据写入宿主授权目录，插件源码目录保持干净：
 
 - **持久数据**：`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/`（dict/names/offline/报告）
 - **网络缓存**：`<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/cache/`
 
-**最简方式：双击插件目录下的 `update_dictionary.bat`**（自动使用 MaiBot 根目录 `.venv` 的 Python，自动完成字典构建与离线数据同步，详见下方「数据维护」）。
+**最简方式：插件加载后，由操作员在聊天中发送 `/st_update`**——后台完成字典构建与离线数据全量同步，完成后插件自动重载生效（需宿主操作员权限，见「配置」）。
 
-命令行方式（在插件目录下，用 MaiBot 根目录 `.venv` 的 Python 执行）：
+命令行方式（在插件目录下，用 MaiBot 根目录 `.venv` 的 Python 执行；仅离线数据已就绪、只补字典时可用）：
 
 ```bash
 # Windows（MaiBot 根目录的 .venv 含 maibot_sdk，系统 python 通常没有）
@@ -64,7 +64,7 @@ git clone https://github.com/ggsfly/stellasora-plugin.git ggsfly_stellasora-plug
 ..\..\.venv\Scripts\python.exe tools/sync_data.py --all
 ```
 
-初始化完成后重启 MaiBot，插件即可离线运行。
+命令行方式重建的字典需重启 MaiBot 后生效（自动重载仅由 `/st_update` 触发）。
 
 ## 配置
 
@@ -173,31 +173,32 @@ permission = ["qq:你的QQ号"]  # 操作员列表：仅列表内用户可执行
 
 插件采用**本地离线优先**架构，平时查询无需联网。三类数据及其更新方式：
 
-| 数据 | 生成脚本 | 内容 | 落盘位置 |
+| 数据 | 生成方式 | 内容 | 落盘位置 |
 |------|---------|------|---------|
-| 字典 `dict.json` + `names.json` | `tools/update_dict.py`（`update_dictionary.bat` 自动调用） | 官方中英对照译名（4.8 万余条） | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
-| 离线攻略/预设码 `offline/` | `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/` |
-| 更新报告 `_update_report.json` | 上述脚本产出 | 新增/更新/保留条目统计 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
+| 字典 `dict.json` + `names.json` | `/st_update` 自动调用 `tools/update_dict.py`（或手动命令行运行） | 官方中英对照译名 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
+| 离线攻略/预设码 `offline/` | `/st_update` / 每日定时 / 手动 `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/` |
+| 更新报告 `_update_report.json` | 上述更新产出 | 新增/更新/保留条目统计 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
 
-### 1. 一键初始化 / 更新
+### 1. 一键初始化 / 更新：`/st_update`
 
-双击插件目录下的 `update_dictionary.bat`：
+**操作员**在聊天中发送 `/st_update`（需宿主操作员权限，见第 3 节），插件在后台依次完成：
 
-- 自动使用 MaiBot 根目录 `.venv` 的 Python（`maibot_sdk` 只在其内）；
-- 自动检测本地 ss-data 克隆：有则 `git pull` 增量更新 + local 模式，无则 remote 模式直拉 GitHub；`dict.json` 不存在时自动首次构建；
-- 随后执行 `sync_data.py --all` 全量同步离线数据，并运行一致性测试。
+1. **字典重建**：检测本地 ss-data 克隆（`MaiBot/plugins/ss-data`）——有则 `git pull` 增量更新 + local 模式，无则 remote 模式 sparse-clone GitHub；`dict.json` 不存在时从零构建（首装即此路径）；
+2. **离线全量同步**：infodoc/索引/预设码/统一表/ss-data/榜单；
+3. **缓存失效接线**：表缓存与直发成品缓存立即清空；
+4. **插件自动重载**：新字典即时生效——重启 MaiBot 不再必要。
 
-代理：默认 `http://127.0.0.1:7890`；追加参数 `--direct` 强制直连；亦可用 `HTTPS_PROXY` 环境变量。
+期间同一聊天会收到开始/完成两条进度消息；执行中重复触发会被拒绝（"已有更新任务进行中"）。代理：默认 `http://127.0.0.1:7890`（环境变量 `HTTPS_PROXY` 可覆盖；命令行 `--proxy ""` 强制直连）。
+
+命令行方式（备用，不经插件）：`tools/update_dict.py` + `tools/sync_data.py --all`——**字典经此重建后需重启 MaiBot 才生效**。一致性回归：`python tests/test_all.py`（MaiBot 根目录 `.venv` 的 Python）。
 
 ### 2. 每日定时自动更新
 
-插件后台协程每日 **17:00** 静默拉取全量离线数据，成功后原子覆写本地数据并清除直发成品缓存；网络异常时保留本地数据降级，不影响查询。
+插件后台协程每日 **17:00** 静默拉取全量离线数据（不含字典），成功后原子覆写本地数据并清除直发成品缓存；网络异常时保留本地数据降级，不影响查询。**新角色入库后需操作员运行一次 `/st_update` 重建字典方可查询**（每日定时不触碰字典、不触发重载）。
 
-### 3. 聊天端手动更新
+### 3. 权限说明
 
-**操作员（管理员）** 在聊天中发送 `/st_update`，宿主统一鉴权后异步执行全量同步，并重建统一队伍-槽位表 `team_table.json`。
-
-> `/st_update` 为**操作员级别**命令（`permission="operator"`），由主程序统一鉴权。需要在 `bot_config.toml` 的 `[plugin].permission` 中把管理员账号（如 `qq:123456789`）加入操作员列表，或在 WebUI 命令设置中对该命令单独放行，否则所有用户都被拒绝。插件内的黑白名单（`access_control`）仍作为聊天范围约束叠加生效。
+> `/st_update` 为**操作员级别**命令（`permission="operator"`），由主程序统一鉴权。需要在 `bot_config.toml` 的 `[plugin].permission` 中把管理员账号（如 `qq:123456789`）加入操作员列表，或在 WebUI 命令设置中对该命令单独放行，否则所有用户都被拒绝。插件内的黑白名单（`access_control`）仍作为聊天范围约束叠加生效。重载执行的数秒内本插件的命令/查询会被短暂拒绝。
 
 ### 4. 排行榜查询
 
