@@ -19,10 +19,12 @@ import logging
 import sys
 import time
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ToolParamType, ToolParameterInfo
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
 
 MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增长
+
+MAX_SESSION_CACHE_ENTRIES = 2000  # session 身份缓存硬上界（Hook 前置过滤用），防内存无界增长
 
 # 直发成品合并转发卡的节点署名；user_id 留空由适配器回落机器人自身账号
 _FORWARD_NICKNAME = "星塔旅人"
@@ -132,11 +134,16 @@ _FAILURE_RELAY_PREFIX = "[系统说明：攻略资料已查询成功，但回答
 
 # 直发成功后的工具返回文案（单一事实源）：明确告知 planner 无需再 reply，
 # 避免与已直发的攻略重复。缓存命中与首次加工两条路径共用，防止文案漂移。
+# "同一轮只调本组工具之一"约束放这里（调用后可见），不占工具 description 的每轮 token。
 _ALREADY_SENT_CONTENT = (
     "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
     "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
+    "同一对象在同一轮只允许调用本组工具中的一个，不要再调用另一个。"
     "请立即调用 wait 工具（seconds=5）结束本轮即可。"
 )
+
+# 本插件暴露给 planner 的工具名集合：Hook 前置过滤与 description 维护的单一清单
+_TOOL_NAMES = frozenset({"lookup_game_term", "stellasora_what", "stellasora_how"})
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -289,6 +296,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._update_task: asyncio.Task[None] | None = None  # /st_update 后台任务（兼作在飞判定与强引用）
         self._answer_cfg_fp: str = ""  # 答案相关配置指纹（on_config_update 去抖）
         self._overrides_fp: tuple[tuple[str, str], ...] | None = None  # 别名配置指纹（跳过热重装）
+        self._session_identity_cache: dict[str, tuple[str, str]] = {}  # session_id → (group_id, user_id)
 
     # ===== 生命周期 =====
 
@@ -517,6 +525,68 @@ class StellaSoraPlugin(MaiBotPlugin):
             group_id=str(kwargs.get("group_id") or ""),
             user_id=str(kwargs.get("user_id") or ""),
         )
+
+    async def _resolve_session_identity(self, session_id: str) -> tuple[str, str] | None:
+        """session_id → (group_id, user_id)，供 Hook 在暴露层复现 _denied 判定。
+
+        payload 只有 MD5 形态的 session_id（不可反解），经宿主 chat.get_all_streams
+        反查；缓存命中前每个 planner 内部轮都会触发本 hook，必须落缓存避免每轮
+        全量 RPC。查询失败/未命中返回 None——调用方 fail-open 放行，漏拦由
+        handler 内 _denied 兜底（查询故障不得把授权聊天的工具弄丢）。
+        """
+        if not session_id:
+            return None
+        try:
+            streams = await self.ctx.chat.get_all_streams()
+            for stream in (streams or {}).get("streams") or []:
+                if stream.get("session_id") != session_id:
+                    continue
+                identity = (str(stream.get("group_id") or ""), str(stream.get("user_id") or ""))
+                if len(self._session_identity_cache) >= MAX_SESSION_CACHE_ENTRIES:
+                    self._session_identity_cache.clear()
+                self._session_identity_cache[session_id] = identity
+                return identity
+        except Exception as exc:
+            self.ctx.logger.warning("Hook 解析会话身份失败（fail-open 放行）: %s", exc)
+            return None
+        return None
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="stellasora_planner_tool_gate",
+        description="按黑白名单从 planner 工具清单中剔除星塔旅人工具",
+        mode=HookMode.BLOCKING,
+    )
+    async def _filter_planner_tools(
+        self, tool_definitions: list | None = None, session_id: str = "", **kwargs
+    ) -> dict:
+        """未授权聊天的 planner 工具清单前置拦截：剔除即零 token 暴露。
+
+        只在本次请求定义里按名剔除（deferred 提醒文本不经本 hook，残留一行精简
+        提醒属已知边界）；执行层另有各工具 handler 的 _denied 兜底。
+        """
+        defs = tool_definitions if isinstance(tool_definitions, list) else []
+        if not defs:
+            return {"action": "continue"}
+        identity = self._session_identity_cache.get(session_id)
+        if identity is None:
+            identity = await self._resolve_session_identity(session_id)
+        if identity is None:
+            return {"action": "continue"}
+        group_id, user_id = identity
+        denied = self._denied(group_id=group_id, user_id=user_id)
+        if not denied:
+            return {"action": "continue"}
+        kept = [
+            d for d in defs
+            if not isinstance(d, dict) or d.get("function", {}).get("name") not in _TOOL_NAMES
+        ]
+        if len(kept) == len(defs):
+            return {"action": "continue"}
+        # modified_kwargs 为整体替换语义：session_id/tool_definitions 被形参声明吃掉，
+        # 必须显式补回，保证宿主消费端拿全 8 键
+        modified = {**kwargs, "session_id": session_id, "tool_definitions": kept}
+        return {"action": "continue", "modified_kwargs": modified}
 
     # ===== 直接发送模式 =====
 
@@ -796,6 +866,8 @@ class StellaSoraPlugin(MaiBotPlugin):
                 required=True,
             ),
         ],
+        platforms="qq",
+        core_tool=True,  # 高频低风险短描述工具：进每轮可见清单，省一次 tool_search 往返
     )
     async def handle_lookup(self, term: str = "", **kwargs):
         if self._denied(**kwargs):
@@ -812,28 +884,17 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     @Tool(
         "stellasora_what",
-        description="查询星塔旅人游戏中「是什么/客观数据」类问题：角色、秘纹、技能、首领怪物、卡池资讯。"
-                    "输入：query 传对象名本身（只传名字，中/英均可）；概念页可传概念词（见下）。"
-                    "适用对象与概念词："
-                     "①角色——属性/职业/技能/潜能/天赋(玩家俗称'命座')/礼物/约会/专属秘纹(俗称'专武')，如'XX是谁''XX技能''XX面板数值''XX培养素材''XX命座效果''XX喜欢什么礼物''XX的专武是什么'；"
-                    "②秘纹——属性/适配/旋律，如'XX秘纹''XX旋律'；"
-                    "③首领怪物——弱点/抗性/机制/数值，如'XX的弱点''XX机制''XX怎么打'(只答机制事实，不答打法策略)；"
-                     "④当期讨伐/终焉绝响——'联合讨伐''本期讨伐''终焉绝响''boss'，返回当期首领的弱点/抗性与机制；"
-                     "⑤卡池资讯——'卡池''池子''up池'，返回进行中与近期卡池的起止时间；"
-                     "用户问往期/历史/指定时间点的卡池（如'三周前的up池''上期卡池''8月的卡池'）时，"
-                     "把时间语义解析为 ISO 日期（YYYY-MM-DD）填入 as_of 参数，返回该时间点进行中的卡池。"
-                     "输出：开启直接发送时攻略已直发聊天，返回后调 wait 结束本轮；"
-                    "关闭直接发送时返回攻略正文，用 reply 组织回复。"
-                    "调用边界（决定是否调用本工具）：本工具只产出客观资料，不产出主观结论——"
-                    "①主观评价类问题（值不值得练/强不强/要不要抽/怎么打/打法思路/攻略策略）不要调用本工具，它没有主观建议可给；"
-                    "②配队/纹章搭配/秘纹搭配/技能升级优先度属 stellasora_how，改用那个工具。"
-                    "同一对象在同一轮只允许调用本组工具中的一个：已调用本工具并收到\u2018已发送\u2019后，不要再调用另一个，直接调 wait。",
+        description="查询星塔旅人客观游戏资料：角色（属性/技能/面板/培养素材/礼物/专武/命座）、"
+                    "秘纹（属性/适配/旋律）、首领怪物（弱点/抗性/机制）、当期讨伐、卡池资讯（含往期，用 as_of 参数）。"
+                    "调用边界：只出客观事实，无主观建议——主观评价类问题不要调用本工具；"
+                    "配队/纹章/秘纹搭配/技能优先度改用 stellasora_how。传参规则见参数说明。",
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色/秘纹/首领的名字本身（只传名字，不要带'攻略'/'资料'/'素材'等后缀词；中/英均可）；"
-                "概念页直接传概念词（'卡池'/'联合讨伐'/'秘纹'）",
+                description="角色/秘纹/首领等对象名本身：只传名字，不带'攻略/资料/素材'等后缀词（中/英均可）；"
+                "概念页直接传概念词——'卡池'返回进行中与近期卡池起止时间，"
+                "'联合讨伐'/'终焉绝响'返回当期首领弱点/抗性/机制，'秘纹'返回秘纹属性总览",
                 required=True,
             ),
             ToolParameterInfo(
@@ -846,10 +907,11 @@ class StellaSoraPlugin(MaiBotPlugin):
                 name="as_of",
                 param_type=ToolParamType.STRING,
                 description="卡池时间锚点（ISO 日期 YYYY-MM-DD，仅卡池概念页查询时使用）："
-                "用户问往期/历史/指定时间点的卡池时，把时间语义解析成该日期传入；当前/本期卡池不传",
+                "用户问往期/历史/指定时间点的卡池（如'三周前的up池'）时，把时间语义解析成该日期传入；当前/本期卡池不传",
                 required=False,
             ),
         ],
+        platforms="qq",
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_what(self, query: str = "", question: str = "", as_of: str = "", **kwargs):
@@ -897,26 +959,21 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     @Tool(
         "stellasora_how",
-        description="查询星塔旅人游戏中配队、纹章搭配、秘纹搭配、技能升级优先度等操作指南。"
-                    "输入：query 传角色名（可空格分隔多个，如'XX YY'）；纯属性泛查直接传属性词（如'风队'）。"
-                    "输出：开启直接发送时攻略已以合并转发发送到聊天，返回后调 wait 结束本轮；"
-                    "关闭直接发送时返回攻略正文，用 reply 组织回复。"
-                    "适用：用户问'XX怎么配队''XX纹章怎么选''XX秘纹推荐''XX先升级什么技能'，"
-                    "以及'XX的攻略/怎么玩'或'X系/属性队'时；用户问'XX的完整资料'则改用 stellasora_what。"
-                    "注意：仅当用户明确要求'预设码'时才传 presets=true 参数。"
-                    "question 必须传用户原话逐字内容（联合查询识别与'第一个角色'排序依赖原文，缺失时仅能按 query 兜底）。"
-                    "同一对象在同一轮只允许调用本组工具中的一个：已调用本工具并收到\u2018已发送\u2019后，不要再调用另一个，直接调 wait。",
+        description="查询星塔旅人操作指南：配队、纹章搭配、秘纹搭配、技能升级优先度；"
+                    "也答'XX的攻略/怎么玩'与属性泛查（如'风队'）。"
+                    "用户问'XX的完整资料'改用 stellasora_what。"
+                    "question 必须传用户原话（联合查询识别依赖原文），详见参数说明。",
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色名，可空格分隔多个（如'XX YY'）；question 缺失时作为兜底归一（中/英均可）",
+                description="角色名，可空格分隔多个（如'XX YY'）；纯属性泛查直接传属性词；question 缺失时作为兜底归一（中/英均可）",
                 required=True,
             ),
             ToolParameterInfo(
                 name="question",
                 param_type=ToolParamType.STRING,
-                description="用户的原始问题原文，逐字传入（如'XX YY攻略'）——联合查询识别与首个角色排序依赖原文，不可改写或省略",
+                description="用户的原始问题原文，逐字传入（如'XX YY攻略'）——联合查询识别与'第一个角色'排序依赖原文，不可改写或省略",
                 required=True,
             ),
             ToolParameterInfo(
@@ -926,6 +983,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        platforms="qq",
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_how(self, query: str = "", question: str = "", presets: bool = False, **kwargs):

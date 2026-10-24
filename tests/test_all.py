@@ -24,6 +24,7 @@
   O ss-data 与 what 五类 —— 关键词路由、卡池/讨伐/角色/秘纹/怪物资料、面板等级上限、参数回填、来源中文
   R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗/降级、合并转发节点（零网络）
   S 排行榜命令插件链路 —— kwargs 透传鉴权（白名单回归）、合并转发 self-send 契约、拒绝不发送
+  T Hook 前置过滤   —— maisaka.planner.before_request 黑白名单剔除工具、会话身份缓存、fail-open、声明契约
 """
 from __future__ import annotations
 
@@ -147,6 +148,21 @@ class MockComponent:
         return {"success": not self.fail}
 
 
+class MockChat:
+    """模拟 ctx.chat：get_all_streams 返回可配置流清单，记录调用次数。"""
+
+    def __init__(self, streams=None, fail: bool = False):
+        self.calls = 0
+        self.streams = streams if streams is not None else []
+        self.fail = fail
+
+    async def get_all_streams(self, *args, **kwargs):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("rpc down")
+        return {"streams": self.streams}
+
+
 class _ListLogHandler(logging.Handler):
     """捕获指定 logger 的日志记录，供失败路径断言（caplog 等价物）。"""
 
@@ -185,6 +201,7 @@ def make_plugin(ttl: int = 0, dedup: int = 0):
     ctx.llm = MockLLM()
     ctx.send = MockSend()
     ctx.component = MockComponent()
+    ctx.chat = MockChat()
     return p, ctx
 
 
@@ -3307,6 +3324,120 @@ async def run_section_s() -> None:
         plug.query_lb_board = orig_lb
 
 
+# ===== 节 T：Hook 前置过滤（planner 工具暴露治理） =====
+
+def _hook_kwargs(tool_defs, session_id: str) -> dict:
+    """构造 maisaka.planner.before_request 的完整 8 键 payload。
+
+    与宿主 hook_dispatcher 一致：hook_name 由 dispatcher 注入在首位。
+    """
+    return {
+        "hook_name": "maisaka.planner.before_request",
+        "items": [],
+        "item_schema_version": 1,
+        "tool_definitions": tool_defs,
+        "selected_history_count": 2,
+        "built_message_count": 5,
+        "selection_reason": "test",
+        "session_id": session_id,
+    }
+
+
+def _tool_def(name: str) -> dict:
+    return {"type": "function", "function": {"name": name, "description": "x", "parameters": {}}}
+
+
+async def run_hook_gate() -> None:
+    print("--- T Hook 前置过滤 ---")
+    p, ctx = make_plugin()
+    await p.on_load()
+
+    def plugin_defs() -> list:
+        return [_tool_def(n) for n in sorted(plug._TOOL_NAMES)]
+
+    # T1 无本插件工具：原样 continue（不携带 modified_kwargs）
+    r = await p._filter_planner_tools(**_hook_kwargs([_tool_def("other_tool")], "sess_t1"))
+    check("T1 无本插件工具原样放行", r == {"action": "continue"})
+
+    # T2 mode=off：不过滤
+    r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_t2"))
+    check("T2 mode=off 工具保留", r == {"action": "continue"})
+
+    # T3-T5：预填身份缓存（绕过 get_all_streams 路径，独立覆盖在 T6/T7）
+    p._session_identity_cache.update({
+        "sess_g_ok": ("g_ok", "u1"),
+        "sess_g_no": ("g_no", "u2"),
+        "sess_blk": ("g_blk", "u3"),
+    })
+    p.config.access_control.mode = "whitelist"
+    p.config.access_control.whitelist = ["g_ok"]
+    r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_g_ok"))
+    check("T3 白名单命中群工具保留", r == {"action": "continue"})
+
+    # T4 白名单未命中：剔除本插件三工具，foreign 工具与畸形元素保留，modified_kwargs 完整回传
+    defs = plugin_defs() + [_tool_def("foreign_tool"), {"broken": True}]
+    r = await p._filter_planner_tools(**_hook_kwargs(defs, "sess_g_no"))
+    kept_names = [d.get("function", {}).get("name") for d in r.get("modified_kwargs", {}).get("tool_definitions", [])]
+    check("T4 未命中剔除本插件工具（foreign+畸形保留）且 8 键完整回传",
+          r.get("action") == "continue" and kept_names == ["foreign_tool", None]
+          and len(r["modified_kwargs"]["tool_definitions"]) == 2
+          and set(r["modified_kwargs"]) == {"hook_name", "items", "item_schema_version",
+                                            "tool_definitions", "selected_history_count",
+                                            "built_message_count", "selection_reason", "session_id"},
+          f"kept={kept_names}")
+
+    # T5 黑名单命中：剔除
+    p.config.access_control.mode = "blacklist"
+    p.config.access_control.blacklist = ["g_blk"]
+    r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_blk"))
+    kept_names = [d.get("function", {}).get("name") for d in r.get("modified_kwargs", {}).get("tool_definitions", [])]
+    check("T5 黑名单命中剔除本插件工具", r.get("action") == "continue" and kept_names == [],
+          f"kept={kept_names}")
+    p.config.access_control.mode = "off"
+
+    # T6 身份查询失败：fail-open 放行（漏拦由 handler _denied 兜底）
+    p.config.access_control.mode = "whitelist"
+    p.config.access_control.whitelist = ["g_ok"]
+    ctx.chat = MockChat(fail=True)
+    r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_unknown"))
+    check("T6 get_all_streams 失败 fail-open 放行", r == {"action": "continue"})
+
+    # T7 缓存命中零 RPC + 溢出清空：monkeypatch 上界为 3，未缓存会话触发一次查询后写缓存
+    mock_chat = MockChat(streams=[{"session_id": "sess_new", "group_id": "g9", "user_id": "u9"}])
+    ctx.chat = mock_chat
+    orig_cap = plug.MAX_SESSION_CACHE_ENTRIES
+    plug.MAX_SESSION_CACHE_ENTRIES = 3
+    try:
+        p._session_identity_cache.update({"j1": ("a", ""), "j2": ("b", ""), "j3": ("c", "")})
+        r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_new"))
+        r2 = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_new"))
+        check("T7 首查写缓存剔除生效（溢出先清空）+ 二次命中零 RPC",
+              r.get("action") == "continue"
+              and [d.get("function", {}).get("name") for d in r["modified_kwargs"]["tool_definitions"]] == []
+              and mock_chat.calls == 1 and p._session_identity_cache.get("sess_new") == ("g9", "u9")
+              and r2 == r)
+    finally:
+        plug.MAX_SESSION_CACHE_ENTRIES = orig_cap
+    p.config.access_control.mode = "off"
+
+    # T8 声明契约：三工具 platforms=qq（组件 info 字段，非自由键 metadata），仅 lookup 为 core_tool
+    metas = {}
+    plats = {}
+    for cname in dir(plug.StellaSoraPlugin):
+        func = getattr(plug.StellaSoraPlugin, cname, None)
+        info = getattr(func, "__maibot_component_info__", None) if func else None
+        if info is not None and getattr(info, "name", None):
+            metas[info.name] = getattr(info, "metadata", None) or {}
+            plats[info.name] = getattr(info, "platforms", None)
+    plat_ok = all(plats.get(n) in ("qq", ["qq"]) for n in plug._TOOL_NAMES)
+    check("T8 platforms=qq 齐全且仅 lookup 为 core_tool",
+          plat_ok
+          and (metas.get("lookup_game_term") or {}).get("core_tool") is True
+          and not (metas.get("stellasora_what") or {}).get("core_tool")
+          and not (metas.get("stellasora_how") or {}).get("core_tool"),
+          f"platforms={plats}")
+
+
 # ===== 汇总入口 =====
 
 SECTIONS = {
@@ -3327,12 +3458,13 @@ SECTIONS = {
     "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
     "R": ("排行榜命令", run_section_r),
     "S": ("排行榜命令插件链路", run_section_s),
+    "T": ("Hook 前置过滤", run_hook_gate),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
 # （原 C 并入 D、原 Q 挂 N 节末尾）
-ORDER = ["B", "A", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "R", "S"]
-ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P", "S"}
+ORDER = ["B", "A", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "R", "S", "T"]
+ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P", "S", "T"}
 
 
 async def run_async_sections(keys: list) -> None:

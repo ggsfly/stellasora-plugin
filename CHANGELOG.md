@@ -2,6 +2,24 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.2] - 2026-09-30
+
+### 新功能
+
+- **planner 工具暴露的前置过滤（Hook）**：新增 `maisaka.planner.before_request` Hook——黑白名单判定从工具 handler 内前移到 planner 工具清单层，未授权聊天的请求在发送给模型前剔除本插件全部工具定义（token 零暴露；原机制下 planner 先为工具描述付 token、调用后才收到拒绝文本，白耗约 2 个规划轮）。会话身份经 `chat.get_all_streams` 反查并缓存（每 planner 内部轮触发一次，命中缓存后零 RPC）；查询失败 fail-open 放行，漏拦由工具 handler 内 `_denied` 兜底。
+- **工具 description 精简（1083/596 字 → 约 150/105 字）**：deferred 池每轮向 planner 注入"工具名： 描述全文"，长文是大头。输出约定（直发/回传说明、"调 wait"指引）整段删除——已由工具返回文本承担；"同一轮只调本组工具之一"挪入直发返回文案；传参细节挪进参数 description（不进提醒、发现后才注入）。工具定位、相互导流与关键词保留（`tool_search` 词面匹配依赖）。
+- **`platforms="qq"` + `lookup_game_term` 声明 `core_tool=True`**：非 QQ 平台零注入且执行层拒绝；高频短描述的查词工具进每轮可见清单，省一次 tool_search 往返。
+
+### 破坏性变更
+
+- **host_application min_version 1.2.0 → 1.3.15**（max 放宽至 1.99.99，sdk min → 2.16.0）：Hook 注册要求宿主 hook 目录含 `maisaka.planner.before_request` spec，更旧宿主上插件会加载失败。SDK 2.16.0 的 `@Tool` 正式支持 platforms/core_tool。
+
+### 说明
+
+- 未授权聊天的 deferred 提醒仍会残留精简后的一行工具名（约 150 字/批）——提醒文本不经 Hook，属已知边界；模型即使通过 `tool_search` 发现也拿不到参数定义，实际无法调用。
+- 体验变化：未授权聊天问攻略时，planner 不再调用本插件工具（原先会收到"当前聊天不在允许范围内"），改为普通对话回复。
+- manifest capabilities 新增 `chat.get_all_streams`。
+
 ## [1.4.1] - 2026-09-30
 
 ### 新功能
