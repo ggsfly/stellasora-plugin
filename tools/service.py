@@ -280,10 +280,13 @@ def count_character_names(text: str) -> int:
 
     命中 ≥2 个不同角色名 → 多角色联合查询 → 应回传 planner 汇总后
     单条回复，避免逐角色直发刷屏。
+    计数走掩码去重叠扫描（与 find_character_names_ordered 同源）：形态后缀
+    角色名（如"尘沙（源初）"）包含旧名"尘沙"，朴素子串计数会双命中误判
+    为联合查询而强制回传——长名保留短名剔除后按去重官方名计数。
     """
     if not text:
         return 0
-    return sum(1 for name in _get_lookup().get_character_names() if name in text)
+    return len({name for _idx, name in _scan_character_hits(text)})
 
 
 def _scan_character_hits(text: str) -> list:

@@ -251,6 +251,12 @@ def run_singleton() -> None:
         check("B6 并发 10 线程计数不变", counter["total"] == before, f"{before} -> {counter['total']}")
         check("B7 并发返回同一 lookup", all(r is lookup_a for r in results))
         check("B8 角色名计数走共享 lookup", service.count_character_names("夏花 小禾") >= 2)
+        # B8b 形态后缀角色（XX（源初）等）含旧名子串：掩码去重叠只计长名，
+        # 不误判联合查询（实例故障：尘沙（源初）问句 count=2 → what 被强制回传）
+        check("B8b 形态后缀角色按长名计数（旧名子串不双计）",
+              service.count_character_names("尘沙（源初）的技能面板") == 1
+              and service.count_character_names("科洛妮丝（新春）攻略") == 1
+              and service.count_character_names("尘沙（源初）和艾蕾") == 2)
         names_cached = lookup_a.get_character_names()
         check("B9 get_character_names 缓存命中", names_cached is lookup_a.get_character_names())
     finally:
