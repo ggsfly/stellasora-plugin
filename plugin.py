@@ -139,7 +139,7 @@ _ALREADY_SENT_CONTENT = (
     "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
     "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
     "同一对象在同一轮只允许调用本组工具中的一个，不要再调用另一个。"
-    "请立即调用 wait 工具（seconds=5）结束本轮即可。"
+    "请立即调用 stop 工具结束本轮即可。"
 )
 
 # 本插件暴露给 planner 的工具名集合：Hook 前置过滤与 description 维护的单一清单
@@ -1062,7 +1062,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         if direct and dedup_key in self._recent_direct and (now - self._recent_direct[dedup_key]) < self.config.query.dedup_window:
             elapsed = int(now - self._recent_direct[dedup_key])
             self.ctx.logger.info("直发去重拦截: key=%s 距上次=%ds", dedup_key, elapsed)
-            return {"name": tool_name, "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 wait 工具（seconds=5）结束本轮。"}
+            return {"name": tool_name, "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 stop 工具结束本轮。"}
         return None
 
     @staticmethod
@@ -1086,14 +1086,19 @@ class StellaSoraPlugin(MaiBotPlugin):
         直发判定由配置 direct_send 决定；直发成品经合并转发整卡送达
         （_send_direct_answer），未找到提示仍为单行文本。
         未找到语义（用户裁定）：direct_send=true 时不再回传 planner——
-        直接向聊天发送用户可读提示并返回"已发送"确认，planner 只需 wait 结束本轮，
+        直接向聊天发送用户可读提示并返回"已发送"确认，planner 只需 stop 结束本轮，
         避免 planner 拿到否定结果后再组织一轮多余回复；direct_send=false 维持回传。
         """
         query = effective_question
         direct = self.config.query.direct_send
         stream_id = self._resolve_stream_id(kwargs)
+        # 去重守卫前移到未找到短路之前：未找到直发提示同样登记去重键（见下），
+        # 同 query 重复未找到只发一条提示，防 planner 重试导致"没有查到相关内容"刷屏
+        dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
+        if dedup_resp is not None:
+            return dedup_resp
         # 未找到短路（用户裁定）：不走 LLM 加工、不让 planner 组织否定回复。
-        # 直发模式：提示文本直接发送到聊天，planner 收"已发送"告知只需 wait；
+        # 直发模式：提示文本直接发送到聊天，planner 收"已发送"告知只需 stop；
         # 回传模式：维持原文返回 planner（不直发，replyer 自行组织）。
         if not (text or "").strip() or "未找到相关攻略" in text:
             not_found = {"name": "stellasora_how", "content": "未找到相关攻略。"}
@@ -1106,17 +1111,16 @@ class StellaSoraPlugin(MaiBotPlugin):
                 except Exception:
                     self.ctx.logger.exception("how 未找到提示发送异常")
                     return not_found
+                # 提示直发与成品同等登记去重：窗口内同主题重试直接拦截
+                if query:
+                    self._recent_direct[(stream_id, query)] = time.time()
             return {
                 "name": "stellasora_how",
                 "content": (
                     "已向聊天发送'未找到相关攻略'的提示。你不需要也不应该再调用 reply 工具，"
-                    "请立即调用 wait 工具（seconds=5）结束本轮即可。"
+                    "请立即调用 stop 工具结束本轮即可。"
                 ),
             }
-        # 去重守卫：同流同主题在 dedup_window 内直接拦截
-        dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
-        if dedup_resp is not None:
-            return dedup_resp
         return await self._direct_send(
             tool_name="stellasora_how",
             question=effective_question,

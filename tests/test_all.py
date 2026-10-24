@@ -823,7 +823,7 @@ async def run_direct_send() -> None:
     llm, send = ctx.llm, ctx.send
     r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g1")
     check("G1 直发成功且引导调 wait 禁 reply（经合并转发）",
-          "已直接发送" in r["content"] and "wait 工具" in r["content"] and len(send.forwarded) == 1
+          "已直接发送" in r["content"] and "stop 工具" in r["content"] and len(send.forwarded) == 1
           and send.forwarded[0][0] == "stream_g1")
     check("G1b 转发卡整卡单节点（署名+全文）",
           len(send.forwarded[0][1]) == 1
@@ -877,7 +877,7 @@ async def run_direct_send() -> None:
     check("G9 联合查询（≥2 角色名）改直发（转发一次+已发送确认+联合问题入 prompt）",
           len(send.forwarded) == n_fwd + 1
           and "已直接发送" in str(ret.get("content", ""))
-          and "wait 工具" in str(ret.get("content", ""))
+          and "stop 工具" in str(ret.get("content", ""))
           and "你的名字是麦麦" in llm.calls[-1]["prompt"]
           and "小禾" in llm.calls[-1]["prompt"])
 
@@ -901,7 +901,7 @@ async def run_direct_send() -> None:
     check("G9c 单角色表未命中→直发模式直接发送提示（不回传planner+不走LLM）",
           len(send.sent) == n_sent + 1
           and "没有查到相关内容" in send.sent[-1][1]
-          and "wait 工具" in str(r_miss.get("content", ""))
+          and "stop 工具" in str(r_miss.get("content", ""))
           and len(llm.calls) == n_llm,
           f"r_miss={r_miss}")
 
@@ -912,7 +912,7 @@ async def run_direct_send() -> None:
     check("G9d 多角色交集为空→直发模式直接发送提示（不回传planner+不走LLM）",
           len(send.sent) == n_sent + 1
           and "没有查到相关内容" in send.sent[-1][1]
-          and "wait 工具" in str(r_miss2.get("content", ""))
+          and "stop 工具" in str(r_miss2.get("content", ""))
           and len(llm.calls) == n_llm,
           f"r_miss2={r_miss2}")
 
@@ -961,6 +961,14 @@ async def run_direct_send() -> None:
     p2, ctx2 = make_plugin(dedup=60)
     await p2.on_load()
     llm2, send2 = ctx2.llm, ctx2.send
+    # G10a 未找到直发同样登记去重：同 query 重复未找到第二次被拦（尘沙（源初）重复提示回归）
+    r_nf1 = await p2.handle_how(query="赤霞", group_id="g1", stream_id="stream_dedup_nf")
+    r_nf2 = await p2.handle_how(query="赤霞", group_id="g1", stream_id="stream_dedup_nf")
+    check("G10a 未找到直发去重（第二次拦截+stop 指引+提示只发一条）",
+          "已向聊天发送" in str(r_nf1.get("content", ""))
+          and "刚刚已直接发送过" in str(r_nf2.get("content", ""))
+          and "stop 工具" in str(r_nf2.get("content", ""))
+          and len([t for t in send2.sent if "没有查到相关内容" in t[1]]) == 1)
     await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
     r2b = await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
     check("G10 同流同 query 去重拦截（LLM/转发各一次）",
@@ -2396,7 +2404,7 @@ Freesia (5★) | 1/1/1/1
     check("P4d 无角色且无元素后缀→直发提示不回传planner（不走LLM）",
           len(ctx1.send.sent) == 1
           and "没有查到相关内容" in ctx1.send.sent[0][1]
-          and "wait 工具" in r_none.get("content", "")
+          and "stop 工具" in r_none.get("content", "")
           and ctx1.llm.calls == [],
           f"content={r_none.get('content', '')!r}")
 
