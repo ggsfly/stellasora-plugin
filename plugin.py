@@ -537,9 +537,12 @@ class StellaSoraPlugin(MaiBotPlugin):
         if not session_id:
             return None
         try:
-            streams = await self.ctx.chat.get_all_streams()
-            for stream in (streams or {}).get("streams") or []:
-                if stream.get("session_id") != session_id:
+            raw = await self.ctx.chat.get_all_streams()
+            # SDK 代理按解包表（context.py "chat.get_all_streams": "streams"）把宿主
+            # 结果解成裸 list——按解包后契约消费，其余形状视为查询失败走 fail-open
+            stream_list = raw if isinstance(raw, list) else []
+            for stream in stream_list:
+                if not isinstance(stream, dict) or stream.get("session_id") != session_id:
                     continue
                 identity = (str(stream.get("group_id") or ""), str(stream.get("user_id") or ""))
                 if len(self._session_identity_cache) >= MAX_SESSION_CACHE_ENTRIES:

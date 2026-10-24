@@ -149,7 +149,7 @@ class MockComponent:
 
 
 class MockChat:
-    """模拟 ctx.chat：get_all_streams 返回可配置流清单，记录调用次数。"""
+    """模拟 ctx.chat：get_all_streams 返回裸 list（SDK 代理已按 "streams" 键解包），记录调用次数。"""
 
     def __init__(self, streams=None, fail: bool = False):
         self.calls = 0
@@ -160,7 +160,7 @@ class MockChat:
         self.calls += 1
         if self.fail:
             raise RuntimeError("rpc down")
-        return {"streams": self.streams}
+        return self.streams
 
 
 class _ListLogHandler(logging.Handler):
