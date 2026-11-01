@@ -2872,14 +2872,12 @@ def _lb_render_mode(
     ]
     for start in range(0, len(top), _LB_FORWARD_CHUNK):
         chunk = top[start:start + _LB_FORWARD_CHUNK]
-        lines = [f"第 {chunk[0].get('rank'):03d}–{chunk[-1].get('rank'):03d} 名"]
+        lines = [f"第 {chunk[0].get('rank')}–{chunk[-1].get('rank')} 名"]
         for entry in chunk:
             rank = entry.get("rank")
             name = entry.get("name") or "?"
             score = int(entry.get("score") or 0)
-            # 排名补零+分数前置：分数从行首固定列开始，QQ 非等宽字体下名字长短
-            # 不再影响分数列对齐（完整千分位保留）
-            lines.append(f"{rank:03d}. {score:,} · {name}")
+            lines.append(f"{rank}. {name} — {score:,}")
         nodes.append(_lb_node("\n".join(lines)))
     return nodes, ""
 
