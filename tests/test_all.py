@@ -3246,8 +3246,8 @@ def run_section_r() -> None:
             check("R2c bb 新鲜缓存零网络并正确渲染（表头节点+条目节点）",
                   notice_bb == "" and len(nodes_bb) == 2
                   and "【联合讨伐 S12】 国服 Top2 · 共 1,234 人 · 更新于 刚刚" in fwd_text(nodes_bb)
-                  and "第 1–2 名" in fwd_text(nodes_bb)
-                  and "1. 阿尔法 — 3,139,255" in fwd_text(nodes_bb))
+                  and "第 001–002 名" in fwd_text(nodes_bb)
+                  and "001. 3,139,255 · 阿尔法" in fwd_text(nodes_bb))
 
             # R3 过期缓存触发重拉
             write_top(time.time() - 7200)
@@ -3258,7 +3258,7 @@ def run_section_r() -> None:
             )
             out2, notice2 = service.query_lb_board("bb", ttl_minutes=10, st=fake2)
             check("R3a 过期缓存触发重拉", fake2.board_calls == [("bb12", True)])
-            check("R3b 重拉后表头刷新", "更新于 刚刚" in fwd_text(out2) and "1. 阿尔法 — 3,139,255" in fwd_text(out2))
+            check("R3b 重拉后表头刷新", "更新于 刚刚" in fwd_text(out2) and "001. 3,139,255 · 阿尔法" in fwd_text(out2))
 
             # R4 拉取失败降级陈旧缓存
             fake3 = FakeBoardFetcher(
@@ -3268,7 +3268,7 @@ def run_section_r() -> None:
             )
             out3, notice3 = service.query_lb_board("bb", ttl_minutes=10, st=fake3)
             check("R4 拉取失败降级陈旧缓存并标注年龄",
-                  "1. 阿尔法 — 3,139,255" in fwd_text(out3) and "2 小时前" in fwd_text(out3))
+                  "001. 3,139,255 · 阿尔法" in fwd_text(out3) and "2 小时前" in fwd_text(out3))
 
             # R5 BB_SEASON 缺失按 meta 最大 bbNN 降级
             fake4 = FakeBoardFetcher(
