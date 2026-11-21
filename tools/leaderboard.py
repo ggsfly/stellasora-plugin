@@ -7,7 +7,7 @@
 
 上游：AutumnVN/ssleaderboard（GitHub raw）。缓存目录由调用方显式传入，
 1.5.0 起活动榜单缓存位于 <data_dir>/leaderboard/（旧 offline/ssleaderboard/
-不再读写）。
+不再读写）。渲染层在 tools/leaderboard_render.py（本模块纯数据）。
 """
 
 from __future__ import annotations
@@ -30,17 +30,9 @@ _SS_LB_BASE = "https://raw.githubusercontent.com/AutumnVN/ssleaderboard/refs/hea
 # 赛季前缀 → 中文模式名（与 ssleaderboard 仓库 sid 约定一致）
 LB_MODE_CN = {"bb": "联合讨伐", "fe": "终焉绝响"}
 
-# 合并转发节点署名；user_id 留空，由适配器回落到机器人自身账号
-_LB_FORWARD_NICKNAME = "星塔旅人"
-
 # 每个转发节点承载的排名条数：Top100 拆成表头 + 4 块共 5 节点，
 # 卡片预览有层次且单节点不至于过长
-_LB_FORWARD_CHUNK = 25
 
-
-def lb_node(text: str) -> Dict[str, Any]:
-    """构造一个纯文本合并转发节点（宿主 send.forward 节点契约）。"""
-    return {"nickname": _LB_FORWARD_NICKNAME, "segments": [{"type": "text", "content": text}]}
 
 
 def format_age(seconds: float) -> str:
@@ -398,103 +390,6 @@ class BoardUnavailable(RuntimeError):
     """榜单当期不可用（指针缺失/未开榜/拉取失败且无缓存/国服空），消息即用户可见文案。"""
 
 
-def render_mode_nodes(
-    leaderboard_dir: Path,
-    prefix: str,
-    sid: str,
-    ttl_seconds: float,
-    proxy_url: Optional[str] = None,
-) -> Tuple[List[Dict[str, Any]], str]:
-    """渲染单个模式的当期国服榜单为合并转发节点（文本形态，语义同旧 _lb_render_mode）。
-
-    返回 (nodes, notice) 且恰一非空：notice 为单行提示（指针缺失/未开榜/
-    拉取失败/国服空），由调用方走纯文本；nodes 为合并转发节点数组，由调用方
-    走 send.forward。TTL 内直读本地瘦身缓存；过期或缺失时重拉（force_update
-    跳过离线优先分支）。拉取失败但有历史缓存时降级展示陈旧数据——
-    数据年龄由表头"更新于"自明。上游无当期赛季文件（fe 赛季初常态）输出"未开榜"。
-    """
-    mode_cn = LB_MODE_CN.get(prefix, prefix.upper())
-    if not sid:
-        return [], f"【{mode_cn}】当期赛季指针缺失。"
-
-    match = re.fullmatch(r"[a-z]+(\d+)", sid)
-    season_num = match.group(1) if match else "?"
-    header = f"【{mode_cn} S{season_num}】"
-
-    data, age = load_top(leaderboard_dir, sid)
-    if data is None or age > ttl_seconds:
-        slim, status = fetch_leaderboard_board(
-            leaderboard_dir, sid, proxy_url=proxy_url, force_update=True
-        )
-        if status == "ok" and slim is not None:
-            data, age = slim, 0.0
-        elif status == "not_found":
-            return [], f"{header} 当期未开榜（上游尚未发布榜单数据）。"
-        elif data is None:
-            return [], f"{header} 榜单拉取失败，请稍后再试。"
-
-    cn = data["regions"].get("cn")
-    if not isinstance(cn, dict) or not cn.get("top"):
-        return [], f"{header} 国服暂无榜单数据。"
-
-    top = cn["top"]
-    total = int(cn.get("total") or 0)
-    # 表头写实际条数：赛季初上游 top 可能不足 100，写死"Top100"会失真
-    nodes = [
-        lb_node(f"{header} 国服 Top{len(top)} · 共 {total:,} 人 · 更新于 {format_age(age)}")
-    ]
-    for start in range(0, len(top), _LB_FORWARD_CHUNK):
-        chunk = top[start:start + _LB_FORWARD_CHUNK]
-        lines = [f"第 {chunk[0].get('rank')}–{chunk[-1].get('rank')} 名"]
-        for entry in chunk:
-            rank = entry.get("rank")
-            name = entry.get("name") or "?"
-            score = int(entry.get("score") or 0)
-            lines.append(f"{rank}. {name} — {score:,}")
-        nodes.append(lb_node("\n".join(lines)))
-    return nodes, ""
-
-
-def query_lb_board(
-    mode: str,
-    ttl_minutes: int = 10,
-    leaderboard_dir: Path | None = None,
-    proxy_url: Optional[str] = None,
-) -> Tuple[List[Dict[str, Any]], str]:
-    """当期排行榜国服榜单（/st_bb・/st_fe 命令数据源，无 LLM 参与）。
-
-    返回 (nodes, notice) 且恰一非空：notice 为单行提示（参数错误/未开榜等）
-    走纯文本；nodes 为合并转发节点数组（表头 + 每 _LB_FORWARD_CHUNK 名一节点）
-    走 send.forward。mode: "bb"=联合讨伐 / "fe"=终焉绝响。两榜独立成命令，避免
-    单条消息过长；各自跟随 season.json 的 BB_SEASON/FE_SEASON 指针，不写死赛季号。
-    bb 指针缺失时按 meta 键表取最大 bbNN 降级；fe 严格跟随指针、缺失即报未开榜
-    （"不猜、不兜底"）。leaderboard_dir 供测试注入临时目录。
-    """
-    prefix = str(mode or "").strip().lower()
-    if prefix not in LB_MODE_CN:
-        return [], f"未知排行榜类型: {mode}"
-    if leaderboard_dir is None:
-        from net_common import host_data_dir
-
-        leaderboard_dir = host_data_dir() / "leaderboard"
-
-    ttl_seconds = max(0, int(ttl_minutes)) * 60
-    season = fetch_leaderboard_season(leaderboard_dir, proxy_url=proxy_url, force_update=True)
-
-    if prefix == "bb":
-        sid = str((season or {}).get("BB_SEASON") or "")
-        if not sid:
-            meta = fetch_leaderboard_meta(leaderboard_dir, proxy_url=proxy_url)
-            candidates = sorted(
-                (k for k in (meta or {}) if re.match(r"^bb\d+$", k)),
-                key=lambda k: int(k[2:]),
-                reverse=True,
-            )
-            sid = candidates[0] if candidates else ""
-    else:
-        sid = str((season or {}).get("FE_SEASON") or "")
-
-    return render_mode_nodes(leaderboard_dir, prefix, sid, ttl_seconds, proxy_url=proxy_url)
 
 
 def refresh_board_for_update(

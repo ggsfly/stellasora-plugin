@@ -98,19 +98,15 @@ def _api_opener(proxy_url: Optional[str] = None):
     return _build_opener(_resolve_proxy(proxy_url))
 
 
-def fetch_element_page(
-    element: str,
+def _request_article(
+    page_id: int,
     proxy_url: Optional[str] = None,
     timeout: int = 30,
-) -> Tuple[int, str, list]:
-    """拉取单属性页并解析 content_json，返回 (文章id, 标题, 节点数组)。
+) -> Dict[str, Any]:
+    """请求单篇文章 API 并校验外层结构（六页路径共用）。
 
-    结构/鉴权异常抛 GameKeeError（含文章 id 与错误类型），不做静默降级——
-    上游漂移必须完整暴露（AGENTS.md 禁兜底）。
+    返回 data 字段 dict；HTTP/网络/结构异常统一抛 GameKeeError（含文章 id）。
     """
-    page_id = ELEMENT_PAGES.get(element)
-    if page_id is None:
-        raise GameKeeError(f"未知属性页: {element}")
     url = f"{_API_BASE}/v1/content/detail/{page_id}"
     opener = _api_opener(proxy_url)
     try:
@@ -125,12 +121,28 @@ def fetch_element_page(
         raise
     except Exception as exc:
         raise GameKeeError(f"文章 {page_id} 网络失败: {exc}") from exc
-
     if not isinstance(payload, dict) or payload.get("code") != 0:
         raise GameKeeError(f"文章 {page_id} API 返回异常: code={payload.get('code') if isinstance(payload, dict) else '?'}")
     data = payload.get("data")
     if not isinstance(data, dict):
         raise GameKeeError(f"文章 {page_id} 缺少 data 字段")
+    return data
+
+
+def fetch_element_page(
+    element: str,
+    proxy_url: Optional[str] = None,
+    timeout: int = 30,
+) -> Tuple[int, str, list]:
+    """拉取单属性页并解析 content_json，返回 (updated_at, 标题, 节点数组)。
+
+    结构/鉴权异常抛 GameKeeError（含文章 id 与错误类型），不做静默降级——
+    上游漂移必须完整暴露（AGENTS.md 禁兜底）。
+    """
+    page_id = ELEMENT_PAGES.get(element)
+    if page_id is None:
+        raise GameKeeError(f"未知属性页: {element}")
+    data = _request_article(page_id, proxy_url, timeout)
     updated_at = int(data.get("updated_at") or 0)
     title = str(data.get("title") or "")
     raw_json = data.get("content_json")
@@ -293,32 +305,15 @@ def probe_updates(
     """轻量更新探查：拉六页仅取 updated_at（解析 content_json 前即返回）。
 
     返回 {"pages": {element: {"updated_at", "published_at"}},
-    "changed": bool}——published_at 与调用方传入的 known 快照比对，全部一致
+    "changed": bool}——与调用方传入的 known 快照比对，全部一致
     即 changed=False（六页无变化，仅推进时间戳）；任一页失败抛 GameKeeError
     （整批失败语义，与 build_index 一致）。
     """
     known = known_updates or {}
     result: Dict[str, Dict[str, int]] = {}
     changed = False
-    result: Dict[str, int] = {}
     for element, page_id in ELEMENT_PAGES.items():
-        url = f"{_API_BASE}/v1/content/detail/{page_id}"
-        opener = _api_opener(proxy_url)
-        try:
-            req = urllib.request.Request(url, headers=_API_HEADERS)
-            with opener.open(req, timeout=timeout) as response:
-                if response.getcode() != 200:
-                    raise GameKeeError(f"文章 {page_id} HTTP {response.getcode()}")
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise GameKeeError(f"文章 {page_id} HTTP {exc.code}") from exc
-        except GameKeeError:
-            raise
-        except Exception as exc:
-            raise GameKeeError(f"文章 {page_id} 网络失败: {exc}") from exc
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            raise GameKeeError(f"文章 {page_id} 探查响应缺 data")
+        data = _request_article(page_id, proxy_url, timeout)
         updated_at = int(data.get("updated_at") or 0)
         result[element] = {
             "updated_at": updated_at,
@@ -327,7 +322,6 @@ def probe_updates(
         if known.get(element) != updated_at:
             changed = True
     return {"pages": result, "changed": changed}
-
 
 def match_guides(
     index: Dict[str, Any],

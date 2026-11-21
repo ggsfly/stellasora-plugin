@@ -25,7 +25,6 @@ import time
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParamType, ToolParameterInfo
 
-MAX_DEDUP_ENTRIES = 2000  # 去重记录硬上界，防止多群场景内存增长
 
 MAX_SESSION_CACHE_ENTRIES = 2000  # session 身份缓存硬上界（Hook 前置过滤用），防内存无界增长
 
@@ -203,9 +202,6 @@ class StellaSoraPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._data_dir: Path | None = None
-        self._net_cache_dir: Path | None = None
-        self._sync_task: asyncio.Task[Any] | None = None
-        self._preheat_task: asyncio.Task[None] | None = None
         self._update_task: asyncio.Task[None] | None = None  # /st_update 后台任务（兼作在飞判定与强引用）
         self._overrides_fp: tuple[tuple[str, str], ...] | None = None  # 别名配置指纹（跳过热重装）
         self._session_identity_cache: dict[str, tuple[str, str]] = {}  # session_id → (group_id, user_id)
@@ -246,8 +242,6 @@ class StellaSoraPlugin(MaiBotPlugin):
         """
         self._data_dir = Path(self.ctx.paths.data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._net_cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
-        self._net_cache_dir.mkdir(parents=True, exist_ok=True)
         self._lb_data_dir_ready()
         # GameKee 探查：读持久状态 → 内存捡索引快照 → 到期则延迟 60s 后台探查
         #（延迟避开宿主 reload 等待窗口；延迟期间收到手动 /st_update 即取消）
@@ -274,8 +268,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._update_task.cancel()
             await asyncio.gather(self._update_task, return_exceptions=True)
         self._update_task = None
-        self._cache_dir = None
-        self._answer_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")
 
     async def on_config_update(
@@ -287,19 +279,6 @@ class StellaSoraPlugin(MaiBotPlugin):
         )
         self._apply_overrides_config()
 
-
-    def _cache_dir_ready(self) -> Path:
-        if self._cache_dir is None:
-            self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
-        return self._cache_dir
-
-    def _net_cache_dir_ready(self) -> Path:
-        """网络抓取缓存目录（runtime_dir/cache，可随时重建）。"""
-        if self._net_cache_dir is None:
-            self._net_cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
-            self._net_cache_dir.mkdir(parents=True, exist_ok=True)
-        return self._net_cache_dir
 
     def _lb_data_dir_ready(self) -> Path:
         """榜单数据目录（data_dir/leaderboard，1.5.0 起活动榜单缓存；旧 offline/ssleaderboard 不再读写）。
@@ -349,13 +328,6 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._gamekee_state_path(),
             json.dumps(self._gamekee_state, ensure_ascii=False, indent=2),
         )
-
-    def _save_gamekee_state(self) -> None:
-        """持久化探查状态（原子写；失败记日志不抛——状态丢失只影响下次探查时机）。"""
-        try:
-            self._save_gamekee_state_sync()
-        except Exception as exc:
-            self.ctx.logger.warning("GameKee 状态写入失败: %s", exc)
 
     def _save_gamekee_state_sync_commit(self, generation: int) -> None:
         """状态提交同步体：锁内核验代际 → 匹配才 rename 提交（与发布同款互斥）。"""
@@ -760,9 +732,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         """黑白名单鉴权。群聊看 group_id，私聊看 user_id。"""
         cfg = self.config.access_control
         return not check_permission(
-            cfg.mode,
-            [str(x).strip() for x in (cfg.whitelist or [])],
-            [str(x).strip() for x in (cfg.blacklist or [])],
+            cfg.mode, cfg.whitelist, cfg.blacklist,
             group_id=str(kwargs.get("group_id") or ""),
             user_id=str(kwargs.get("user_id") or ""),
         )

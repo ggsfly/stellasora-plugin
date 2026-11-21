@@ -14,22 +14,18 @@ def host_data_dir() -> Path:
 
 
 def resolve_proxy(proxy: Optional[str]) -> Optional[str]:
-    """解析最终代理地址。
+    """解析最终代理地址（None=直连）。
 
-    优先级（高→低）：
-      1. 显式传入的 proxy 参数
-      2. 环境变量 HTTPS_PROXY / HTTP_PROXY
-      3. 默认值 http://127.0.0.1:7890
-
-    传入空字符串 "" 表示强制直连（跳过代理）。
+    优先级：显式 proxy 参数 → 环境变量 HTTPS_PROXY/HTTP_PROXY → 直连。
+    传入空字符串 "" 表示强制直连。不再内置默认代理地址——宿主部署环境
+    千差万别，写死本地端口会在无代理机器上让全部上游请求失败；需要代理时
+    由部署环境经环境变量提供（与宿主自身行为一致）。
     """
     if proxy is not None:
         # 显式传入空串 → 直连
         return proxy.strip() or None
     env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    if env_proxy:
-        return env_proxy.strip()
-    return _DEFAULT_PROXY
+    return env_proxy.strip() if env_proxy else None
 
 
 def build_opener(proxy_url: Optional[str]) -> urllib.request.OpenerDirector:

@@ -24,7 +24,6 @@ import asyncio
 import json
 import logging
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -81,21 +80,6 @@ def hard_fail(msg: str) -> None:
 
 # ===== 共享 Mock 脚手架（原分属 4 个文件，合并后唯一定义） =====
 
-class MockConfig:
-    """模拟宿主全局配置读取（ctx.config.get 的 {success, value} 返回）。"""
-
-    def __init__(self, data=None):
-        self.data = data or {}
-
-    async def get(self, key, default=None):
-        node = self.data
-        for part in str(key).split("."):
-            if not isinstance(node, dict) or part not in node:
-                return {"success": False, "value": default}
-            node = node[part]
-        return {"success": True, "value": node}
-
-
 class MockLLM:
     """模拟 ctx.llm.generate：可注入固定回答/软失败/硬异常。"""
 
@@ -131,25 +115,6 @@ class MockSend:
     async def forward(self, messages, stream_id, **kwargs):
         self.forwarded.append((stream_id, list(messages)))
         return True
-
-
-def fwd_text(nodes) -> str:
-    """转发节点数组 → 节点文本拼接（单节点即全文），供内容断言。"""
-    return "\n".join(
-        seg.get("content", "") for node in nodes for seg in node.get("segments", [])
-    )
-
-
-class MockComponent:
-    """模拟 ctx.component：记录 reload_plugin 调用（返回可控成功/失败）。"""
-
-    def __init__(self, fail: bool = False):
-        self.calls: list = []
-        self.fail = fail
-
-    async def reload_plugin(self, plugin_name, **kwargs):
-        self.calls.append(plugin_name)
-        return {"success": not self.fail}
 
 
 class MockChat:
@@ -209,27 +174,17 @@ class _FakeOpener:
         return self._handler(req, timeout=timeout)
 
 
-def make_plugin(ttl: int = 0, dedup: int = 0):  # ttl/dedup 参数保留兼容旧调用签名（1.5.0 无 query 配置）
+def make_plugin():
     """创建插件实例 + mock ctx（缓存/去重参数默认关闭以便隔离用例）。
 
-    data_dir 与 runtime_dir 都指向临时目录（P5 隔离纪律：任何写缓存的新测试
-    不得触碰真实宿主持久目录）。旧链路（how 直发/what）仍需真实 dict/names 与
-    offline 攻略数据做只读查询源——拷贝进临时 data_dir，插件实例对该目录的任何
-    写入都留在临时区，不污染宿主数据（旧链路于 1.5.0 步骤 6 整体删除）。
-    实例注册到模块级 _LIVE_PLUGINS：1.5.0 起 on_load 会启动 GameKee 后台探查
-    任务（60s 延迟），长测试（全量 >60s）中僵尸实例醒来会污染调用计数桩——
-    需要干净计时断言的节（V）开头统一 cancel_gamekee_tasks()。
+    data_dir 与 runtime_dir 都指向临时目录（隔离纪律：测试不触碰真实宿主
+    持久目录）。实例注册到模块级 _LIVE_PLUGINS：on_load 会启动 GameKee 后台
+    探查任务（60s 延迟），长测试（全量 >60s）中僵尸实例醒来会污染调用计数
+    桩——需要干净计时断言的节（V）开头统一 cancel_gamekee_tasks()。
     """
     p = plug.create_plugin()
     cache = Path(tempfile.mkdtemp(prefix="stellasora_test_all_"))
     data_tmp = Path(tempfile.mkdtemp(prefix="stellasora_test_data_"))
-    for name in ("dict.json", "names.json"):
-        src = DATA_DIR / name
-        if src.is_file():
-            shutil.copyfile(src, data_tmp / name)
-    offline_src = DATA_DIR / "offline"
-    if offline_src.is_dir():
-        shutil.copytree(offline_src, data_tmp / "offline")
     _LIVE_PLUGINS.append(p)
     ctx = PluginContext(
         plugin_id="ggsfly.stellasora-plugin",
@@ -238,16 +193,8 @@ def make_plugin(ttl: int = 0, dedup: int = 0):  # ttl/dedup 参数保留兼容�
     )
     p._set_context(ctx)
     p._plugin_config_instance = plug.StellaSoraConfig()
-    ctx.config = MockConfig(
-        {
-            "bot": {"nickname": "麦麦", "alias_names": []},
-            "personality": {"personality": "是一个大二女大学生，现在正在上网和群友聊天。", "reply_style": "你的风格平淡简短，可以参考贴吧的回复风格。"},
-            "experimental": {"emotion_trait": "neutral"},
-        }
-    )
     ctx.llm = MockLLM()
     ctx.send = MockSend()
-    ctx.component = MockComponent()
     ctx.chat = MockChat()
     return p, ctx
 
