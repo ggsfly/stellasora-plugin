@@ -384,12 +384,18 @@ async def run_direct_send() -> None:
     await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g11", **qq_kwargs)
     check("G11 TTL 内二次查询零探查（fresh 复用索引）", fresh_calls[0] == 0, f"build calls={fresh_calls[0]}")
 
-    # G12 缺 query 参数：明确返回缺少查询词（不发送）
+    # G12 缺 query 参数：success=False + 可引导错误（含字段名与 JSON 示例，不发送）
     n_sent, n_fwd = len(send.sent), len(send.forwarded)
-    r12 = await p.handle_how(query="", group_id="g1", stream_id="stream_g12", **qq_kwargs)
-    check("G12 缺 query 明确返回（不发送）",
-          "缺少查询词" in str(r12.get("content", ""))
-          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
+    r12a = await p.handle_how(group_id="g1", stream_id="stream_g12", **qq_kwargs)
+    r12b = await p.handle_how(query="", group_id="g1", stream_id="stream_g12", **qq_kwargs)
+    r12c = await p.handle_how(query="   ", group_id="g1", stream_id="stream_g12", **qq_kwargs)
+    err12 = str(r12b.get("error", ""))
+    check("G12 缺 query 三态明确失败（不发送）",
+          all(r.get("success") is False for r in (r12a, r12b, r12c))
+          and "query" in err12 and '{"query":"艾蕾攻略"}' in err12
+          and r12b.get("content") == err12
+          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd,
+          f"errs={[str(r.get('error', '')) for r in (r12a, r12b, r12c)]}")
 
 
 
@@ -501,6 +507,14 @@ def run_tool_query_desc() -> None:
     # J3 query 参数：不宣称 LLM 加工/预设码（旧契约清除）
     check("J3 how.query 清除旧契约宣称（预设码/兜底归一）",
           "预设码" not in desc and "兜底归一" not in desc, desc)
+    # J4 visibility 元数据：宿主 1.4.x 只把 visibility=visible 的插件工具放进 planner
+    # 原生 tools 数组，缺省 deferred 且 schema 不出站（线上空 args 故障根因）
+    how_meta = getattr(how_info, "metadata", {}) if (how_info := getattr(
+        plug.StellaSoraPlugin.handle_how, attr, None)) is not None else {}
+    check("J4 how.visibility=visible 元数据声明",
+          str(how_meta.get("visibility", "")).lower() == "visible", f"metadata={how_meta}")
+    check("J5 how.query 描述必填前置（可引导非空调用）",
+          "必填" in desc and "非空" in desc, desc)
 
 
 # ===== 节 K：手动更新指令（st_update） =====

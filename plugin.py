@@ -856,12 +856,16 @@ class StellaSoraPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="用户的问题原文或角色名（如'艾蕾攻略'/'风队怎么玩'/'春科直伤篇'）；"
+                description="必填，非空。填写用户的问题原文或角色名（如'艾蕾攻略'/'风队怎么玩'/'春科直伤篇'）；"
                 "支持别名与属性泛查（水/火/光/暗/风/地 + 队/系）",
                 required=True,
             ),
         ],
         platforms="qq",
+        # 宿主 1.4.x 起 planner 只把 visibility=visible 的插件工具放进原生 tools
+        # 数组（其余仅可经 tool_search 发现且 schema 不出站，实测模型发不出带参
+        # 调用）；未声明时默认 deferred，故必须显式声明原生可见。
+        visibility="visible",
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_how(self, query: str = "", **kwargs):
@@ -877,7 +881,13 @@ class StellaSoraPlugin(MaiBotPlugin):
             return {"name": "stellasora_how", "content": "当前聊天不在星塔旅人插件的允许范围内。"}
         query = (query or "").strip()
         if not query:
-            return {"name": "stellasora_how", "content": "缺少查询词。"}
+            # success=False 让宿主把结果记为失败（component_query 只读 success/error
+            # 键）；带 JSON 示例的可引导错误降低模型连环空调用触发重复熔断的概率。
+            error = (
+                '缺少必填参数 query：请传入非空查询词，例如 {"query":"艾蕾攻略"}。'
+                "仅在参数已补齐时重试，请勿再次发送空参数。"
+            )
+            return {"name": "stellasora_how", "success": False, "error": error, "content": error}
         self.ctx.logger.info("how 查询: %s (group=%s user=%s)", query, kwargs.get("group_id", ""), kwargs.get("user_id", ""))
 
         stream_id = self._resolve_stream_id(kwargs)
