@@ -20,8 +20,9 @@ import html
 # 每页承载的排名条数（与旧文本转发节点 _LB_FORWARD_CHUNK 语义一致）
 LB_PAGE_SIZE = 25
 
-# 渲染视口与缩放：宽度固定（表格布局可控），高度自适应内容
-_LB_VIEWPORT_WIDTH = 720
+# 渲染视口与缩放：宽度收窄让昵称列贴住分数列（720px 时两列间大片留白，实机反馈），
+# 高度自适应内容
+_LB_VIEWPORT_WIDTH = 480
 _LB_DEVICE_SCALE = 2.0
 
 # HTML/CSS 模板：系统字体栈 + tabular-nums；表格两列布局（排名+昵称 | 分数）
@@ -29,24 +30,24 @@ _PAGE_TMPL = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
-         background: #f4f6fb; padding: 16px; }}
-  .card {{ background: #fff; border-radius: 12px; padding: 16px 20px;
+         background: #f4f6fb; padding: 12px; }}
+  .card {{ background: #fff; border-radius: 12px; padding: 12px 16px;
           box-shadow: 0 2px 10px rgba(0,0,0,.06); }}
   .header {{ display: flex; justify-content: space-between; align-items: baseline;
-            border-bottom: 2px solid #4a6fa5; padding-bottom: 10px; margin-bottom: 8px; }}
+            border-bottom: 2px solid #4a6fa5; padding-bottom: 8px; margin-bottom: 6px; }}
   .title {{ font-size: 20px; font-weight: 700; color: #2c3e5d; }}
   .meta {{ font-size: 12px; color: #8a94a6; }}
   table {{ width: 100%; border-collapse: collapse; }}
-  td {{ padding: 5px 6px; font-size: 14px; border-bottom: 1px solid #eef1f6;
+  td {{ padding: 4px 6px; font-size: 14px; border-bottom: 1px solid #eef1f6;
        font-variant-numeric: tabular-nums; }}
   tr:nth-child(even) td {{ background: #fafbfd; }}
-  .rank {{ width: 52px; color: #4a6fa5; font-weight: 600; text-align: left; }}
+  .rank {{ width: 46px; color: #4a6fa5; font-weight: 600; text-align: left; }}
   .name {{ color: #333; max-width: 0; width: auto; overflow: hidden;
           text-overflow: ellipsis; white-space: nowrap; }}
-  .score {{ width: 130px; text-align: right; color: #2c3e5d; font-weight: 600;
+  .score {{ width: 112px; text-align: right; color: #2c3e5d; font-weight: 600;
            white-space: nowrap; }}
   .top3 .rank {{ color: #d97b29; }}
-  .footer {{ margin-top: 8px; font-size: 11px; color: #aab2c0; text-align: right; }}
+  .footer {{ margin-top: 6px; font-size: 11px; color: #aab2c0; text-align: right; }}
 </style></head>
 <body><div class="card" id="board">
   <div class="header">

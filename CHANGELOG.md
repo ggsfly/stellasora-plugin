@@ -2,16 +2,14 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [1.5.1] - 2026-11-22
-
-### 主要功能
-
-- **修复 MaiBot 1.4.8 下攻略工具失效**：`stellasora_how` 显式声明 `visibility="visible"` 进 planner 原生 tools 数组。宿主 1.4.x 起 planner 请求只携带 `visibility=visible` 的插件工具 schema，未声明默认 deferred（仅可经 tool_search 发现、schema 不出站）——实测 planner（Responses 协议模型）对这种仅上下文出现的工具发不出带参调用，连续空 args 触发重复调用熔断，攻略查询完全不可用。1.5.0 重写时遗漏了旧版经 deferred 链路仍可用的前提，本版恢复原生暴露；未授权会话的剔除仍由 `maisaka.planner.before_request` Hook 与执行层双闸承担，零 token 暴露口径不变。
+## [未发布]
 
 ### 细节（修复与破坏性变更）
 
+- **修复 MaiBot 1.4.8 下攻略工具失效**：`stellasora_how` 显式声明 `visibility="visible"` 进 planner 原生 tools 数组。宿主 1.4.x 起 planner 请求只携带 `visibility=visible` 的插件工具 schema，未声明默认 deferred（仅可经 tool_search 发现、schema 不出站）——实测 planner（Responses 协议模型）对这种仅上下文出现的工具发不出带参调用，连续空 args 触发重复调用熔断，攻略查询完全不可用。1.5.0 重写时遗漏了旧版经 deferred 链路仍可用的前提，本版恢复原生暴露；未授权会话的剔除仍由 `maisaka.planner.before_request` Hook 与执行层双闸承担，零 token 暴露口径不变。
 - **缺参返回明确失败**：query 缺失/空白时返回 `success=False` + 可引导错误（含字段名与 JSON 示例），宿主执行结果正确记为失败，替代原仅 content 的"成功"态；不做消息原文自动提取（不滥兜底）。
 - query 参数描述前置"必填，非空"。
+- **排行榜图片排版收紧（实机反馈）**：视口 720→480px（昵称列贴住分数列，消除两列间大片空白），行距 5→4px、卡片/页边距收紧、分数列 130→112px——单屏信息密度提升，页高相应变短。
 
 ## [1.5.0] - 2026-11-22
 

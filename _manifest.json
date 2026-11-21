@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.5.1",
+  "version": "1.5.0",
   "name": "星塔旅人攻略查询",
   "description": "星塔旅人（Stella Sora）攻略与排行榜插件：QQ 群中文提问返回 GameKee 星塔旅人 wiki 「一图流攻略」原图（星塔攻略组授权转载，覆盖六大属性 24 个角色小节）；/st_bb・/st_fe 渲染当期联合讨伐/终焉绝响国服 Top100 图片榜单（名次不补零、分数完整对齐）；/st_update 强刷两榜并探查攻略源更新。数据源：GameKee + ssleaderboard。",
   "author": {
