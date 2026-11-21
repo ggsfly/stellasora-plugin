@@ -229,6 +229,9 @@ def parse_content_json(
     - image_urls：该小节全部图片（相册保序；旧"末张=完整版长图"假设实测
       只对部分角色成立，发送侧已改为按序全发）。
 
+    备注只取图片之前的首个非空段落：图片之后的段落是网页相册轮播提示类噪声
+    （见下方位置闸注释）。
+
     队伍码区（header1 含"队伍码"之后的页级公共段）不再整段丢弃：
     header2=编队名（仅清空白与末尾冒号，不进角色索引、不参与角色匹配），
     其后第一个非空 paragraph 的文本必须完整匹配 36 位 ASCII 编成码
@@ -283,7 +286,11 @@ def parse_content_json(
         if srcs:
             current["image_urls"].extend(srcs)
             continue
-        if ntype == "paragraph" and not current["note"]:
+        # note 只取**图前**首段：图片之后的段落是网页相册的轮播提示类噪声
+        #（实机「左右滑动可以查看下一张图！！」，图后作首备注的 5 处全是这一句），
+        # 而 QQ 转发里相册图已逐段展示、无需滑动提示。位置闸优于文案黑名单——
+        # 不猜文案，也不会误删图前真正的备注（如地页优叶原文含连续码的段落）。
+        if ntype == "paragraph" and not current["note"] and not current["image_urls"]:
             text = _node_text(node).strip()
             if text:
                 current["note"] = text

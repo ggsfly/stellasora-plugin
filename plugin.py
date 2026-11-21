@@ -35,6 +35,10 @@ _FORWARD_NICKNAME = "星塔旅人"
 # GameKee 属性键 → 中文标签（攻略图节点头显示用；与 tools/gamekee.ELEMENT_CN 同源）
 _ELEMENT_CN_LABELS = {"water": "水", "fire": "火", "light": "光", "dark": "暗", "wind": "风", "earth": "地"}
 
+# 网页相册轮播提示（实机六页唯一变体）：只用于展示端剔除已污染存量索引的 note，
+# 解析闸（tools/gamekee.parse_content_json 的图前位置闸）修好后新索引不再有这句。
+_ALBUM_HINT_TEXT = "左右滑动可以查看下一张图！！"
+
 # 工具 RPC 预算与插件内 LLM 调用预算（毫秒）。
 # 宿主默认工具超时 60s（component_timeout.DEFAULT_COMPONENT_RPC_TIMEOUT_MS），
 # 插件能力 RPC 默认超时 30s（runner rpc_client 默认值）——两者叠加会造成
@@ -628,9 +632,14 @@ class StellaSoraPlugin(MaiBotPlugin):
                     self._gamekee_batch = None
 
     async def _probe_batch_execute(self, trigger: str) -> Dict[str, Any]:
-        """single-flight 批次主体：轻量探查 → 无变化仅推进时间戳，有变化才完整重建。
+        """single-flight 批次主体：轻量探查 → 无变化且 schema 最新仅推进时间戳，
+        有变化或内存索引 schema 偏低才完整重建。
 
-"""
+        schema 条件：`schema_version` 升级（如 v1→v2 增队伍码）与上游 updated_at
+        无关，只靠"无变化跳过"会永久停留在旧快照（实机 v1 索引 → 迁移触发探查 →
+        六页无变化 → 返回无 team_codes 的旧快照，攻略永远缺码）。故索引 schema
+        偏低时即使 changed=False 也走完整重建，复用同一发布/落盘/回滚纪律。
+        """
         generation = self._gamekee_probe_generation
         try:
             self._bump_probe_attempt()
@@ -645,8 +654,10 @@ class StellaSoraPlugin(MaiBotPlugin):
             if generation != self._gamekee_probe_generation:
                 self.ctx.logger.info("GameKee 探查结果已过期（实例被卸载/重载），不发布")
                 raise GameKeeProbeFailure("stale generation")
-            if not probe.get("changed"):
-                # 六页无变化：仅推进 last_verified，不重建索引（P2 探查语义）。
+            current_schema = int((self._gamekee_index or {}).get("schema_version") or 0)
+            schema_stale = current_schema < gamekee_index_schema_version()
+            if not probe.get("changed") and not schema_stale:
+                # 六页无变化且索引 schema 已最新：仅推进 last_verified，不重建（P2 探查语义）。
                 # 顺序纪律：先落盘成功才推进内存——落盘失败内存不推进，
                 # 手动更新报告"计时未重置"与实际一致。
                 self._gamekee_state["last_verified"] = self._now()
@@ -660,7 +671,12 @@ class StellaSoraPlugin(MaiBotPlugin):
                     "GameKee 探查完成（trigger=%s）：六页无变化，索引保持（last_verified 已推进）", trigger
                 )
                 return self._gamekee_index or {}
-            # 2. 有变化：完整重建（IO 全部在 to_thread）
+            if schema_stale and not probe.get("changed"):
+                self.ctx.logger.info(
+                    "GameKee 索引 schema 迁移（trigger=%s）：%d → %d，上游无变化仍完整重建",
+                    trigger, current_schema, gamekee_index_schema_version(),
+                )
+            # 2. 完整重建：上游有变化，或索引 schema 偏低（迁移，与上游无关）
             built_at_before = float(self._gamekee_state.get("index_built_at") or 0)
             index = await asyncio.to_thread(gamekee_build_index, proxy_url)
             if generation != self._gamekee_probe_generation:
@@ -702,12 +718,16 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def ensure_gamekee_index(self) -> Dict[str, Any]:
         """查询入口的懒刷新（P2 入口③）：绑定 last_verified 与 index_ttl。
 
-        索引不可用（None）或 last_verified 距今超过 index_ttl_minutes，或索引为
-        旧 schema（缺 schema_version=2 即缺队伍码——schema 升级与上游 updated_at
-        无关，只等自然探查会永久缺码）→ 先探查再返回；gate 保证并发查询共享
-        同一次探查。探查失败时：有旧索引则带旧索引降级服务（并发等来的失败
-        结果同样走这条旧快照路径，不隐式重试；30 分钟失败纪律照常防每次查询
-        重拉）；无旧索引则向上抛（handler 转用户可见"攻略源暂不可用"）。
+        需要刷新（索引不可用 / last_verified 距今超过 index_ttl_minutes / 索引为
+        旧 schema——schema 升级与上游 updated_at 无关，只等自然探查会永久缺码）
+        时先探查；gate 保证并发查询共享同一次探查。
+
+        探查失败时：有旧索引则带旧索引降级服务（并发等来的失败结果同样走这条
+        旧快照路径，不隐式重试）；无旧索引则向上抛（handler 转用户可见"攻略源
+        暂不可用"）。失败纪律与后台排程同源：`last_failure_at` 晚于 `last_verified`
+        且距 30min 重试点未到时不再发起探查，直接带旧快照——否则每次查询都会重拉
+        一次失败中的上游（排队刷屏时按分钟级放大）。成功后 `last_verified` 越过
+        `last_failure_at`，纪律自动解除。
         """
         ttl_seconds = max(1, int(self.config.gamekee.index_ttl_minutes)) * 60
         last_verified = float(self._gamekee_state.get("last_verified") or 0)
@@ -719,6 +739,14 @@ class StellaSoraPlugin(MaiBotPlugin):
         )
         if not needs_refresh:
             return self._gamekee_index  # type: ignore[return-value]
+        last_failure = float(self._gamekee_state.get("last_failure_at") or 0)
+        if (
+            self._gamekee_index is not None
+            and last_failure > last_verified
+            and last_failure + self._GAMEKEE_RETRY_INTERVAL > self._now()
+        ):
+            self.ctx.logger.info("GameKee 懒刷新处于失败重试间隔内，本次查询直接用旧快照")
+            return self._gamekee_index
         try:
             return await self._run_gamekee_probe(trigger="lazy")
         except GameKeeProbeFailure:
@@ -972,8 +1000,11 @@ class StellaSoraPlugin(MaiBotPlugin):
                 })
             sent_total += len(img["base64_list"])
             note_parts = [f"【{img['element_cn']}】{img['name']}"]
-            if img["note"]:
-                note_parts.append(img["note"])
+            # 存量 v2 索引兼容：解析闸修好前的索引把图后轮播提示收成了 note。
+            # 不 bump schema（避免全量联网重建），只对已证实的整句精确剔除。
+            note = (img["note"] or "").strip()
+            if note and note != _ALBUM_HINT_TEXT:
+                note_parts.append(note)
             if img["total"] > len(img["base64_list"]):
                 note_parts.append(f"（{img['total']} 张中 {len(img['base64_list'])} 张下载失败未发送）")
             note_parts.append("来源：GameKee 星塔旅人 wiki（星塔攻略组）")

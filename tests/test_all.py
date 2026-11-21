@@ -222,6 +222,8 @@ async def run_direct_send() -> None:
                     {"title": "技伤（艾蕾多娜薇洛）", "code": "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG"},
                     {"title": "印记（艾蕾特蕾莎薇洛）", "code": "AAAAiwAAAKAAAAB/MAbDYDDNjgAABqxADA2Y"},
                 ]},
+                # 合成无码页：earth 给空 team_codes 以覆盖"页无码不附节点"分支
+                # （真实六页当前均有码，见 plan 真抓 水12/火6/光2/暗11/风6/地9）
                 "earth": {"id": 2, "title": "地系阵容推荐", "updated_at": 1, "characters": 2, "team_codes": []},
             },
             "characters": [
@@ -433,12 +435,13 @@ async def run_direct_send() -> None:
           and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in _node_text_of([g8d_nodes[1]]),
           f"nodes={len(g8d_nodes)}")
 
-    # G8e 无码属性页（earth 页 team_codes=[]）：图照发，不附码节点、不附提示
+    # G8e 合成无码页（fixture 里 earth team_codes=[]，仅测"页无码"分支）：图照发，
+    # 不附码节点、不附提示。真实六页当前均有码，这是合成场景而非线上现状。
     n_sent = len(send.sent)
     n_before = len(send.forwarded)
     r8e = await p.handle_how(query="地系队伍码", group_id="g1", stream_id="stream_g8e", **qq_kwargs)
     g8e_nodes = send.forwarded[n_before][1]
-    check("G8e 无码属性页不出码节点也不加提示（地页 2 图节点）",
+    check("G8e 无码页不出码节点也不加提示（合成 fixture：地页 2 图节点）",
           "（2 张）" in str(r8e.get("content", "")) and "队伍码" not in str(r8e.get("content", ""))
           and len(send.sent) == n_sent
           and len(g8e_nodes) == 2
@@ -454,6 +457,38 @@ async def run_direct_send() -> None:
           and len(send.forwarded) == n_fwd
           and "已向聊天发送" in str(r8f.get("content", "")),
           send.sent[-1][1][:50] if send.sent else "no send")
+
+    # G8g 存量 v2 索引兼容：note 恰为轮播提示整句 → 发送文本不含该句（精确匹配剔除）
+    polluted = make_index()
+    for entry in polluted["characters"]:
+        if entry["name"] == "艾蕾":
+            entry["note"] = "左右滑动可以查看下一张图！！"
+    polluted["pages"]["water"]["team_codes"] = []
+    # 直接替换内存索引（fresh，不走探查）：本用例只测展示端对存量索引的剔除
+    p._gamekee_index = polluted
+    p._gamekee_state["last_verified"] = p._now()
+    n_before = len(send.forwarded)
+    await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g8g", **qq_kwargs)
+    g8g_text = _node_text_of(send.forwarded[n_before][1])
+    check("G8g 存量索引的轮播提示 note 不出现在发送文本（窄兼容精确剔除）",
+          "左右滑动" not in g8g_text and "【水】艾蕾" in g8g_text and "GameKee" in g8g_text,
+          g8g_text[:60])
+    # 非整句（含其他内容）不剔除：只有已证实的整句被精确匹配
+    polluted2 = make_index()
+    for entry in polluted2["characters"]:
+        if entry["name"] == "艾蕾":
+            entry["note"] = "缺生存转火队。左右滑动可以查看下一张图！！"
+    polluted2["pages"]["water"]["team_codes"] = []
+    p._gamekee_index = polluted2
+    p._gamekee_state["last_verified"] = p._now()
+    n_before = len(send.forwarded)
+    await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g8g2", **qq_kwargs)
+    g8g2_text = _node_text_of(send.forwarded[n_before][1])
+    check("G8g2 非整句不剔除（窄兼容只认整句全等）",
+          "缺生存转火队。" in g8g2_text, g8g2_text[:60])
+    # 恢复共享桩索引（后续用例依赖）
+    p._gamekee_index = make_index()
+    p._gamekee_state["last_verified"] = p._now()
 
     # G9 平台校验（P3 执行层）：非 QQ/未知平台保守拒绝且零网络
     dl_calls_before_g9 = len(downloaded) if isinstance(downloaded, list) else 0
@@ -1239,6 +1274,29 @@ def run_section_u() -> None:
     entries2, _ = gkmod.parse_content_json(_u_nodes_album("薇洛（盛夏）", album_srcs), "water")
     check("U2 album 全链保留且保序（相册顺序=展示顺序）",
           len(entries2) == 1 and entries2[0]["image_urls"] == album_srcs, str(entries2))
+    # fixture 的 album 后跟「左右滑动可以查看下一张图！！」：图后段落是网页轮播提示，
+    # 位置闸（note 只取图前）必须把它挡在 note 之外（实机 5 处污染的唯一变体）
+    check("U2b 图后轮播提示不进 note（位置闸）",
+          entries2[0]["note"] == "", repr(entries2[0]["note"]))
+
+    # 图前备注照常保留（图前 = 真正的备注，如图前一句话点评）
+    pre_note = _u_nodes_single("千都世", "有薇洛很强。", "//cdnimg-v2.gamekee.com/a/q.png")
+    entries_pre, _ = gkmod.parse_content_json(pre_note, "water")
+    check("U2c 图前备注照常保留",
+          entries_pre[0]["note"] == "有薇洛很强。", repr(entries_pre[0]["note"]))
+
+    # 图前备注 + 图后轮播提示：只保图前（不因图后段落丢失图前 note）
+    both = [
+        {"type": "header2", "children": [{"text": "冬香一图流攻略"}]},
+        {"type": "paragraph", "children": [{"text": "缺生存转火队。"}]},
+        {"type": "image-album", "data": ["//x/a1.png", "//x/a2.png"], "limit": [False, False]},
+        {"type": "paragraph", "children": [{"text": "左右滑动可以查看下一张图！！"}]},
+    ]
+    entries_both, _ = gkmod.parse_content_json(both, "fire")
+    check("U2d 图前备注保留且图后提示丢弃（同小节共存）",
+          len(entries_both) == 1 and entries_both[0]["note"] == "缺生存转火队。"
+          and entries_both[0]["image_urls"] == ["//x/a1.png", "//x/a2.png"],
+          repr(entries_both[0]["note"]) if entries_both else "no entry")
 
     mixed = _u_nodes_single("千都世", "有薇洛很强。", "//cdnimg-v2.gamekee.com/a/q.png")
     mixed += _u_nodes_album("多娜", ["//cdnimg-v2.gamekee.com/a/m1.png", "//cdnimg-v2.gamekee.com/a/m2.png"])
@@ -1467,9 +1525,23 @@ async def run_section_v() -> None:
 
         p._gamekee_index = {"schema_version": gkmod.INDEX_SCHEMA_VERSION, "built_at": int(time.time()), "pages": {}, "characters": []}
         p._gamekee_state["last_verified"] = p._now() - 10 * 3600
+        # 失败重试间隔内（last_failure_at 晚于 last_verified、距 30min 未到）：
+        # 不再发起探查，直接带旧快照（失败纪律，防每次查询重拉失败中的上游）
+        p._gamekee_state["last_failure_at"] = p._now()
+        stale_calls_before = fail_fake.calls
         idx_stale = await p.ensure_gamekee_index()
-        check("V6b stale+失败带旧快照降级", idx_stale is not None)
+        check("V6b 失败重试间隔内 stale 查询不重拉（零探查带旧快照）",
+              idx_stale is p._gamekee_index and fail_fake.calls == stale_calls_before,
+              f"probe_delta={fail_fake.calls - stale_calls_before}")
+        # 同条件但间隔已过（last_failure_at 清空）：真实探查失败 → 带旧快照降级
+        p._gamekee_state["last_failure_at"] = 0
+        stale_calls_before = fail_fake.calls
+        idx_stale2 = await p.ensure_gamekee_index()
+        check("V6b2 间隔外 stale+失败带旧快照降级（真实探查1次）",
+              idx_stale2 is p._gamekee_index and fail_fake.calls == stale_calls_before + 1,
+              f"probe_delta={fail_fake.calls - stale_calls_before}")
         p._gamekee_index = None
+        p._gamekee_state["last_failure_at"] = 0
         try:
             await p.ensure_gamekee_index()
             check("V6c 无快照失败必须上抛", False)
@@ -1534,16 +1606,30 @@ async def run_section_v() -> None:
     finally:
         plug.gamekee_build_index = orig_build
 
-        # V14 六页无变化：只推进 last_verified 不重建（probe 轻量路径）
+        # V14 六页无变化 + 索引 schema 已最新：只推进 last_verified 不重建
         nochg = _VFakeIndex(changed=False)
         nochg.install(plug)
-        p._gamekee_index = {"built_at": 1, "pages": {}, "characters": [{"name": "旧", "element": "water", "note": "", "image_urls": ["//x/old.png"]}]}
+        p._gamekee_index = {"schema_version": gkmod.INDEX_SCHEMA_VERSION, "built_at": 1, "pages": {}, "characters": [{"name": "旧", "element": "water", "note": "", "image_urls": ["//x/old.png"]}]}
         p._gamekee_state.clear()
         idx14 = await p._run_gamekee_probe("nochange")
-        check("V14 无变化仅推进时间戳不重建（索引对象不变+build0）",
+        check("V14 无变化且 schema 最新仅推进时间戳不重建（索引对象不变+build0）",
               idx14 is p._gamekee_index and nochg.calls == 1 and nochg.build_calls == 0
               and p._gamekee_state["last_verified"] > 0,
               f"probe={nochg.calls} build={nochg.build_calls}")
+
+        # V14b 六页无变化但索引 schema 偏低：即使上游无变化也必须完整重建
+        #（实机 bug：v1 索引迁移 → 探查 → 无变化 → 返回 v1 快照，攻略永远缺队伍码）
+        nochg_v1 = _VFakeIndex(changed=False)
+        nochg_v1.install(plug)
+        p._gamekee_index = {"built_at": 1, "pages": {}, "characters": [{"name": "旧", "element": "water", "note": "", "image_urls": ["//x/old.png"]}]}
+        p._gamekee_state.clear()
+        idx14b = await p._run_gamekee_probe("nochange-migrate")
+        check("V14b 无变化但 schema 偏低仍重建（v1→v2 迁移不依赖上游变动）",
+              idx14b is p._gamekee_index
+              and int((idx14b or {}).get("schema_version") or 0) == gkmod.INDEX_SCHEMA_VERSION
+              and nochg_v1.calls == 1 and nochg_v1.build_calls == 1
+              and p._gamekee_state["last_verified"] > 0,
+              f"probe={nochg_v1.calls} build={nochg_v1.build_calls} sv={(idx14b or {}).get('schema_version')}")
 
     # V10 卸载清理探查任务
     await p.on_unload()
