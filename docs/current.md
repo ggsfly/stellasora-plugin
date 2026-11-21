@@ -1,12 +1,13 @@
-# 当前：1.5.0 重写｜代码完成，待 QQ 亲测
+# 当前：1.5.0｜已提交推送 dev，待 QQ 亲测
 
 ## 状态
 
-- **六个实施步骤全部完成**，全量回归 EXIT=0（107 断言，9 节 G/I/J/K/R/S/T/U/V）。
-- 工作区：dev 分支，修改未提交（用户规则：不经允许不 commit/push）。
-- 改动清单：plugin.py 重写、tests/test_all.py 重写、README/CHANGELOG/manifest 更新、
-  新增 tools/{gamekee,leaderboard,leaderboard_render,access}.py 与 docs/current.md、
-  删除 11 个旧模块 + overrides.json + docs/prompts_*.md。
+- **三项任务完成**：① 版本下限核实放宽（host 1.3.15 / sdk 2.16.0，逐项证据见 CHANGELOG）；
+  ② gpt-6.2-sol 验收十二轮至 PASS；③ commit `15fd649`（25 文件 +3150/-9943）已推送 origin/dev。
+- 验收修复记录（第 5–12 轮）：Hook 平台剔除、轻量探查路径（probe_updates 无变化不重建）、
+  后台失败重试/手动接管 phase 语义、提交线程互斥 + 双重代际核验、single-flight 等待者
+  shield/终态职责收口、正常等待期手动成功/失败对排程的精确语义、空唤醒抖动消除。
+- 工作区干净（仅 .zcode/ 未跟踪，不入库）。
 
 ## 待用户亲测（发布门槛，桩结果不算通过）
 
