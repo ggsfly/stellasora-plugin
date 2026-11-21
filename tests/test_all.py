@@ -7,14 +7,14 @@
     python tests/test_all.py G U V        # 只跑指定节
 
 测试节（1.5.0 重写后 9 节）：
-  G how 一图流端到端 —— GameKee 契约：命中/末图/泛查/别名分篇/未收录/索引不可用/下载失败/平台两层
+  G how 一图流端到端 —— GameKee 契约：命中/多图全发/泛查/别名分篇/未收录/索引不可用/下载失败/队伍码/平台两层
   I 非阻塞探针      —— 图片下载 to_thread 不阻塞事件循环；异常干净传播
   J 工具参数描述    —— stellasora_how 1.5.0 description/参数契约
   K 手动更新指令    —— /st_update 强刷两榜+探查+重置计时、三路独立报告、提前闸门、不自 reload
   R 排行榜数据层    —— 瘦身提取/指针/TTL/降级/BoardUnavailable/强刷独立/HTML 分页纯函数
   S 排行榜命令链路  —— 图片节点合并转发/渲染失败短提示/notice/鉴权/平台
   T Hook 前置过滤   —— planner 工具剔除（1.5.0 仅 how）、fail-open、缓存
-  U GameKee 解析匹配 —— content_json 结构/规范化/末图/队伍码边界/别名/分篇/属性泛查/畸形容错
+  U GameKee 解析匹配 —— content_json 结构/规范化/多图全保留/队伍码解析/别名/分篇/属性泛查/畸形容错
   V 探查调度与图片  —— P2 single-flight/时间戳纪律/域名白名单/魔数/缓存
 """
 from __future__ import annotations
@@ -215,8 +215,15 @@ async def run_direct_send() -> None:
     # 共享桩索引：艾蕾（单图）、薇洛（盛夏）、科洛妮丝新春双分篇（fixture 覆盖别名/分篇）
     def make_index():
         return {
+            "schema_version": plug.gamekee_index_schema_version(),
             "built_at": int(time.time()),
-            "pages": {},
+            "pages": {
+                "water": {"id": 1, "title": "水系阵容推荐", "updated_at": 1, "characters": 2, "team_codes": [
+                    {"title": "技伤（艾蕾多娜薇洛）", "code": "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG"},
+                    {"title": "印记（艾蕾特蕾莎薇洛）", "code": "AAAAiwAAAKAAAAB/MAbDYDDNjgAABqxADA2Y"},
+                ]},
+                "earth": {"id": 2, "title": "地系阵容推荐", "updated_at": 1, "characters": 2, "team_codes": []},
+            },
             "characters": [
                 {"name": "艾蕾", "element": "water", "note": "技伤≈印记，整体相较千小妹提升30%。", "image_urls": ["//cdnimg-v2.gamekee.com/a/ele.png"]},
                 {"name": "薇洛（盛夏）", "element": "water", "note": "", "image_urls": ["//cdnimg-v2.gamekee.com/a/v1.png", "//cdnimg-v2.gamekee.com/a/v_long.png"]},
@@ -267,7 +274,7 @@ async def run_direct_send() -> None:
           str(txt_seg["content"][:40]) if txt_seg else "no text seg")
     check("G1c 无 LLM 参与（攻略图直发，无加工）", len(llm.calls) == 0)
 
-    # G2 多图角色取末张（完整版长图）
+    # G2 多图角色：相册按序全发（单节点内多 image 段，保 GameKee 展示顺序）
     downloaded: list = []
 
     def record_download(src, cache, prefer_webp=True):
@@ -276,19 +283,30 @@ async def run_direct_send() -> None:
 
     install_stubs(p, download=record_download)
     await p.handle_how(query="薇洛攻略", group_id="g1", stream_id="stream_g2", **qq_kwargs)
-    check("G2 多图角色取末张完整长图", downloaded == ["//cdnimg-v2.gamekee.com/a/v_long.png"], str(downloaded))
+    check("G2 多图角色相册按序全发",
+          downloaded == ["//cdnimg-v2.gamekee.com/a/v1.png", "//cdnimg-v2.gamekee.com/a/v_long.png"], str(downloaded))
+    g2_node = send.forwarded[-1][1][0]
+    g2_imgs = [s for s in g2_node.get("segments", []) if s.get("type") == "image"]
+    check("G2b 多图单节点多 image 段（顺序保序）",
+          len(g2_imgs) == 2 and g2_imgs[0]["filename"] == "薇洛（盛夏）_guide_p1.webp"
+          and g2_imgs[1]["filename"] == "薇洛（盛夏）_guide_p2.webp",
+          f"imgs={len(g2_imgs)}")
 
-    # G3 属性泛查：每角色一节点（水系=艾蕾+薇洛）
+    # G3 属性泛查：每角色一图节点 + 命中页一个队伍码文本节点（水系=艾蕾+薇洛+水页码）
     install_stubs(p)
     n_before = len(send.forwarded)
     r3 = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g3", **qq_kwargs)
     nodes3 = send.forwarded[n_before][1]
-    check("G3 属性泛查每角色一节点（2节点+返回张数）",
-          len(nodes3) == 2 and "（2 张）" in str(r3.get("content", "")),
-          f"nodes={len(nodes3)}")
-    # 每个节点都含 image 段
-    check("G3b 每节点均含图片段",
-          all(any(s.get("type") == "image" for s in n.get("segments", [])) for n in nodes3))
+    check("G3 属性泛查每角色一图节点+页码节点（2图节点+1码节点，返回张数=3）",
+          len(nodes3) == 3 and "（3 张）及 1 页队伍码" in str(r3.get("content", "")),
+          f"nodes={len(nodes3)} content={str(r3.get('content', ''))[:40]}")
+    # 图节点均含 image 段（薇洛节点 2 张）；码节点为纯文本且带本页两码
+    check("G3b 图节点均含图片段（薇洛节点 2 张）、码节点纯文本含本页码",
+          all(any(s.get("type") == "image" for s in n.get("segments", [])) for n in nodes3[:2])
+          and sum(1 for s in nodes3[1].get("segments", []) if s.get("type") == "image") == 2
+          and all(s.get("type") != "image" for s in nodes3[2].get("segments", []))
+          and "队伍码" in _node_text_of([nodes3[2]])
+          and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in _node_text_of([nodes3[2]]))
 
     # G4 别名+分篇：春科→科洛妮丝新春全部分篇；点名直伤篇只发该篇
     p._plugin_config_instance.overrides.aliases = [plug.AliasEntry(alias="春科", official="科洛妮丝新春")]
@@ -330,19 +348,40 @@ async def run_direct_send() -> None:
     p._gamekee_state["last_verified"] = p._now()
     install_stubs(p)
 
-    # G7 部分下载失败：跳过失败节点仍发送成功部分
+    # G7 部分下载失败：单图失败只跳该图保其余（薇洛 2 张失败 1 张 → 节点仍在）
     def flaky_download(src, cache, prefer_webp=True):
-        if "v1.png" in src or "v_long.png" in src:
+        if "v1.png" in src:
             raise plug.GameKeeError("image boom")
         return WEBP
 
     install_stubs(p, download=flaky_download)
     n_before = len(send.forwarded)
     r7 = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g7", **qq_kwargs)
-    check("G7 部分下载失败跳过节点仍发送（1节点=仅艾蕾）",
-          "已直接发送" in str(r7.get("content", "")) and "（1 张）" in str(r7.get("content", ""))
-          and len(send.forwarded[n_before][1]) == 1,
-          str(r7.get("content", ""))[:50])
+    g7_nodes = send.forwarded[n_before][1]
+    g7_v = g7_nodes[1]
+    g7_v_imgs = [s for s in g7_v.get("segments", []) if s.get("type") == "image"]
+    check("G7 部分下载失败跳过该图保节点（3-1=2张+缺图说明）",
+          "已直接发送" in str(r7.get("content", "")) and "（2 张）" in str(r7.get("content", ""))
+          and len(g7_nodes) == 3 and len(g7_v_imgs) == 1
+          and "1 张下载失败" in _node_text_of(g7_nodes),
+          f"content={str(r7.get('content', ''))[:40]} nodes={len(g7_nodes)} v_imgs={len(g7_v_imgs)}")
+
+    # G7b 单节全部图失败 → 该节点省略（仅艾蕾图节点 + 水页码节点）
+    def fail_veal(src, cache, prefer_webp=True):
+        if "薇洛" in src or "/a/v" in src:
+            raise plug.GameKeeError("veal down")
+        return WEBP
+
+    install_stubs(p, download=fail_veal)
+    n_before = len(send.forwarded)
+    r7b = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g7b", **qq_kwargs)
+    g7b_nodes = send.forwarded[n_before][1]
+    check("G7b 单节全图失败省略节点（1图节点=仅艾蕾+1码节点）",
+          "已直接发送" in str(r7b.get("content", "")) and "（1 张）" in str(r7b.get("content", ""))
+          and len(g7b_nodes) == 2
+          and [s.get("filename") for s in g7b_nodes[0].get("segments", []) if s.get("type") == "image"] == ["艾蕾_guide.webp"]
+          and all(s.get("type") != "image" for s in g7b_nodes[1].get("segments", [])),
+          str(r7b.get("content", ""))[:50])
 
     # G8 全部下载失败：明确提示不发送
     def all_fail(src, cache, prefer_webp=True):
@@ -355,6 +394,66 @@ async def run_direct_send() -> None:
           len(send.sent) == n_sent + 1 and "下载失败" in send.sent[-1][1]
           and "已向聊天发送" in str(r8.get("content", "")))
     install_stubs(p)
+
+    # G8b「水系队伍码」：无关键词分流，按属性泛查 → 水系图节点 + 水页码节点
+    n_before = len(send.forwarded)
+    n_sent = len(send.sent)
+    r8b = await p.handle_how(query="水系队伍码", group_id="g1", stream_id="stream_g8b", **qq_kwargs)
+    g8b_nodes = send.forwarded[n_before][1]
+    g8b_codes = _node_text_of([g8b_nodes[-1]])
+    check("G8b 水系队伍码=属性泛查同款（2图节点+1码节点）",
+          "攻略图已直接发送" in str(r8b.get("content", ""))
+          and "（3 张）及 1 页队伍码" in str(r8b.get("content", ""))
+          and len(send.sent) == n_sent
+          and len(g8b_nodes) == 3
+          and "技伤（艾蕾多娜薇洛）" in g8b_codes
+          and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in g8b_codes
+          and "印记（艾蕾特蕾莎薇洛）" in g8b_codes,
+          f"nodes={len(g8b_nodes)} text={g8b_codes[:60]}")
+
+    # G8c「艾蕾队伍码」：角色命中 → 艾蕾图节点 + 所在水页码节点
+    n_before = len(send.forwarded)
+    r8c = await p.handle_how(query="艾蕾队伍码", group_id="g1", stream_id="stream_g8c", **qq_kwargs)
+    g8c_nodes = send.forwarded[n_before][1]
+    check("G8c 艾蕾队伍码（图节点+水页码节点）",
+          "（1 张）及 1 页队伍码" in str(r8c.get("content", ""))
+          and len(g8c_nodes) == 2
+          and [s.get("filename") for s in g8c_nodes[0].get("segments", []) if s.get("type") == "image"] == ["艾蕾_guide.webp"]
+          and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in _node_text_of([g8c_nodes[1]]),
+          f"nodes={len(g8c_nodes)}")
+
+    # G8d「艾蕾攻略和队伍码」：与「艾蕾攻略」完全同款（图+码，不作关键词区分）
+    n_before = len(send.forwarded)
+    r8d = await p.handle_how(query="艾蕾攻略和队伍码", group_id="g1", stream_id="stream_g8d", **qq_kwargs)
+    g8d_nodes = send.forwarded[n_before][1]
+    check("G8d 艾蕾攻略和队伍码=艾蕾攻略同款（1图节点+1码节点）",
+          "攻略图已直接发送" in str(r8d.get("content", "")) and "队伍码" in str(r8d.get("content", ""))
+          and len(g8d_nodes) == 2
+          and any(s.get("type") == "image" for s in g8d_nodes[0].get("segments", []))
+          and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in _node_text_of([g8d_nodes[1]]),
+          f"nodes={len(g8d_nodes)}")
+
+    # G8e 无码属性页（earth 页 team_codes=[]）：图照发，不附码节点、不附提示
+    n_sent = len(send.sent)
+    n_before = len(send.forwarded)
+    r8e = await p.handle_how(query="地系队伍码", group_id="g1", stream_id="stream_g8e", **qq_kwargs)
+    g8e_nodes = send.forwarded[n_before][1]
+    check("G8e 无码属性页不出码节点也不加提示（地页 2 图节点）",
+          "（2 张）" in str(r8e.get("content", "")) and "队伍码" not in str(r8e.get("content", ""))
+          and len(send.sent) == n_sent
+          and len(g8e_nodes) == 2
+          and all(any(s.get("type") == "image" for s in n.get("segments", [])) for n in g8e_nodes),
+          f"nodes={len(g8e_nodes)} content={str(r8e.get('content', ''))[:50]}")
+
+    # G8f 裸「队伍码」（无属性无角色）：miss → 未找到提示（不遍历六页、不发送）
+    n_sent = len(send.sent)
+    n_fwd = len(send.forwarded)
+    r8f = await p.handle_how(query="队伍码", group_id="g1", stream_id="stream_g8f", **qq_kwargs)
+    check("G8f 裸队伍码未命中走未找到提示（零转发）",
+          len(send.sent) == n_sent + 1 and "攻略库里暂时没有" in send.sent[-1][1]
+          and len(send.forwarded) == n_fwd
+          and "已向聊天发送" in str(r8f.get("content", "")),
+          send.sent[-1][1][:50] if send.sent else "no send")
 
     # G9 平台校验（P3 执行层）：非 QQ/未知平台保守拒绝且零网络
     dl_calls_before_g9 = len(downloaded) if isinstance(downloaded, list) else 0
@@ -504,9 +603,10 @@ def run_tool_query_desc() -> None:
           and "不在本工具范围" in how_desc
           and "question" not in how_required and "presets" not in how_required,
           f"desc={how_desc}, required={how_required}")
-    # J3 query 参数：不宣称 LLM 加工/预设码（旧契约清除）
-    check("J3 how.query 清除旧契约宣称（预设码/兜底归一）",
-          "预设码" not in desc and "兜底归一" not in desc, desc)
+    # J3 query 参数：预设码/队伍码现在是合法自然语言入口（无 presets 参数——码查询
+    # 与攻略查询共用同一条 query，由内容词区分意图）；"兜底归一"旧宣称仍清除
+    check("J3 how.query 清除旧契约宣称（兜底归一）+ 无 presets/question 参数",
+          "兜底归一" not in desc and "question" not in how_required and "presets" not in how_required, desc)
     # J4 visibility 元数据：宿主 1.4.x 只把 visibility=visible 的插件工具放进 planner
     # 原生 tools 数组，缺省 deferred 且 schema 不出站（线上空 args 故障根因）
     how_meta = getattr(how_info, "metadata", {}) if (how_info := getattr(
@@ -932,6 +1032,33 @@ async def run_section_s() -> None:
         check("S10 私聊 user_id 命中放行并发送图片",
               res[0] is True and len(ctx.send.forwarded) == 1 and ctx.send.forwarded[0][0] == "stream_s6",
               f"res={res} fwd={len(ctx.send.forwarded)}")
+
+        # 7. render_images=false：文字榜（1.4.x 格式）零渲染调用，BoardUnavailable 路径共用
+        p.config.leaderboard.render_images = False
+        ctx.send.forwarded.clear()
+        render_off = MockRender()
+        ctx.render = render_off
+        n_before = len(ctx.send.forwarded)
+        res_txt = await p.handle_lb_bb(stream_id="stream_s7", group_id="id_ok", user_id="u1", platform="qq")
+        txt_nodes = ctx.send.forwarded[n_before][1]
+        txt_all = "\n".join(
+            s.get("content", "") for n in txt_nodes for s in n.get("segments", []) if s.get("type") == "text"
+        )
+        check("S11 关闭开关走文字榜（零渲染+表头+分块）",
+              res_txt[0] is True and len(render_off.calls) == 0
+              and len(txt_nodes) == 2
+              and "【联合讨伐 S13】 国服 Top2 · 共 2 人 · 更新于 刚刚" in txt_all
+              and "第 1–2 名" in txt_all and "1. 甲 — 1,000" in txt_all and "2. 乙 — 900" in txt_all
+              and all(s.get("type") != "image" for n in txt_nodes for s in n.get("segments", [])),
+              f"nodes={len(txt_nodes)} renders={len(render_off.calls)} text={txt_all[:80]}")
+        # 关闭时未开榜 notice 路径不变（BoardUnavailable 共用）
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (_ for _ in ()).throw(
+            __import__("leaderboard").BoardUnavailable("【终焉绝响 S8】 当期未开榜（上游尚未发布榜单数据）。"))
+        n_sent = len(ctx.send.sent)
+        res_nf2 = await p.handle_lb_fe(stream_id="stream_s8", group_id="id_ok", platform="qq")
+        check("S12 关闭开关时未开榜 notice 不变",
+              res_nf2[0] is True and len(ctx.send.sent) == n_sent + 1 and "当期未开榜" in ctx.send.sent[-1][1])
+        p.config.leaderboard.render_images = True
     finally:
         plug.resolve_current_board = orig_resolve
         plug.load_board_for_render = orig_load
@@ -1080,7 +1207,7 @@ def _u_nodes_single(name: str, note: str, src: str) -> list:
 
 
 def _u_nodes_album(name: str, srcs: list) -> list:
-    """多图小节：header2 + image-album（末张=完整长图）。"""
+    """多图小节：header2 + image-album（多图相册按序全保留）。"""
     return [
         {"type": "header2", "children": [{"text": f"{name}一图流攻略"}]},
         {"type": "image-album", "data": srcs, "limit": [False] * len(srcs)},
@@ -1098,24 +1225,24 @@ def _u_nodes_parted(name: str, part: str, src: str) -> list:
 
 
 def run_section_u() -> None:
-    """U: GameKee 解析与匹配——规范化/末图/队伍码边界/别名/分篇/属性泛查/畸形容错暴露。"""
+    """U: GameKee 解析与匹配——规范化/相册保序/队伍码采集/别名/分篇/属性泛查/畸形容错暴露。"""
     print("--- U GameKee 解析与匹配 ---")
     nodes = _u_nodes_single("艾蕾", "技伤≈印记。", "//cdnimg-v2.gamekee.com/a/ele.png")
-    entries = gkmod.parse_content_json(nodes, "water")
+    entries, codes = gkmod.parse_content_json(nodes, "water")
     check("U1 单图解析：名称规范化+备注+图链",
           len(entries) == 1 and entries[0]["name"] == "艾蕾" and entries[0]["note"] == "技伤≈印记。"
           and entries[0]["image_urls"] == ["//cdnimg-v2.gamekee.com/a/ele.png"]
-          and entries[0]["element"] == "water", str(entries))
+          and entries[0]["element"] == "water"
+          and codes == [], str(entries))
 
     album_srcs = ["//cdnimg-v2.gamekee.com/a/1.png", "//cdnimg-v2.gamekee.com/a/2.png", "//cdnimg-v2.gamekee.com/a/long.png"]
-    entries2 = gkmod.parse_content_json(_u_nodes_album("薇洛（盛夏）", album_srcs), "water")
-    check("U2 album 全链保留且末张可取",
-          len(entries2) == 1 and entries2[0]["image_urls"] == album_srcs
-          and entries2[0]["image_urls"][-1].endswith("long.png"), str(entries2))
+    entries2, _ = gkmod.parse_content_json(_u_nodes_album("薇洛（盛夏）", album_srcs), "water")
+    check("U2 album 全链保留且保序（相册顺序=展示顺序）",
+          len(entries2) == 1 and entries2[0]["image_urls"] == album_srcs, str(entries2))
 
     mixed = _u_nodes_single("千都世", "有薇洛很强。", "//cdnimg-v2.gamekee.com/a/q.png")
     mixed += _u_nodes_album("多娜", ["//cdnimg-v2.gamekee.com/a/m1.png", "//cdnimg-v2.gamekee.com/a/m2.png"])
-    entries3 = gkmod.parse_content_json(mixed, "water")
+    entries3, _ = gkmod.parse_content_json(mixed, "water")
     check("U3 多小节互不串图",
           [e["name"] for e in entries3] == ["千都世", "多娜"]
           and entries3[0]["image_urls"] == ["//cdnimg-v2.gamekee.com/a/q.png"]
@@ -1127,16 +1254,58 @@ def run_section_u() -> None:
           and gkmod.normalize_character_name("科洛妮丝新春攻略一图流：印记篇") == "科洛妮丝新春·印记篇"
           and gkmod.normalize_character_name("千都世攻略一图流") == "千都世")
 
-    # 队伍码边界：header1"队伍码"后的 header2（队伍名）不生成小节
-    entries4 = gkmod.parse_content_json(_u_nodes_single("艾蕾", "n", "//x/y.png"), "water")
-    check("U5 队伍码区止步（队伍名不进索引）",
-          len(entries4) == 1 and entries4[0]["name"] == "艾蕾")
+    # 队伍码区：header1"队伍码"后的 header2（编队名）不进角色索引，码进 team_codes
+    zone = _u_nodes_single("艾蕾", "n", "//x/y.png") + [
+        {"type": "header1", "children": [{"text": "队伍码（优先级从高到低）："}]},
+        {"type": "header2", "children": [{"text": "技伤（艾蕾多娜薇洛）："}]},
+        {"type": "paragraph", "children": [{"text": "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG "}]},
+        {"type": "header2", "children": [{"text": "千都世普攻队："}]},
+        {"type": "paragraph", "children": [{"text": "AAAAkAAAAH8AAAB9zbADDACsQBRsAMwAAAwA"}]},
+    ]
+    entries4, codes4 = gkmod.parse_content_json(zone, "water")
+    check("U5 队伍码区：编队名不进角色索引+码保序采集",
+          len(entries4) == 1 and entries4[0]["name"] == "艾蕾"
+          and codes4 == [{"title": "技伤（艾蕾多娜薇洛）", "code": "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG"},
+                         {"title": "千都世普攻队", "code": "AAAAkAAAAH8AAAB9zbADDACsQBRsAMwAAAwA"}],
+          f"entries={len(entries4)} codes={codes4}")
+
+    # 无队伍码区是合法空列表
+    entries5, codes5 = gkmod.parse_content_json(_u_nodes_single("艾蕾", "n", "//x/y.png"), "fire")
+    check("U5b 无队伍码区（合法空）", entries5 and codes5 == [], f"codes={codes5}")
+
+    # 码格式漂移必须整批失败（GameKeeError），不静默吞
+    bad_zone = _u_nodes_single("艾蕾", "n", "//x/y.png") + [
+        {"type": "header1", "children": [{"text": "队伍码："}]},
+        {"type": "header2", "children": [{"text": "某编队："}]},
+        {"type": "paragraph", "children": [{"text": "这不是码"}]},
+    ]
+    try:
+        gkmod.parse_content_json(bad_zone, "fire")
+        check("U5c 队伍码格式漂移抛 GameKeeError", False)
+    except gkmod.GameKeeError as exc:
+        check("U5c 队伍码格式漂移抛 GameKeeError", "队伍码格式异常" in str(exc), str(exc)[:60])
+
+    # 编队标题后缺码（下一个 header2 或结尾）也暴露
+    missing_zone = _u_nodes_single("艾蕾", "n", "//x/y.png") + [
+        {"type": "header1", "children": [{"text": "队伍码："}]},
+        {"type": "header2", "children": [{"text": "孤儿编队："}]},
+    ]
+    try:
+        gkmod.parse_content_json(missing_zone, "fire")
+        check("U5d 编队标题缺码抛 GameKeeError", False)
+    except gkmod.GameKeeError as exc:
+        check("U5d 编队标题缺码抛 GameKeeError", "缺码" in str(exc), str(exc)[:60])
 
     # 属性泛查 + 别名 + 分篇（用 build_index 的测试注入路径，单页即可）
     index = gkmod.build_index(pages={
         "water": (0, "水系阵容推荐", _u_nodes_single("艾蕾", "n1", "//a/ele.png") + _u_nodes_album("薇洛（盛夏）", ["//a/v1.png", "//a/v2.png"])),
         "earth": (0, "地系阵容推荐", _u_nodes_parted("科洛妮丝新春", "印记篇", "//a/k1.png") + _u_nodes_parted("科洛妮丝新春", "直伤篇", "//a/k2.png")),
     })
+    check("U6b build_index schema v2 + team_codes 落位",
+          index.get("schema_version") == gkmod.INDEX_SCHEMA_VERSION
+          and isinstance(index["pages"]["water"].get("team_codes"), list)
+          and isinstance(index["pages"]["earth"].get("team_codes"), list),
+          f"sv={index.get('schema_version')}")
     aliases = {"春科": "科洛妮丝新春", "土": "地"}
     h1, r1 = gkmod.match_guides(index, "艾蕾攻略", aliases=aliases)
     check("U6 角色命中单节", len(h1) == 1 and h1[0]["name"] == "艾蕾", f"{len(h1)}/{r1}")
@@ -1163,8 +1332,8 @@ def run_section_u() -> None:
 
     # 畸形 content_json：解析器对空节点/无图小节健壮（返回空列表而非崩溃）
     broken = [{"type": "header2", "children": [{"text": "无图角色"}]}, {"type": "paragraph"}, None]
-    entries5 = gkmod.parse_content_json(broken, "fire")
-    check("U14 无图小节不进索引（明确空）", entries5 == [], str(entries5))
+    entries5, codes_broken = gkmod.parse_content_json(broken, "fire")
+    check("U14 无图小节不进索引（明确空）", entries5 == [] and codes_broken == [], str(entries5))
 
 
 # ===== 节 V：GameKee 探查调度（P2 single-flight/时间戳纪律）与图片下载契约 =====
@@ -1182,7 +1351,10 @@ class _VFakeIndex:
         self.changed = changed
         self.calls = 0
         self.build_calls = 0
-        self._index = {"built_at": int(time.time()), "pages": {}, "characters": [{"name": "艾蕾", "element": "water", "note": "n", "image_urls": ["//x/y.png"]}]}
+        self._index = {
+            "schema_version": gkmod.INDEX_SCHEMA_VERSION,
+            "built_at": int(time.time()), "pages": {}, "characters": [{"name": "艾蕾", "element": "water", "note": "n", "image_urls": ["//x/y.png"]}],
+        }
 
     def probe(self, proxy_url=None, timeout=20, known_updates=None):
         self.calls += 1
@@ -1266,6 +1438,34 @@ async def run_section_v() -> None:
         idx_fresh = await p.ensure_gamekee_index()
         calls_at_fresh = fail_fake.calls
         check("V6a fresh 不触发探查", idx_fresh is not None and fail_fake.calls == calls_at_fresh)
+
+        # V6a-b 旧 schema（v1 无 schema_version）：即使 fresh 也触发迁移重建。
+        # 成功路径用成功桩（fake）验证：探查成功 → 走完整重建 → 发布 v2 索引。
+        p._gamekee_index = {"built_at": int(time.time()), "pages": {}, "characters": [
+            {"name": "艾蕾", "element": "water", "note": "n", "image_urls": ["//x/y.png"]},
+        ]}
+        p._gamekee_state["last_verified"] = p._now()  # fresh：唯一刷新理由是 schema 迁移
+        fake.install(plug)
+        calls_before_mig = fake.calls
+        builds_before_mig = fake.build_calls
+        idx_mig = await p.ensure_gamekee_index()
+        check("V6a-b v1 索引 fresh 仍触发迁移重建（成功路径）",
+              idx_mig is p._gamekee_index
+              and int((idx_mig or {}).get("schema_version") or 0) == gkmod.INDEX_SCHEMA_VERSION
+              and fake.calls == calls_before_mig + 1
+              and fake.build_calls == builds_before_mig + 1,
+              f"probe={fake.calls - calls_before_mig} builds={fake.build_calls - builds_before_mig}")
+
+        # V6a-c 迁移探查失败：保留旧快照服务（失败路径不丢索引、30min 失败纪律防每次重拉）
+        fail_fake.install(plug)
+        p._gamekee_index = {"built_at": int(time.time()), "pages": {}, "characters": []}
+        p._gamekee_state["last_verified"] = p._now()  # fresh：同样只剩 schema 迁移理由
+        fail_calls_before = fail_fake.calls
+        idx_keep = await p.ensure_gamekee_index()
+        check("V6a-c 迁移失败带旧快照降级（不丢索引）",
+              idx_keep is p._gamekee_index and fail_fake.calls == fail_calls_before + 1)
+
+        p._gamekee_index = {"schema_version": gkmod.INDEX_SCHEMA_VERSION, "built_at": int(time.time()), "pages": {}, "characters": []}
         p._gamekee_state["last_verified"] = p._now() - 10 * 3600
         idx_stale = await p.ensure_gamekee_index()
         check("V6b stale+失败带旧快照降级", idx_stale is not None)

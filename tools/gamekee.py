@@ -89,6 +89,17 @@ _API_HEADERS = {
 # 角色小节标题的后缀噪声（规范化角色名用）
 _TITLE_SUFFIX_RE = re.compile(r"(一图流|攻略|\s|：.*$|:.*$)+")
 
+# 队伍码编成码格式（36 位 ASCII base64 风格；AAAA 只是已见前缀不是格式约束）
+_TEAM_CODE_RE = re.compile(r"[A-Za-z0-9+/]{36}")
+
+# 索引 schema 版本：2 = 新增 pages[element].team_codes（v1 快照缺码，加载时触发重建）
+INDEX_SCHEMA_VERSION = 2
+
+
+def index_schema_version() -> int:
+    """当前索引 schema 版本（plugin.py 迁移判定用；函数化避免跨模块复制常量）。"""
+    return INDEX_SCHEMA_VERSION
+
 
 class GameKeeError(RuntimeError):
     """GameKee 数据源错误（结构漂移/鉴权拒绝/网络失败统一类型，含文章 id 与状态）。"""
@@ -209,18 +220,26 @@ def _image_srcs_from_node(node: dict) -> List[str]:
 def parse_content_json(
     nodes: list,
     element: str,
-) -> List[dict]:
-    """解析 content_json 节点数组 → 角色小节列表。
+) -> Tuple[List[dict], List[dict]]:
+    """解析 content_json 节点数组 → (角色小节列表, 队伍码列表)。
 
-    返回元素列表，每项 {"name", "note", "image_urls", "image_index"}：
+    角色小节每项 {"name", "note", "image_urls"}：
     - name：规范化角色名（含分篇后缀）；
     - note：小节标题后、图片前的段落文本（一句话备注）；
-    - image_urls：该小节全部图片（**末张 = 完整版长图**）；
-    - 遇 header1 含"队伍码"即停止（队伍码区不进索引）。
+    - image_urls：该小节全部图片（相册保序；旧"末张=完整版长图"假设实测
+      只对部分角色成立，发送侧已改为按序全发）。
+
+    队伍码区（header1 含"队伍码"之后的页级公共段）不再整段丢弃：
+    header2=编队名（仅清空白与末尾冒号，不进角色索引、不参与角色匹配），
+    其后第一个非空 paragraph 的文本必须完整匹配 36 位 ASCII 编成码
+    （A-Za-z0-9+/；AAAA 只是已见前缀不是格式约束），否则抛 GameKeeError
+    （结构漂移即整批失败，保留旧快照——与 build_index 同纪律）。
     """
     entries: List[dict] = []
+    team_codes: List[dict] = []
     current: Optional[dict] = None
     in_team_code_zone = False
+    pending_code_title: Optional[str] = None
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -232,6 +251,8 @@ def parse_content_json(
                 current = None
                 continue
             if in_team_code_zone:
+                if ntype == "header2" and text:
+                    pending_code_title = text.rstrip("：: ")
                 continue
             if ntype == "header2" and text:
                 current = {
@@ -244,7 +265,19 @@ def parse_content_json(
                 continue
             # header1 非队伍码（如"水系角色一图流攻略"总标题）：不中断当前小节
             continue
-        if in_team_code_zone or current is None:
+        if current is None and not (in_team_code_zone and pending_code_title):
+            continue
+        if in_team_code_zone:
+            if pending_code_title and ntype == "paragraph":
+                text = _node_text(node).strip()
+                if not text:
+                    continue
+                if not _TEAM_CODE_RE.fullmatch(text):
+                    raise GameKeeError(
+                        f"队伍码格式异常（element={element} 编队={pending_code_title!r}）: {text[:60]}"
+                    )
+                team_codes.append({"title": pending_code_title, "code": text})
+                pending_code_title = None
             continue
         srcs = _image_srcs_from_node(node)
         if srcs:
@@ -254,11 +287,15 @@ def parse_content_json(
             text = _node_text(node).strip()
             if text:
                 current["note"] = text
+    if pending_code_title is not None:
+        raise GameKeeError(
+            f"队伍码区编队标题后缺码（element={element} 编队={pending_code_title!r}）"
+        )
     result = [e for e in entries if e["name"] and e["image_urls"]]
     for e in result:
         e.pop("raw_title", None)
         e["element"] = element
-    return result
+    return result, team_codes
 
 
 def build_index(
@@ -282,15 +319,17 @@ def build_index(
                 updated_at, title, nodes = 0, "", []
         else:
             updated_at, title, nodes = fetch_element_page(element, proxy_url=proxy_url)
-        entries = parse_content_json(nodes, element)
+        entries, team_codes = parse_content_json(nodes, element)
         page_meta[element] = {
             "id": page_id,
             "title": title,
             "updated_at": updated_at,
             "characters": len(entries),
+            "team_codes": team_codes,
         }
         index_characters.extend(entries)
     return {
+        "schema_version": INDEX_SCHEMA_VERSION,
         "built_at": int(time.time()),
         "pages": page_meta,
         "characters": index_characters,

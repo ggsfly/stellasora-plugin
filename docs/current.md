@@ -13,27 +13,42 @@
   `_request_article`；测试桩清理。净 -145 行（代码 2389 + 测试 1429），全量回归
   两连跑全绿、真机探查/解析一致性验证通过。SDK 指南合规核对通过（主体接口符合，
   版本口径说明已入 CHANGELOG）。
+- **未发布改动（工作区未提交）**：榜单文字开关（config_version 1.4.1 +
+  `leaderboard.render_images`，关闭走 `render_text_board_nodes` 1.4.x 文字榜）；
+  how 多图小节按相册原顺序全发（单张失败跳图保其余）；队伍码随图发送（用户裁决：
+  查攻略即发图也发码，无关键词分流），索引 schema v2 + 旧 v1 索引自动迁移重建
+  （`ensure_gamekee_index` 把 schema 判定纳入 needs_refresh）。
 
 ## 待用户亲测（发布门槛，桩结果不算通过）
 
 1. 目标实例 `git pull` + 重启（manifest 变更需重启）→ QQ 实测：
    - 问「艾蕾攻略」「春科直伤篇」「水系攻略」→ 收图（开关 webp 各试一次）
+   - 问「地系攻略」「水系攻略」→ 图后是否附对应页队伍码（地页无码应不附）
    - `/st_bb` `/st_fe` → 图片榜单放大看清晰度/对齐
    - `/st_update` → 三路报告文本
 2. 宿主渲染依赖：确认实例机 `plugin_runtime.render` 开启且有 Chrome/Edge。
+3. 本轮新增未验证项：
+   - `render_images=false` 下文字榜实机（表头+每 25 名一节点的排版观感）
+   - 多图角色实机收图（薇洛等纯多图相册：张数/顺序是否与 GameKee 页一致）
+   - 队伍码随图发送实机（文本节点位置、码是否可直接复制进游戏）
+   - v1 索引自动迁移：老实例升级后首次查询是否重建并出现码节点
 
 ## 关键决定速查（详见 plans/plan-1.5.0-gamekee.md）
 
-图片一律 send.forward；攻略图 webp（prefer_webp 可关）、榜单渲染 PNG；
-懒刷新/计时绑定 last_verified；探查失败 30min 重试；手动探查失败不重置计时；
+图片一律 send.forward；攻略图 webp（prefer_webp 可关）、榜单渲染 PNG（render_images=false 退文字榜）；
+多图小节按相册原顺序全发（"末张=长图"只对部分角色成立）；队伍码为页级公共段，随命中页发送；
+懒刷新/计时绑定 last_verified，schema 版本偏低也触发刷新；探查失败 30min 重试；手动探查失败不重置计时；
 Hook+执行层双平台校验；manifest=[send.text,send.forward,render.html2png,chat.get_all_streams]；
-config_version 1.4.0（[query] 删、[gamekee] 增）；host min 1.3.15 / sdk min 2.16.0（逐项核实放宽，与 manifest 一致）。
+config_version 1.4.1（[query] 删、[gamekee] 增、[leaderboard] 增 render_images）；
+host min 1.3.15 / sdk min 2.16.0（逐项核实放宽，与 manifest 一致）。
 
 ## 已验（E1）
 
-- 全量 107 断言全绿（G1-G12 how 契约 / I 非阻塞 / J 描述契约 / K10-K25 st_update 三路独立
-  / R1-R8e 榜单数据层+HTML 纯函数 / S1-S10 图片链路 / T1-T8 Hook / U1-U14 解析匹配 /
-  V1-V14+pre 调度与图片（含无变化不重建路径））。
+- 全量 128 断言全绿（G1-G12 how 契约（含队伍码随图/无码页不附/裸"队伍码"未命中）
+  / I 非阻塞 / J 描述契约 / K10-K25 st_update 三路独立
+  / R1-R8e 榜单数据层+HTML 纯函数 / S1-S12 图片链路+文字榜开关
+  / T1-T8 Hook / U1-U14 解析匹配+队伍码解析 / V1-V14+pre 调度与图片，
+  含 V6a-b 成功路径迁移重建、V6a-c 失败路径降级）。
 - 真机：六页 24 小节解析、艾蕾真图 220KB webp+缓存命中、match_guides 18 用例。
 - 回退：dev@b51a858 + .zcode/config-backup-1.3.0.toml。
 

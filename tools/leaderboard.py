@@ -391,6 +391,45 @@ class BoardUnavailable(RuntimeError):
 
 
 
+# 每个文字转发节点承载的排名条数（1.4.x 文字榜口径原样保留）
+_LB_TEXT_CHUNK = 25
+
+_LB_TEXT_NICKNAME = "星塔旅人"
+
+
+def _lb_text_node(text: str) -> Dict[str, Any]:
+    return {"nickname": _LB_TEXT_NICKNAME, "segments": [{"type": "text", "content": text}]}
+
+
+def render_text_board_nodes(
+    cn_data: Dict[str, Any],
+    header: str,
+    age_seconds: float,
+) -> List[Dict[str, Any]]:
+    """国服榜单 → 文字合并转发节点（1.4.x 旧格式原样复刻，供 render_images=false）。
+
+    表头节点 1 条写实际条数（赛季初上游 top 可能不足 100，写死 Top100 会失真）；
+    其后每 25 名一节点，首行"第 X–Y 名"，每行 `{rank}. {name} — {score:,}`。
+    排名不补零、分数完整千分位（用户红线：禁"万"缩写）。
+    """
+    top = cn_data.get("top") or []
+    total = int(cn_data.get("total") or 0)
+    nodes = [
+        _lb_text_node(f"{header} 国服 Top{len(top)} · 共 {total:,} 人 · 更新于 {format_age(age_seconds)}")
+    ]
+    for start in range(0, len(top), _LB_TEXT_CHUNK):
+        chunk = top[start:start + _LB_TEXT_CHUNK]
+        lines = [f"第 {chunk[0].get('rank')}–{chunk[-1].get('rank')} 名"]
+        for entry in chunk:
+            rank = entry.get("rank")
+            name = entry.get("name") or "?"
+            score = int(entry.get("score") or 0)
+            lines.append(f"{rank}. {name} — {score:,}")
+        nodes.append(_lb_text_node("\n".join(lines)))
+    return nodes
+
+
+
 
 def refresh_board_for_update(
     leaderboard_dir: Path,

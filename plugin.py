@@ -18,6 +18,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import threading
 import sys
 import time
@@ -55,6 +56,7 @@ from gamekee import (  # noqa: E402
     atomic_write as _atomic_write_gamekee,
     build_index as gamekee_build_index,
     download_image as gamekee_download_image,
+    index_schema_version as gamekee_index_schema_version,
     match_guides as gamekee_match_guides,
     probe_updates as gamekee_probe_updates,
 )
@@ -63,6 +65,7 @@ from leaderboard import (  # noqa: E402
     format_age as format_age_text,
     load_board_for_render,
     refresh_board_for_update,
+    render_text_board_nodes,
     resolve_current_board,
 )
 from leaderboard_render import build_board_pages, render_board_pages
@@ -87,7 +90,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.4.0", description="配置版本（1.4.0=1.5.0 重写：移除 [query]，新增 [gamekee]）")
+    config_version: str = Field(default="1.4.1", description="配置版本（1.4.1=新增 [leaderboard] render_images 开关）")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -122,6 +125,11 @@ class LeaderboardConfig(PluginConfigBase):
         default=10,
         description="排行榜瘦身缓存有效期（分钟）：有效期内 /st_bb・/st_fe 零网络直读本地缓存；"
         "上游约每 5 分钟滚动更新一次，0=每次触发都重新拉取",
+    )
+    render_images: bool = Field(
+        default=True,
+        description="/st_bb・/st_fe 发送形态：开启=渲染图片榜单（合并转发）；"
+        "关闭=纯文字榜单（1.4.x 旧版合并转发格式：每 25 名一节点）",
     )
 
 
@@ -694,10 +702,12 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def ensure_gamekee_index(self) -> Dict[str, Any]:
         """查询入口的懒刷新（P2 入口③）：绑定 last_verified 与 index_ttl。
 
-        索引不可用（None）或 last_verified 距今超过 index_ttl_minutes → 先探查
-        再返回；gate 保证并发查询共享同一次探查。探查失败时：有旧索引则带旧索引
-        降级服务（并发等来的失败结果同样走这条旧快照路径，不隐式重试）；无旧索引
-        则向上抛（handler 转用户可见"攻略源暂不可用"）。
+        索引不可用（None）或 last_verified 距今超过 index_ttl_minutes，或索引为
+        旧 schema（缺 schema_version=2 即缺队伍码——schema 升级与上游 updated_at
+        无关，只等自然探查会永久缺码）→ 先探查再返回；gate 保证并发查询共享
+        同一次探查。探查失败时：有旧索引则带旧索引降级服务（并发等来的失败
+        结果同样走这条旧快照路径，不隐式重试；30 分钟失败纪律照常防每次查询
+        重拉）；无旧索引则向上抛（handler 转用户可见"攻略源暂不可用"）。
         """
         ttl_seconds = max(1, int(self.config.gamekee.index_ttl_minutes)) * 60
         last_verified = float(self._gamekee_state.get("last_verified") or 0)
@@ -705,6 +715,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._gamekee_index is None
             or not last_verified
             or (self._now() - last_verified) > ttl_seconds
+            or int((self._gamekee_index or {}).get("schema_version") or 0) < gamekee_index_schema_version()
         )
         if not needs_refresh:
             return self._gamekee_index  # type: ignore[return-value]
@@ -912,49 +923,68 @@ class StellaSoraPlugin(MaiBotPlugin):
                 "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
             }
 
-        # 下载图片（同步重活进线程池；webp 可配）
+        # 下载图片（同步重活进线程池；webp 可配）。多图小节按相册原顺序全发
+        # （GameKee 相册 data 数组即展示顺序；旧"末张=完整版长图"假设实测只对
+        # 部分角色成立，纯多图相册取末张会丢前 N-1 张）。
         prefer_webp = bool(self.config.gamekee.prefer_webp)
         cache_dir = Path(self.ctx.paths.runtime_dir) / "cache" / "gamekee_images"
         images: list[dict] = []
         download_errors: list[str] = []
         for hit in hits:
-            src = hit["image_urls"][-1]  # 末张 = 完整版长图
-            try:
-                data = await asyncio.to_thread(
-                    gamekee_download_image, src, cache_dir, prefer_webp
-                )
+            srcs = hit["image_urls"]
+            group: list[str] = []
+            for pos, src in enumerate(srcs, start=1):
+                try:
+                    data = await asyncio.to_thread(
+                        gamekee_download_image, src, cache_dir, prefer_webp
+                    )
+                    group.append(base64.b64encode(data).decode("ascii"))
+                except GameKeeError as exc:
+                    # 单张失败只跳该图保其余（预期内失败不吞整节）
+                    download_errors.append(f"{hit['name']} 第{pos}/{len(srcs)}张: {str(exc)[:120]}")
+            if group:
                 images.append({
                     "name": hit["name"],
                     "note": hit.get("note") or "",
                     "element_cn": _ELEMENT_CN_LABELS.get(hit.get("element"), hit.get("element", "")),
-                    "base64": base64.b64encode(data).decode("ascii"),
+                    "base64_list": group,
+                    "total": len(srcs),
                 })
-            except GameKeeError as exc:
-                download_errors.append(f"{hit['name']}: {str(exc)[:120]}")
         if not images:
             self.ctx.logger.error("how 图片全部下载失败: %s", "; ".join(download_errors))
             await self.ctx.send.text("攻略图片下载失败，请稍后再试。", stream_id)
             return {"name": "stellasora_how", "content": "已向聊天发送'图片下载失败'提示，请调用 stop 结束本轮。"}
         if download_errors:
-            self.ctx.logger.warning("how 部分图片下载失败（跳过节点）: %s", "; ".join(download_errors))
+            self.ctx.logger.warning("how 部分图片下载失败（跳过该图）: %s", "; ".join(download_errors))
 
         # 统一合并转发（用户裁决：单角色/属性泛查都走 forward；单角色=单节点图文混排，
-        # 多角色=每角色一节点；节点内备注 + 来源）
+        # 多角色=每角色一节点；多图小节=节点内多 image 段+1 text 段，备注与来源仅一次）
         nodes = []
+        sent_total = 0
         for img in images:
-            segments = [
-                {
+            segments = []
+            for idx, b64 in enumerate(img["base64_list"], start=1):
+                suffix = f"_p{idx}" if len(img["base64_list"]) > 1 else ""
+                segments.append({
                     "type": "image",
-                    "content": img["base64"],
-                    "filename": f"{img['name']}_guide.webp",
-                }
-            ]
+                    "content": b64,
+                    "filename": f"{img['name']}_guide{suffix}.webp",
+                })
+            sent_total += len(img["base64_list"])
             note_parts = [f"【{img['element_cn']}】{img['name']}"]
             if img["note"]:
                 note_parts.append(img["note"])
+            if img["total"] > len(img["base64_list"]):
+                note_parts.append(f"（{img['total']} 张中 {len(img['base64_list'])} 张下载失败未发送）")
             note_parts.append("来源：GameKee 星塔旅人 wiki（星塔攻略组）")
             segments.append({"type": "text", "content": "\n".join(note_parts)})
             nodes.append({"nickname": _FORWARD_NICKNAME, "segments": segments})
+        # 队伍码随攻略同发（用户裁决：查攻略即发图+码，不作区分）。码是页级公共
+        # 段，命中角色/属性所在页各附一个文本节点（无码页不附）。
+        for element in dict.fromkeys(h["element"] for h in hits):
+            node = self._team_code_node(index, element)
+            if node is not None:
+                nodes.append(node)
         try:
             sent = await self.ctx.send.forward(nodes, stream_id)
         except Exception:
@@ -963,13 +993,29 @@ class StellaSoraPlugin(MaiBotPlugin):
         if not sent:
             self.ctx.logger.error("how 合并转发返回失败: stream=%s", stream_id)
             return {"name": "stellasora_how", "content": "攻略图片发送失败，请调用 stop 结束本轮。"}
+        code_pages = len({h["element"] for h in hits if self._team_code_node(index, h["element"]) is not None})
+        summary = f"攻略图已直接发送到聊天（{sent_total} 张）"
+        if code_pages:
+            summary += f"及 {code_pages} 页队伍码"
         return {
             "name": "stellasora_how",
             "content": (
-                f"攻略图已直接发送到聊天（{len(images)} 张）。用户已经可以看到完整答案，"
+                f"{summary}。用户已经可以看到完整答案，"
                 "你不需要也不应该再调用 reply 工具。请立即调用 stop 工具结束本轮。"
             ),
         }
+
+    def _team_code_node(self, index: Dict[str, Any], element: str) -> Optional[dict]:
+        """取某属性页的队伍码合并转发文本节点；页无码（如未开攻略）返回 None。"""
+        codes = (index.get("pages") or {}).get(element, {}).get("team_codes") or []
+        if not codes:
+            return None
+        element_cn = _ELEMENT_CN_LABELS.get(element, element)
+        lines = [f"【{element_cn}】队伍码（本页公共，按攻略组优先级排序）："]
+        for entry in codes:
+            lines.append(f"{entry['title']}：{entry['code']}")
+        lines.append("来源：GameKee 星塔旅人 wiki（星塔攻略组）")
+        return {"nickname": _FORWARD_NICKNAME, "segments": [{"type": "text", "content": "\n".join(lines)}]}
 
     # ===== Command 指令 =====
 
@@ -1094,13 +1140,14 @@ class StellaSoraPlugin(MaiBotPlugin):
         return await self._handle_lb_board("fe", stream_id=stream_id, **kwargs)
 
     async def _handle_lb_board(self, mode: str, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """排行榜双命令共用体（1.5.0 图片化）：鉴权+平台 → 拉数据 → HTML 渲染 → 合并转发。
+        """排行榜双命令共用体：鉴权+平台 → 拉数据 → 按 render_images 开关分流输出。
 
         kwargs 必须从命令 handler 透传（宿主注入的 group_id/user_id 为 _denied
         依据，漏传即空身份导致白名单模式全拒）。宿主对命令返回值只记日志不发送
         （self-send 约定），返回值仅作执行摘要。数据层异常（指针缺失/未开榜/
-        拉取失败）走短文本；渲染/发送失败记日志给短提示——**不回退文本榜**
-        （文本榜排版已被聊天侧否决）。
+        拉取失败）走短文本。开关只切换输出形态（render_images=True 图片榜 /
+        False 文字榜），不切换取数与错误处理；渲染失败提示失败不回退文字榜
+        （错误完整暴露，不滥兜底）。
         """
         if not await self._platform_allowed(**kwargs):
             return False, "该平台暂不支持星塔旅人排行榜查询。", 1
@@ -1109,6 +1156,7 @@ class StellaSoraPlugin(MaiBotPlugin):
 
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
         ttl = int(self.config.leaderboard.ttl_minutes)
+        render_images = bool(self.config.leaderboard.render_images)
         lb_dir = self._lb_data_dir_ready()
         try:
             # 1. 指针 + 数据（同步网络/磁盘重活进线程池；异常消息即用户可见文案）
@@ -1131,31 +1179,35 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.exception("排行榜查询异常: %s", exc)
             return False, f"星塔旅人排行榜查询失败: {exc}", 1
 
-        # 2. HTML 分页 + 渲染（同步 CPU 重活进线程池；渲染本身是宿主 async 能力）
-        try:
-            pages = await asyncio.to_thread(
-                build_board_pages, prefix, sid, cn_data, format_age_text(age)
-            )
-            images = await render_board_pages(self, pages)
-        except Exception as exc:
-            self.ctx.logger.exception("排行榜渲染失败: %s", exc)
+        # 2. 按 render_images 开关组节点：图片榜（HTML 渲染）或文字榜（1.4.x 格式）
+        if render_images:
             try:
-                await self.ctx.send.text("排行榜图片渲染失败，请稍后再试。", effective_stream_id)
-            except Exception as send_exc:
-                self.ctx.logger.exception("排行榜渲染提示发送异常: %s", send_exc)
-                return False, f"星塔旅人排行榜渲染失败: {exc}", 1
-            return True, "星塔旅人排行榜渲染失败提示已发送", 2
+                # 同步 CPU 重活进线程池；渲染本身是宿主 async 能力
+                pages = await asyncio.to_thread(
+                    build_board_pages, prefix, sid, cn_data, format_age_text(age)
+                )
+                images = await render_board_pages(self, pages)
+            except Exception as exc:
+                self.ctx.logger.exception("排行榜渲染失败: %s", exc)
+                try:
+                    await self.ctx.send.text("排行榜图片渲染失败，请稍后再试。", effective_stream_id)
+                except Exception as send_exc:
+                    self.ctx.logger.exception("排行榜渲染提示发送异常: %s", send_exc)
+                    return False, f"星塔旅人排行榜渲染失败: {exc}", 1
+                return True, "星塔旅人排行榜渲染失败提示已发送", 2
+            nodes = []
+            for page, image_b64 in zip(pages, images):
+                nodes.append({
+                    "nickname": _FORWARD_NICKNAME,
+                    "segments": [
+                        {"type": "image", "content": image_b64, "filename": f"{prefix}_{sid}_p{page['start'] // 25 + 1}.png"},
+                        {"type": "text", "content": f"{header} {page['label']} · 更新于 {format_age_text(age)}"},
+                    ],
+                })
+        else:
+            nodes = await asyncio.to_thread(render_text_board_nodes, cn_data, header, age)
 
-        # 3. 统一合并转发（用户裁决：单页/多页都走 forward，每页一节点）
-        nodes = []
-        for page, image_b64 in zip(pages, images):
-            nodes.append({
-                "nickname": _FORWARD_NICKNAME,
-                "segments": [
-                    {"type": "image", "content": image_b64, "filename": f"{prefix}_{sid}_p{page['start'] // 25 + 1}.png"},
-                    {"type": "text", "content": f"{header} {page['label']} · 更新于 {format_age_text(age)}"},
-                ],
-            })
+        # 3. 统一合并转发（用户裁决：单页/多页都走 forward）
         try:
             sent = await self.ctx.send.forward(nodes, effective_stream_id)
         except Exception as exc:
