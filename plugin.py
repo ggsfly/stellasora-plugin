@@ -1,11 +1,12 @@
-"""星塔旅人（Stella Sora）攻略查询插件
+"""星塔旅人（Stella Sora）攻略与排行榜插件
 
-将三个查询工具包装为 MaiBot Tool，由 planner 自动路由：
-  - stellasora_what    "是什么"：角色属性/技能/素材/礼物
-  - stellasora_how     "怎么玩"：配队/纹章/秘纹/技能升级优先度（预设码按需）
-  - lookup_game_term   查词：游戏术语 → 官方中文名 + 游戏内 ID
+GameKee 中文源（一图流攻略原图直发）+ ssleaderboard 排行榜图片化：
+  - stellasora_how  Tool  一图流攻略查询（六属性 24 角色小节，合并转发）
+  - /st_bb・/st_fe   Command  当期国服 Top100 图片榜单
+  - /st_update      Command  强刷两榜 + 探查攻略源（操作员）
 
-安全：白名单/黑名单模式可配置（config.toml），群聊按群号、私聊按用户号鉴权。
+安全：白名单/黑名单模式可配置（config.toml），群聊按群号、私聊按用户号鉴权；
+仅 QQ 平台（Hook 可见性 + 执行层双闸，未知平台保守拒绝）。
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 import asyncio
+import base64
 import json
 import logging
+import threading
 import sys
 import time
 
@@ -28,6 +31,9 @@ MAX_SESSION_CACHE_ENTRIES = 2000  # session 身份缓存硬上界（Hook 前置�
 
 # 直发成品合并转发卡的节点署名；user_id 留空由适配器回落机器人自身账号
 _FORWARD_NICKNAME = "星塔旅人"
+
+# GameKee 属性键 → 中文标签（攻略图节点头显示用；与 tools/gamekee.ELEMENT_CN 同源）
+_ELEMENT_CN_LABELS = {"water": "水", "fire": "火", "light": "光", "dark": "暗", "wind": "风", "earth": "地"}
 
 # 工具 RPC 预算与插件内 LLM 调用预算（毫秒）。
 # 宿主默认工具超时 60s（component_timeout.DEFAULT_COMPONENT_RPC_TIMEOUT_MS），
@@ -45,105 +51,33 @@ _TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from cache import CacheManager  # noqa: E402
-from service import (  # noqa: E402
-    apply_priority_filter,
-    check_permission,
-    configure_overrides,
-    count_character_names,
-    detect_element_query,
-    find_character_names_ordered,
-    find_team_rows,
-    lookup_term,
-    preheat_services,
-    query_how_rows,
-    query_lb_board,
-    query_what,
-    reload_team_table,
+from gamekee import (  # noqa: E402
+    GameKeeError,
+    atomic_write as _atomic_write_gamekee,
+    build_index as gamekee_build_index,
+    download_image as gamekee_download_image,
+    match_guides as gamekee_match_guides,
+    probe_updates as gamekee_probe_updates,
 )
-from service import set_data_dir as service_set_data_dir  # noqa: E402
-from sync_data import sync_offline_data  # noqa: E402
-from update_dict import update_dict_via_preferred_path  # noqa: E402
+from leaderboard import (  # noqa: E402
+    BoardUnavailable,
+    format_age as format_age_text,
+    load_board_for_render,
+    refresh_board_for_update,
+    resolve_current_board,
+)
+from leaderboard_render import build_board_pages, render_board_pages
+from access import check_permission  # noqa: E402
 
 logger = logging.getLogger("stellasora.plugin")
 
-# 直发提示词单一事实源文档路径与模块级缓存（修改文档后需重启插件生效）
-# how 与 what 各自独立：how 用 docs/prompts_how.md（含内联游戏知识），what 用 docs/prompts_what.md
-_PROMPT_DOC_PATH_HOW = Path(__file__).resolve().parent / "docs" / "prompts_how.md"
-_PROMPT_DOC_PATH_WHAT = Path(__file__).resolve().parent / "docs" / "prompts_what.md"
-_PROMPT_DOC_CACHE_HOW: Optional[str] = None
-_PROMPT_DOC_CACHE_WHAT: Optional[str] = None
+class GameKeeProbeFailure(Exception):
+    """GameKee 探查/重建失败（网络/结构漂移/代际过期），由调用方区分旧快照降级或向上暴露。"""
 
 
-def _extract_prompt_body(raw: str) -> str:
-    """从提示词文档中提取代码围栏（``` ... ```）内的提示词正文。
 
-    文档头部/尾部为面向维护者的说明（文件性质、占位符说明、作用边界等），
-    若整体作为 LLM 提示词，模型会产生「读取配置文件」的元认知而答非所问。
-    正文必须围栏隔离：取首个 ``` 与其次 ``` 之间的内容。
-    """
-    fence = "```"
-    start = raw.find(fence)
-    if start < 0:
-        return raw
-    end = raw.find(fence, start + len(fence))
-    if end < 0:
-        return raw
-    return raw[start + len(fence):end].lstrip("\n")
-
-
-def _load_prompt_doc_how() -> Optional[str]:
-    """加载 docs/prompts_how.md 直发提示词文档（模块级缓存，单一事实源）。
-
-    返回代码围栏内的提示词正文；文档的维护者说明不进入 LLM 上下文。
-    缺失或读取失败记录 error 并返回 None（不回退内嵌旧文），由 _direct_send 显式处理失败。
-    """
-    global _PROMPT_DOC_CACHE_HOW
-    if _PROMPT_DOC_CACHE_HOW is None:
-        try:
-            _PROMPT_DOC_CACHE_HOW = _extract_prompt_body(
-                _PROMPT_DOC_PATH_HOW.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            logger.error("加载 how 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_HOW, exc)
-            _PROMPT_DOC_CACHE_HOW = None
-    return _PROMPT_DOC_CACHE_HOW
-
-
-def _load_prompt_doc_what() -> Optional[str]:
-    """加载 docs/prompts_what.md 直发提示词文档（模块级缓存，单一事实源）。
-
-    返回代码围栏内的提示词正文；文档的维护者说明（含「作用边界」）不进入 LLM 上下文。
-    缺失或读取失败记录 error 并返回 None，由 _direct_send 显式处理失败。
-    """
-    global _PROMPT_DOC_CACHE_WHAT
-    if _PROMPT_DOC_CACHE_WHAT is None:
-        try:
-            _PROMPT_DOC_CACHE_WHAT = _extract_prompt_body(
-                _PROMPT_DOC_PATH_WHAT.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            logger.error("加载 what 直发提示词文档失败: %s (%s)", _PROMPT_DOC_PATH_WHAT, exc)
-            _PROMPT_DOC_CACHE_WHAT = None
-    return _PROMPT_DOC_CACHE_WHAT
-
-
-# LLM 加工失败降级回传前缀（单一事实源）：攻略资料本身查询成功、仅回答加工失败时，
-# 用该前缀包装原始资料交由回复流程基于资料组织语言，不再谎报"未找到相关攻略"。
-_FAILURE_RELAY_PREFIX = "[系统说明：攻略资料已查询成功，但回答加工（LLM）暂时失败，请把下方【攻略资料】整块原样放入 reply 工具的 reply_reference 参数，由回复流程基于它组织语言，不要调用其他搜索工具。]\n【攻略资料·bot查询所得，非用户发言】\n"
-
-# 直发成功后的工具返回文案（单一事实源）：明确告知 planner 无需再 reply，
-# 避免与已直发的攻略重复。缓存命中与首次加工两条路径共用，防止文案漂移。
-# "同一轮只调本组工具之一"约束放这里（调用后可见），不占工具 description 的每轮 token。
-_ALREADY_SENT_CONTENT = (
-    "攻略内容已直接发送到聊天，用户已经可以看到完整答案。"
-    "你不需要也不应该再调用 reply 工具——reply 的回复内容会与已发送的攻略重复。"
-    "同一对象在同一轮只允许调用本组工具中的一个，不要再调用另一个。"
-    "请立即调用 stop 工具结束本轮即可。"
-)
-
-# 本插件暴露给 planner 的工具名集合：Hook 前置过滤与 description 维护的单一清单
-_TOOL_NAMES = frozenset({"lookup_game_term", "stellasora_what", "stellasora_how"})
+# 本插件暴露给 planner 的工具名集合：Hook 前置过滤单一清单（1.5.0 仅剩 how）
+_TOOL_NAMES = frozenset({"stellasora_how"})
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -154,7 +88,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.3.0", description="配置版本")
+    config_version: str = Field(default="1.4.0", description="配置版本（1.4.0=1.5.0 重写：移除 [query]，新增 [gamekee]）")
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -178,43 +112,6 @@ class AccessControlConfig(PluginConfigBase):
     )
 
 
-class QueryConfig(PluginConfigBase):
-    """查询行为配置。"""
-
-    __ui_label__ = "查询设置"
-    __ui_icon__ = "search"
-    __ui_order__ = 1
-
-    direct_send: bool = Field(
-        default=True,
-        description="直接发送模式：插件内部用 LLM 把攻略加工成中文成品后直接发送到聊天，"
-        "工具只向 planner 返回'已发送'。关闭则退回旧行为（攻略原文返回给 planner 翻译）",
-    )
-
-    dedup_window: int = Field(
-        default=60,
-        description="同流同主题直发去重窗口（秒）：同一 stream_id + query 在此时间内重复调用直接拦截，"
-        "防止 what+how 双直发刷屏",
-    )
-
-    answer_cache_ttl: int = Field(
-        default=86400,
-        description="直发成品缓存时长（秒），0=禁用",
-    )
-
-    llm_model: str = Field(
-        default="utils",
-        description="直接发送使用的模型任务名（如 utils/replyer/planner，对应主程序模型配置里的任务）；留空使用默认模型。推荐 utils（快速响应 2-4s，术语翻译已在代码中完成）",
-    )
-
-    inject_persona: bool = Field(
-        default=True,
-        description="直发模式注入 bot 人格与表达风格（读取主程序人格配置，"
-        "使成品回答与 bot 口吻一致）；关闭则使用无人格的攻略助手口吻。"
-        "回传模式（direct_send=false）恒为客观攻略体，不受此项影响",
-    )
-
-
 class LeaderboardConfig(PluginConfigBase):
     """排行榜命令（/st_lb）配置。"""
 
@@ -226,6 +123,25 @@ class LeaderboardConfig(PluginConfigBase):
         default=10,
         description="排行榜瘦身缓存有效期（分钟）：有效期内 /st_bb・/st_fe 零网络直读本地缓存；"
         "上游约每 5 分钟滚动更新一次，0=每次触发都重新拉取",
+    )
+
+
+class GameKeeConfig(PluginConfigBase):
+    """GameKee 攻略源配置（1.5.0 新源）。"""
+
+    __ui_label__ = "攻略源（GameKee）"
+    __ui_icon__ = "book-open"
+    __ui_order__ = 4
+
+    index_ttl_minutes: int = Field(
+        default=360,
+        description="攻略索引有效期（分钟）：查询时索引年龄超过此值先刷新再匹配"
+        "（绑定 last_verified，六页无变化的探查也推进）",
+    )
+
+    prefer_webp: bool = Field(
+        default=True,
+        description="攻略图片使用 CDN webp 转换（同尺寸约 1/9 体积）；关闭发原图 PNG（约 2MB/张，发送慢）",
     )
 
 
@@ -264,8 +180,8 @@ class StellaSoraConfig(PluginConfigBase):
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     access_control: AccessControlConfig = Field(default_factory=AccessControlConfig)
-    query: QueryConfig = Field(default_factory=QueryConfig)
     leaderboard: LeaderboardConfig = Field(default_factory=LeaderboardConfig)
+    gamekee: GameKeeConfig = Field(default_factory=GameKeeConfig)
     overrides: OverridesConfig = Field(default_factory=OverridesConfig)
 
 
@@ -286,26 +202,31 @@ class StellaSoraPlugin(MaiBotPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._cache_dir: Path | None = None
         self._data_dir: Path | None = None
         self._net_cache_dir: Path | None = None
-        self._answer_cache: CacheManager | None = None
-        self._recent_direct: dict[tuple[str, str], float] = {}  # (stream_id, query) → 直发成功时间戳
         self._sync_task: asyncio.Task[Any] | None = None
         self._preheat_task: asyncio.Task[None] | None = None
         self._update_task: asyncio.Task[None] | None = None  # /st_update 后台任务（兼作在飞判定与强引用）
-        self._answer_cfg_fp: str = ""  # 答案相关配置指纹（on_config_update 去抖）
         self._overrides_fp: tuple[tuple[str, str], ...] | None = None  # 别名配置指纹（跳过热重装）
         self._session_identity_cache: dict[str, tuple[str, str]] = {}  # session_id → (group_id, user_id)
+        self._session_platform_cache: dict[str, str] = {}  # session_id → platform（P3 执行层校验源）
+        # GameKee 探查状态（P2）：三个时间戳 + single-flight 批次 + 内存索引缓存
+        self._gamekee_state: Dict[str, Any] = {}  # state.json 的内存镜像
+        self._gamekee_index: Optional[Dict[str, Any]] = None  # 已发布索引（整批成功才更新）
+        self._gamekee_batch: Optional[asyncio.Future] = None  # single-flight 在飞批次（并发入口共享）
+        self._gamekee_probe_task: asyncio.Task[None] | None = None  # 后台到期探查任务
+        self._gamekee_probe_waiter: asyncio.Future | None = None  # 启动延迟可被手动更新取消
+        self._gamekee_waiter_phase: str = ""  # waiter 阶段标记（boot=可接管 / normal=保持排程）
+        self._gamekee_commit_lock = threading.Lock()  # 提交与卸载互斥（晚写守卫，P2）
+        self._gamekee_probe_generation = 0  # 卸载/重载代际标记：旧线程结果不得发布
 
     # ===== 生命周期 =====
 
     def _apply_overrides_config(self, *, force: bool = False) -> None:
-        """将 config 中的 [overrides.aliases] 中文别名应用到运行时查词服务层。
+        """别名配置指纹维护（1.5.0：别名由 match_guides 直接读 self.config）。
 
-        指纹短路：别名未变化时直接返回，避免每次工具调用都重建别名 dict 并抢占
-        configure_overrides 的初始化锁。首装（_overrides_fp 为 None）恒应用一次，
-        其后仅在别名实际变化（配置热重载）时重装。
+        保留指纹机制以兼容 on_config_update 触发路径；别名消费已改为查询时
+        从 config 实时构建（_resolve_guide_aliases），此处仅维护指纹字段。
         """
         try:
             fingerprint = tuple(
@@ -314,99 +235,45 @@ class StellaSoraPlugin(MaiBotPlugin):
             if not force and self._overrides_fp is not None and fingerprint == self._overrides_fp:
                 return
             self._overrides_fp = fingerprint
-            alias_dict = {
-                entry.alias: entry.official
-                for entry in self.config.overrides.aliases
-                if entry.alias and entry.official
-            }
-            configure_overrides(aliases=alias_dict)
         except Exception as exc:
             self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
 
-    @staticmethod
-    def _calculate_delay_to_sync(
-        now: Optional[datetime] = None,
-        target_hour: int = 17,
-        target_minute: int = 0,
-    ) -> float:
-        """计算当前本地时间距离下一个目标同步时间（默认 17:00:00）的秒数。
-
-        若当前未过目标时间，计算到今日目标时间；若已过，计算到明日目标时间。
-        """
-        if now is None:
-            now = datetime.now()
-        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        return (target - now).total_seconds()
-
-    async def _schedule_daily_sync(self) -> None:
-        """每日 17:00 自动定时静默全量同步离线数据后台任务。"""
-        try:
-            while True:
-                delay = self._calculate_delay_to_sync()
-                self.ctx.logger.info("星塔旅人离线数据定时同步计划在 %.1f 秒后执行（目标: 17:00）", delay)
-                await asyncio.sleep(delay)
-                try:
-                    self.ctx.logger.info("开始执行每日 17:00 离线数据全量定时同步...")
-                    offline_dir = Path(self.ctx.paths.data_dir) / "offline"
-                    cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
-                    await asyncio.to_thread(
-                        sync_offline_data,
-                        sync_all=True,
-                        offline_dir=offline_dir,
-                        cache_dir=cache_dir,
-                    )
-                    # 表缓存失效接线：定时同步产出新统一表后立即失效表缓存
-                    reload_team_table()
-                    # 清空直发成品缓存（磁盘 answers 与内存）
-                    self._clear_answer_cache()
-                    self.ctx.logger.info("每日 17:00 离线数据定时同步完成")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    self.ctx.logger.warning("每日 17:00 离线数据定时同步执行异常: %s", exc)
-        except asyncio.CancelledError:
-            self.ctx.logger.info("每日定时同步后台任务已取消并优雅退出")
-
     async def on_load(self) -> None:
-        """插件加载：配置数据/缓存目录、同步 overrides 配置，启动每日 17:00 定时同步任务。
+        """插件加载：配置数据/缓存目录，启动 GameKee 探查后台任务。
 
-        持久数据（dict/names/offline）读宿主分配的 ctx.paths.data_dir，
-        网络缓存与直发成品缓存写 ctx.paths.runtime_dir（非持久，可随时重建）。
+        持久数据（GameKee state/index、榜单缓存）写宿主分配的 ctx.paths.data_dir，
+        网络缓存与图片缓存写 ctx.paths.runtime_dir（非持久，可随时重建）。
         """
         self._data_dir = Path(self.ctx.paths.data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._net_cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
         self._net_cache_dir.mkdir(parents=True, exist_ok=True)
-        self._cache_dir = Path(self.ctx.paths.runtime_dir) / "webcache"
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        service_set_data_dir(self._data_dir, self._net_cache_dir)
-        self._apply_overrides_config()
-        # 答案相关配置指纹基线：加载后的首次空更新不清缓存
-        self._answer_cfg_fp = self._answer_relevant_fingerprint()
-        self._sync_task = asyncio.create_task(self._schedule_daily_sync())
-        # 后台预热共享服务（字典解析 + 替换器编译 + 表加载），消除首次查询冷启动。
-        # 必须 create_task 不 await：宿主 reload 等待窗口有限，on_load 同步做大活
-        # 会撞超时导致 reload 判定失败回滚
-        self._preheat_task = asyncio.create_task(asyncio.to_thread(preheat_services))
+        self._lb_data_dir_ready()
+        # GameKee 探查：读持久状态 → 内存捡索引快照 → 到期则延迟 60s 后台探查
+        #（延迟避开宿主 reload 等待窗口；延迟期间收到手动 /st_update 即取消）
+        self._load_gamekee_state()
+        self._load_gamekee_index_snapshot()
+        self._gamekee_probe_task = asyncio.create_task(self._schedule_gamekee_probe())
         self.ctx.logger.info("星塔旅人插件已加载，数据目录: %s", self._data_dir)
 
     async def on_unload(self) -> None:
-        """插件卸载：取消每日定时同步任务并清空运行时缓存引用（文件留给磁盘回收）。
+        """插件卸载：取消全部后台任务并清空运行时缓存引用（文件留给磁盘回收）。
 
-        _update_task 不取消也不等待：/st_update 的自 reload 正是从该协程发出的，
-        卸载流程若 await 它等于等待触发方自身，reload 会死锁；任务残余体随
-        purge 后自然排空（末步 reload 后即无操作）。
+        代际自增先行：在飞的探查批次结果被判 stale 不得发布；手动 /st_update
+        任务（1.5.0 已不自 reload）同样取消并等待，防止卸载后旧任务继续刷榜或
+        重新排程。
         """
-        if self._sync_task and not self._sync_task.done():
-            self._sync_task.cancel()
-            await asyncio.gather(self._sync_task, return_exceptions=True)
-        self._sync_task = None
-        if self._preheat_task and not self._preheat_task.done():
-            self._preheat_task.cancel()
-            await asyncio.gather(self._preheat_task, return_exceptions=True)
-        self._preheat_task = None
+        # 代际自增需与提交线程互斥（晚写守卫）；锁可能被慢盘写持有一段，
+        # 用 to_thread 获取避免阻塞事件循环（AGENTS.md 事件循环规范）
+        await asyncio.to_thread(self._bump_generation_locked)
+        if self._gamekee_probe_task and not self._gamekee_probe_task.done():
+            self._gamekee_probe_task.cancel()
+            await asyncio.gather(self._gamekee_probe_task, return_exceptions=True)
+        self._gamekee_probe_task = None
+        if self._update_task and not self._update_task.done():
+            self._update_task.cancel()
+            await asyncio.gather(self._update_task, return_exceptions=True)
+        self._update_task = None
         self._cache_dir = None
         self._answer_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")
@@ -414,60 +281,12 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def on_config_update(
         self, scope: str, config_data: dict, version: str
     ) -> None:
-        """配置热重载：黑白名单、overrides 与查询参数即时生效，无需重启。
-
-        答案相关配置指纹去抖：宿主对 scope=self 的配置更新（WebUI 保存/轮询）
-        多数为无实质变化的空更新，若每次都清缓存会清掉刚写入的成品、导致重复
-        问题重复调用 LLM。仅当影响答案的配置字段实际变化时才清缓存。
-        """
+        """配置热重载：黑白名单与 GameKee 参数即时生效，无需重启。"""
         self.ctx.logger.info(
             "配置已更新: scope=%s version=%s（黑白名单与自定义覆盖即时生效）", scope, version
         )
         self._apply_overrides_config()
-        fingerprint = self._answer_relevant_fingerprint()
-        if fingerprint == self._answer_cfg_fp:
-            self.ctx.logger.info("配置更新无答案相关变化，保留直发成品缓存")
-            return
-        self._answer_cfg_fp = fingerprint
-        # 清空直发成品缓存（防旧配置答案残留）
-        self._clear_answer_cache()
-        self.ctx.logger.info("直发成品缓存已清空")
 
-    def _code_fingerprint(self) -> str:
-        """插件代码指纹（源码/提示词文件最新 mtime 的整秒值）。
-
-        纳入直发成品缓存 key：代码或提示词更新后旧答案自动失效，
-        无需人工 bump config_version。
-        """
-        root = Path(__file__).resolve().parent
-        latest = 0.0
-        candidates = [root / "plugin.py", *root.glob("tools/*.py"), *root.glob("docs/*.md")]
-        for p in candidates:
-            try:
-                latest = max(latest, p.stat().st_mtime)
-            except OSError:
-                continue
-        return str(int(latest))
-
-    def _answer_relevant_fingerprint(self) -> str:
-        """影响直发成品答案的配置字段指纹（on_config_update 去抖用）。
-
-        别名列表元素为 AliasEntry 模型，须先转为纯 dict 才能 JSON 序列化。
-        """
-        c = self.config
-        aliases = json.dumps(
-            [{"alias": e.alias, "official": e.official} for e in c.overrides.aliases],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        return "|".join((
-            aliases,
-            c.query.llm_model,
-            str(c.query.inject_persona),
-            c.plugin.config_version,
-        ))
-
-    # ===== 内部工具 =====
 
     def _cache_dir_ready(self) -> Path:
         if self._cache_dir is None:
@@ -482,34 +301,456 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._net_cache_dir.mkdir(parents=True, exist_ok=True)
         return self._net_cache_dir
 
-    def _get_answer_cache(self) -> CacheManager:
-        """获取直发成品缓存管理器（懒创建并复用，同步当前 TTL 配置）。
+    def _lb_data_dir_ready(self) -> Path:
+        """榜单数据目录（data_dir/leaderboard，1.5.0 起活动榜单缓存；旧 offline/ssleaderboard 不再读写）。
 
-        线程说明：答案缓存仅在事件循环侧访问。
+        瘦身缓存/meta/season 均落此目录；目录即建（首次查询时写入）。
         """
-        ttl = int(self.config.query.answer_cache_ttl)
-        expected_dir = self._cache_dir_ready() / "answers"
-        if self._answer_cache is None or self._answer_cache.cache_dir != expected_dir:
-            self._answer_cache = CacheManager(expected_dir, ttl_seconds=ttl)
+        d = Path(self.ctx.paths.data_dir) / "leaderboard"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ===== GameKee 探查状态（P2：三时间戳 / 三入口共用 gate / 整批发布）=====
+
+    # 探查失败后的后台重试间隔（秒）：从**失败完成时刻**起算（而非尝试开始——
+    # 长失败请求不吞噬等待期），既不断停摆（到重试点必然再试），
+    # 也不因旧截止时间已过而连拉（每次失败后至少等满该间隔）
+    _GAMEKEE_RETRY_INTERVAL = 30 * 60
+    # 加载后首个探查的延迟（秒）：避开宿主 reload 等待窗口
+    _GAMEKEE_BOOT_DELAY = 60
+    # 每日探查间隔（秒）：距 last_verified ≥24h 触发后台探查
+    _GAMEKEE_PROBE_INTERVAL = 24 * 3600
+
+    def _gamekee_state_path(self) -> Path:
+        """探查状态文件（data_dir/gamekee/state.json，持久跨 reload）。"""
+        return Path(self.ctx.paths.data_dir) / "gamekee" / "state.json"
+
+    def _gamekee_index_path(self) -> Path:
+        """索引快照文件（data_dir/gamekee/index.json，整批成功才覆盖）。"""
+        return Path(self.ctx.paths.data_dir) / "gamekee" / "index.json"
+
+    def _load_gamekee_state(self) -> None:
+        """加载持久探查状态到内存（损坏/缺失按空状态起步，不猜字段）。"""
+        try:
+            raw = json.loads(self._gamekee_state_path().read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                self._gamekee_state = raw
+                return
+        except FileNotFoundError:
+            pass  # 首次运行无状态文件：空状态起步（正常路径）
+        except (json.JSONDecodeError, OSError) as exc:
+            self.ctx.logger.warning("GameKee 状态文件读取失败（按空状态起步）: %s", exc)
+        self._gamekee_state = {}
+
+    def _save_gamekee_state_sync(self) -> None:
+        """状态原子落盘同步体（仅供 to_thread 调用；OSError 上抛由调用方记日志）。"""
+        self._gamekee_state_path().parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_gamekee(
+            self._gamekee_state_path(),
+            json.dumps(self._gamekee_state, ensure_ascii=False, indent=2),
+        )
+
+    def _save_gamekee_state(self) -> None:
+        """持久化探查状态（原子写；失败记日志不抛——状态丢失只影响下次探查时机）。"""
+        try:
+            self._save_gamekee_state_sync()
+        except Exception as exc:
+            self.ctx.logger.warning("GameKee 状态写入失败: %s", exc)
+
+    def _save_gamekee_state_sync_commit(self, generation: int) -> None:
+        """状态提交同步体：锁内核验代际 → 匹配才 rename 提交（与发布同款互斥）。"""
+        with self._gamekee_commit_lock:
+            target = self._gamekee_state_path()
+            staging = target.with_name(f".{target.stem}.gen{generation}.{time.time_ns()}.tmp")
+            payload = json.dumps(self._gamekee_state, ensure_ascii=False, indent=2)
+            staging.write_text(payload, "utf-8")
+            if generation != self._gamekee_probe_generation:
+                staging.unlink(missing_ok=True)
+                return
+            staging.replace(target)
+
+    async def _save_gamekee_state_async(self) -> None:
+        """状态落盘（to_thread 提交体 + 代际核验内联）；OSError 上抛由调用方决定语义。"""
+        generation = self._gamekee_probe_generation
+        await asyncio.to_thread(self._save_gamekee_state_sync_commit, generation)
+
+    def _load_gamekee_index_snapshot(self) -> None:
+        """内存捡上次发布的索引快照（reload 后不重新建索引即可服务查询）。
+
+        快照损坏/缺失保持 None——懒刷新入口会因"索引不可用"触发探查重建。
+        """
+        try:
+            raw = json.loads(self._gamekee_index_path().read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("characters"), list):
+                self._gamekee_index = raw
+                self.ctx.logger.info(
+                    "GameKee 索引快照已捡入内存（%d 小节，built_at=%s）",
+                    len(raw["characters"]), raw.get("built_at"),
+                )
+                return
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            self.ctx.logger.warning("GameKee 索引快照读取失败（视为需重建）: %s", exc)
+        self._gamekee_index = None
+
+    def _publish_gamekee_index_sync(self, index: Dict[str, Any], generation: int) -> bool:
+        """索引提交同步体：锁内核验代际 → 匹配才 rename 提交 → 提交后二次核验。
+
+        卸载竞态纪律：核验与 rename 在 threading.Lock 内与卸载线程互斥——
+        卸载的代际自增要么发生在核验前（本批被丢弃），要么发生在提交后
+        （提交后二次核验发现更替，回滚内存引用；正式文件若已被新实例覆盖，
+        新实例的写是原子 rename，本线程不会覆盖它）。两次核验都在锁内，
+        不存在跨 await/跨锁的窗口。
+        """
+        with self._gamekee_commit_lock:
+            target = self._gamekee_index_path()
+            staging = target.with_name(f".{target.stem}.gen{generation}.{time.time_ns()}.tmp")
+            payload = json.dumps(index, ensure_ascii=False)
+            staging.write_text(payload, "utf-8")
+            if generation != self._gamekee_probe_generation:
+                staging.unlink(missing_ok=True)
+                return False
+            staging.replace(target)
+            # 提交后二次核验：若卸载/重载发生在 rename 之后（同锁内不会，但
+            # 防御未来改动），恢复代际一致性——内存引用交给新实例决定
+            if generation != self._gamekee_probe_generation:
+                return False
+            return True
+
+    def _bump_generation_locked(self) -> None:
+        """代际自增（须持提交锁）；独立同步体供 on_unload 经 to_thread 调用。"""
+        with self._gamekee_commit_lock:
+            self._gamekee_probe_generation += 1
+
+    async def _publish_gamekee_index(self, index: Dict[str, Any]) -> None:
+        """整批校验成功后发布索引（to_thread 提交体 + 代际核验内联）。"""
+        generation = self._gamekee_probe_generation
+        try:
+            committed = await asyncio.to_thread(
+                self._publish_gamekee_index_sync, index, generation
+            )
+        except OSError as exc:
+            self.ctx.logger.warning("GameKee 索引落盘失败（内存快照仍生效，下次探查重建）: %s", exc)
+            if generation == self._gamekee_probe_generation:
+                self._gamekee_index = index
+            return
+        if not committed:
+            self.ctx.logger.info("GameKee 索引写盘后实例已更替，丢弃过期批次")
+            return
+        self._gamekee_index = index
+
+    @staticmethod
+    def _now() -> float:
+        """时间源（单点便于测试注入可控时钟）。"""
+        return time.time()
+
+    def _gamekee_due_delay(self) -> float:
+        """距下次后台探查的秒数（P2 排程核心）。
+
+        正常调度 = last_verified + 24h；失败重试 = max(last_verified, last_failure_at)
+        + 30min（last_failure_at 是失败**完成**时刻——长失败请求不吞噬等待期）。
+        首次（无状态）= 0（立即进入 60s 启动延迟探查）。
+        """
+        now = self._now()
+        last_verified = float(self._gamekee_state.get("last_verified") or 0)
+        last_failure = float(self._gamekee_state.get("last_failure_at") or 0)
+        if not last_verified and not last_failure:
+            return 0.0
+        # 失败后（last_failure_at 存在且晚于 last_verified）以重试点为准；
+        # 成功后（verified >= failure）以 24h 为准。
+        if last_failure > last_verified:
+            due_soonest = last_failure + self._GAMEKEE_RETRY_INTERVAL
         else:
-            self._answer_cache.ttl_seconds = ttl
-        return self._answer_cache
+            due_soonest = last_verified + self._GAMEKEE_PROBE_INTERVAL
+        return max(0.0, due_soonest - now)
 
-    def _clear_answer_cache(self) -> None:
-        """清空直发成品缓存：磁盘 answers/*.json 逐个删除 + 内存缓存整体清空。
+    async def _schedule_gamekee_probe(self) -> None:
+        """后台到期探查任务（唯一后台排程体；手动入口通过共用 gate 复用）。
 
-        定时同步、手动 /st_update、答案相关配置变更三条链路共用（单一事实源），
-        避免三处重复实现漂移；内存缓存仅在管理器已创建时清理（未创建即无事可做）。
+        启动延迟 60s 内收到手动更新会取消本次排程（_wait_with_reset 以事件驱动）；
+        探查完成后按结果重排下一次。单轮探查失败**不退出循环**——失败走
+        30min 重试排程（P2 纪律），只有手动接管或卸载才让路/退出。
         """
-        answers_dir = self._cache_dir_ready() / "answers"
-        if answers_dir.exists():
-            for p in answers_dir.glob("*.json"):
+        try:
+            probe_now = False  # 到期重核后的"立即探查"旗标
+            while True:
+                if probe_now:
+                    # 内层等待确认新截止点已到：直接探查（跳过循环头 due_delay——
+                    # 它可能混入手动失败的重试点，与成功节奏语义冲突）
+                    probe_now = False
+                    try:
+                        await self._run_gamekee_probe(trigger="scheduled")
+                    except GameKeeProbeFailure:
+                        continue  # 失败回循环头按 attempt/failure+30min 重算
+                    continue  # 成功回循环头按 last_verified+24h 重算
+                delay = self._gamekee_due_delay()
+                # phase 语义：首次（无任何时间戳）的 60s 启动延迟 = boot（可被手动接管）；
+                # 其余轮次的到期点等待 = normal（手动不接管，保持原排程）
+                is_boot = not self._gamekee_state
+                wait_total = max(delay, 0) + (self._GAMEKEE_BOOT_DELAY if is_boot else 0)
+                self.ctx.logger.info(
+                    "GameKee 探查排程：%.0f 秒后到期（phase=%s）", delay, "boot" if is_boot else "normal"
+                )
+                # 可取消等待：boot 阶段被手动 /st_update 接管时让路退出，
+                # 由手动入口执行探查并在完成后重排本任务
+                woke_by_reset = await self._wait_cancellable(wait_total, "boot" if is_boot else "normal")
+                if woke_by_reset:
+                    self.ctx.logger.info("GameKee 探查排程被手动更新接管，让路退出")
+                    return
+                # 自然到期唤醒：先重核**成功节奏**——手动成功已推进 last_verified 时
+                # （如距原截止仅 1h 时手动更新），新 24h 截止恢复，继续等待而非立即
+                # 探查（P2：last_verified 是唯一成功节奏基准）。
+                # 刻意不读 last_failure_at：正常等待期间的手动失败**不影响原排程**
+                # （计划 P2 恢复规则——只有接管既有排程失败才切重试时间）；
+                # 失败重试点仅由后台任务自身失败（本循环 except 分支）触发。
+                last_verified_now = float(self._gamekee_state.get("last_verified") or 0)
+                success_remaining = last_verified_now + self._GAMEKEE_PROBE_INTERVAL - self._now()
+                if success_remaining > 0:
+                    # 手动成功已推进成功节奏：原地精确等到新 24h 截止点（可取消、
+                    # normal 阶段手动不接管），**不回循环头**——循环头的 due_delay
+                    # 会混入 last_failure_at 的 30min 重试点，造成"截止点已过就
+                    # 空唤醒一次再被挡回"的抖动循环。
+                    self.ctx.logger.info(
+                        "GameKee 排程到期但 last_verified 已被手动成功推进（剩 %.0f 秒），原地等待新截止点",
+                        success_remaining,
+                    )
+                    woke_again = await self._wait_cancellable(success_remaining, "normal")
+                    if woke_again:
+                        self.ctx.logger.info("GameKee 排程等待期被手动更新接管，让路退出")
+                        return
+                    # 等待结束：再次核对最新成功节奏——期间又有手动成功时
+                    # last_verified 已再推进，须按**最新**成功时间重算剩余量继续
+                    # 原地等（不立即探查）；只有最新 24h 截止点真实到期才探查
+                    last_verified_after = float(self._gamekee_state.get("last_verified") or 0)
+                    after_remaining = last_verified_after + self._GAMEKEE_PROBE_INTERVAL - self._now()
+                    if after_remaining > 0:
+                        self.ctx.logger.info(
+                            "GameKee 等待期内又有手动成功（剩 %.0f 秒），继续等待新截止点", after_remaining
+                        )
+                        while True:
+                            woke_third = await self._wait_cancellable(after_remaining, "normal")
+                            if woke_third:
+                                self.ctx.logger.info("GameKee 排程等待期被手动更新接管，让路退出")
+                                return
+                            last_verified_final = float(self._gamekee_state.get("last_verified") or 0)
+                            final_remaining = last_verified_final + self._GAMEKEE_PROBE_INTERVAL - self._now()
+                            if final_remaining > 0:
+                                after_remaining = final_remaining  # 又被推进：继续等新截止点
+                                continue
+                            break  # 最新截止点真实到期
+                    # 最新成功节奏的 24h 截止点已真实到期：探查（不经循环头）
+                    probe_now = True
+                    continue
                 try:
-                    p.unlink()
-                except Exception:
-                    pass
-        if self._answer_cache is not None:
-            self._answer_cache.clear()
+                    await self._run_gamekee_probe(trigger="scheduled")
+                except GameKeeProbeFailure:
+                    # 失败不退出：回到循环头按 attempt/failure+30min 重算重试点（P2）
+                    continue
+                # 成功后回到循环头重算延迟（last_verified+24h）
+        except asyncio.CancelledError:
+            self.ctx.logger.info("GameKee 后台探查任务已取消并优雅退出")
+
+    async def _wait_cancellable(self, seconds: float, phase: str) -> bool:
+        """可被手动更新打断的等待。
+
+        phase: "boot"=启动延迟（可被手动接管让路）；"normal"=正常等到期点
+        （手动不接管——保持原排程，手动失败不影响 24h 截止点）。
+        返回 True=被接管（本任务应让路退出）。
+        """
+        waiter: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._gamekee_probe_waiter = waiter
+        self._gamekee_waiter_phase = phase
+        try:
+            await asyncio.wait_for(waiter, timeout=max(0.1, seconds))
+            return True  # _reset_probe_waiter set() 了它
+        except asyncio.TimeoutError:
+            return False  # 自然到点
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._gamekee_probe_waiter is waiter:
+                self._gamekee_probe_waiter = None
+                self._gamekee_waiter_phase = ""
+
+    def _reset_probe_waiter(self) -> None:
+        """手动 /st_update 接管排程：仅唤醒**启动延迟**中的任务（正常等待不动）。"""
+        if self._gamekee_waiter_phase != "boot":
+            return  # 正常等待期：保持原排程，手动探查独立执行
+        waiter = self._gamekee_probe_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
+    def _background_in_boot_delay(self) -> bool:
+        """后台任务是否处于启动延迟等待（phase=="boot" 且 waiter 挂着）。
+
+        只有这种状态下手动探查才接管让路；正常等待期（等到自己到期点）不动。
+        """
+        waiter = self._gamekee_probe_waiter
+        return self._gamekee_waiter_phase == "boot" and waiter is not None and not waiter.done()
+
+    def _bump_probe_attempt(self) -> None:
+        """每次探查尝试后推进 last_probe_attempt（无论成败；落盘失败只丢时机不丢内存态）。"""
+        self._gamekee_state["last_probe_attempt"] = self._now()
+        try:
+            self._save_gamekee_state_sync()
+        except OSError as exc:
+            self.ctx.logger.warning("GameKee 状态写入失败: %s", exc)
+
+    async def _run_gamekee_probe(self, trigger: str) -> Dict[str, Any]:
+        """执行一次 GameKee 探查/重建（三入口统一体，P2 全纪律，single-flight）。
+
+        - 合并请求（single-flight）：并发入口共享同一 asyncio.Future——首个入口
+          创建批次并真实探查，其余入口 await 同一 future 拿同一结果（成功复用索引、
+          失败复用异常），不重复发起网络请求；
+        - batch 终态统一由本方法负责：成功 set_result、异常 set_exception、
+          创建后未及执行被取消时兜底 set_exception——等待者永不挂起。
+        """
+        while True:
+            batch = self._gamekee_batch
+            if batch is not None:
+                # 已有在飞批次：shield 包裹——等待者被取消不影响共享批次
+                #（batch 继续由首批 executor 驱动到终态），其他等待者不受波及。
+                # shield 内层异常被本协程接收时同步消费，防悬挂告警。
+                try:
+                    return await asyncio.shield(batch)
+                except asyncio.CancelledError:
+                    if batch.done() and not batch.cancelled() and batch.exception() is not None:
+                        batch.exception()  # 已被本协程接收，消费防告警
+                    raise
+                except BaseException:
+                    if batch.done() and not batch.cancelled() and batch.exception() is not None:
+                        batch.exception()  # 同上
+                    raise
+            loop = asyncio.get_running_loop()
+            batch: asyncio.Future = loop.create_future()
+            self._gamekee_batch = batch
+            try:
+                result = await self._probe_batch_execute(trigger)
+                if not batch.done():
+                    batch.set_result(result)
+                return result
+            except asyncio.CancelledError:
+                if not batch.done():
+                    batch.set_exception(GameKeeProbeFailure("探查被取消"))
+                    batch.exception()  # 创建者消费，防悬挂告警
+                raise
+            except BaseException as exc:
+                if not batch.done():
+                    failure = exc if isinstance(exc, GameKeeProbeFailure) else GameKeeProbeFailure(str(exc))
+                    batch.set_exception(failure)
+                    # 无并发等待者时 batch 异常无人取回会触发 asyncio 告警——
+                    # 创建者自己消费一次（异常本体已从 executor 抛出并被捕获传播）
+                    batch.exception()
+                raise
+            finally:
+                if self._gamekee_batch is batch:
+                    self._gamekee_batch = None
+
+    async def _probe_batch_execute(self, trigger: str) -> Dict[str, Any]:
+        """single-flight 批次主体：轻量探查 → 无变化仅推进时间戳，有变化才完整重建。
+
+"""
+        generation = self._gamekee_probe_generation
+        try:
+            self._bump_probe_attempt()
+            proxy_url = None  # 代理解析在 net_common 内按环境处理（与榜单一致）
+            known = {
+                element: int((self._gamekee_index or {}).get("pages", {}).get(element, {}).get("updated_at") or 0)
+                for element in ("water", "fire", "light", "dark", "wind", "earth")
+            } if self._gamekee_index else None
+            # 1. 轻量探查：六页仅取 updated_at（整批校验；失败即整批失败）
+            last_verified_before = float(self._gamekee_state.get("last_verified") or 0)
+            probe = await asyncio.to_thread(gamekee_probe_updates, proxy_url, 20, known)
+            if generation != self._gamekee_probe_generation:
+                self.ctx.logger.info("GameKee 探查结果已过期（实例被卸载/重载），不发布")
+                raise GameKeeProbeFailure("stale generation")
+            if not probe.get("changed"):
+                # 六页无变化：仅推进 last_verified，不重建索引（P2 探查语义）。
+                # 顺序纪律：先落盘成功才推进内存——落盘失败内存不推进，
+                # 手动更新报告"计时未重置"与实际一致。
+                self._gamekee_state["last_verified"] = self._now()
+                try:
+                    await self._save_gamekee_state_async()
+                except OSError as exc:
+                    self._gamekee_state["last_verified"] = last_verified_before
+                    self._gamekee_state["last_failure_at"] = self._now()
+                    raise GameKeeProbeFailure(f"状态落盘失败: {exc}") from exc
+                self.ctx.logger.info(
+                    "GameKee 探查完成（trigger=%s）：六页无变化，索引保持（last_verified 已推进）", trigger
+                )
+                return self._gamekee_index or {}
+            # 2. 有变化：完整重建（IO 全部在 to_thread）
+            built_at_before = float(self._gamekee_state.get("index_built_at") or 0)
+            index = await asyncio.to_thread(gamekee_build_index, proxy_url)
+            if generation != self._gamekee_probe_generation:
+                self.ctx.logger.info("GameKee 探查结果已过期（实例被卸载/重载），不发布")
+                raise GameKeeProbeFailure("stale generation")
+            await self._publish_gamekee_index(index)
+            self._gamekee_state["last_verified"] = self._now()
+            self._gamekee_state["index_built_at"] = int(index.get("built_at") or 0)
+            try:
+                await self._save_gamekee_state_async()
+            except OSError as exc:
+                # 状态落盘失败：内存回滚（计时未重置）+ 登记失败完成时刻
+                #（转 ProbeFailure 绕过通用失败分支，须自行登记 30min 重试基准）
+                self._gamekee_state["last_verified"] = last_verified_before
+                self._gamekee_state["index_built_at"] = built_at_before
+                self._gamekee_state["last_failure_at"] = self._now()
+                raise GameKeeProbeFailure(f"状态落盘失败: {exc}") from exc
+            self.ctx.logger.info(
+                "GameKee 探查成功（trigger=%s）：%d 小节，已发布索引",
+                trigger, len(index.get("characters") or []),
+            )
+            return index
+        except asyncio.CancelledError:
+            raise
+        except GameKeeProbeFailure as exc:
+            # 失败终态补到批次（等待者拿同一异常，不重拉不误成功）
+            raise
+        except BaseException as exc:
+            # 失败完成时刻：30min 重试从此刻起算（非尝试开始）
+            self._gamekee_state["last_failure_at"] = self._now()
+            try:
+                await self._save_gamekee_state_async()
+            except OSError:
+                pass
+            self.ctx.logger.warning("GameKee 探查失败（trigger=%s）：%s", trigger, str(exc)[:200])
+            # 失败终态补到批次（等待者拿同一异常，不重拉不误成功）
+            raise GameKeeProbeFailure(str(exc)) from exc
+
+    async def ensure_gamekee_index(self) -> Dict[str, Any]:
+        """查询入口的懒刷新（P2 入口③）：绑定 last_verified 与 index_ttl。
+
+        索引不可用（None）或 last_verified 距今超过 index_ttl_minutes → 先探查
+        再返回；gate 保证并发查询共享同一次探查。探查失败时：有旧索引则带旧索引
+        降级服务（并发等来的失败结果同样走这条旧快照路径，不隐式重试）；无旧索引
+        则向上抛（handler 转用户可见"攻略源暂不可用"）。
+        """
+        ttl_seconds = max(1, int(self.config.gamekee.index_ttl_minutes)) * 60
+        last_verified = float(self._gamekee_state.get("last_verified") or 0)
+        needs_refresh = (
+            self._gamekee_index is None
+            or not last_verified
+            or (self._now() - last_verified) > ttl_seconds
+        )
+        if not needs_refresh:
+            return self._gamekee_index  # type: ignore[return-value]
+        try:
+            return await self._run_gamekee_probe(trigger="lazy")
+        except GameKeeProbeFailure:
+            if self._gamekee_index is not None:
+                self.ctx.logger.warning("GameKee 懒刷新失败，使用旧快照服务本次查询")
+                return self._gamekee_index
+            raise
+
+    def _resolve_guide_aliases(self) -> Dict[str, str]:
+        """config [overrides.aliases] → match_guides 别名表（alias→official）。"""
+        return {
+            entry.alias.strip(): entry.official.strip()
+            for entry in self.config.overrides.aliases
+            if entry.alias.strip() and entry.official.strip()
+        }
 
     def _resolve_stream_id(self, kwargs: dict) -> str:
         """从工具调用 kwargs 提取 stream_id（直发/去重/未找到发送共用）。"""
@@ -526,13 +767,42 @@ class StellaSoraPlugin(MaiBotPlugin):
             user_id=str(kwargs.get("user_id") or ""),
         )
 
+    # 1.5.0 QQ 限定平台的短标签（插件仅适配 QQ 适配器；其他平台无发送回执保障）
+    _SUPPORTED_PLATFORMS = frozenset({"qq"})
+
+    async def _platform_allowed(self, **kwargs) -> bool:
+        """执行层平台校验（P3）：当前流平台必须明确属于支持列表。
+
+        平台来源优先级：宿主直传 platform 字段 → session_id/stream_id 命中
+        `_session_platform_cache`（Hook 反查链路填充）→ 有 session_id 时主动
+        反查一次（直调工具不经 Hook，缓存可能是冷的）。全 miss 即未知平台，
+        保守拒绝（宁可漏不可错）：非支持平台的调用不发起任何网络抓取。
+        """
+        explicit = str(kwargs.get("platform") or "").strip().lower()
+        if explicit:
+            return explicit in self._SUPPORTED_PLATFORMS
+        session_id = str(kwargs.get("session_id") or "").strip()
+        cache_key = session_id or self._resolve_stream_id(kwargs)
+        cached = self._session_platform_cache.get(cache_key) if cache_key else None
+        if cached is None and session_id:
+            # 主动反查（顺带填充 group/user 身份缓存）；失败/未命中视为未知
+            await self._resolve_session_identity(session_id)
+            cached = self._session_platform_cache.get(session_id)
+        session_platform = str(cached or "").strip().lower()
+        if session_platform:
+            return session_platform in self._SUPPORTED_PLATFORMS
+        # 平台未知：保守拒绝
+        return False
+
     async def _resolve_session_identity(self, session_id: str) -> tuple[str, str] | None:
-        """session_id → (group_id, user_id)，供 Hook 在暴露层复现 _denied 判定。
+        """session_id → (group_id, user_id, platform)，供 Hook 复现授权判定。
 
         payload 只有 MD5 形态的 session_id（不可反解），经宿主 chat.get_all_streams
         反查；缓存命中前每个 planner 内部轮都会触发本 hook，必须落缓存避免每轮
         全量 RPC。查询失败/未命中返回 None——调用方 fail-open 放行，漏拦由
-        handler 内 _denied 兜底（查询故障不得把授权聊天的工具弄丢）。
+        handler 内 _denied/_platform_allowed 兜底（查询故障不得把授权聊天的工具弄丢）。
+        返回值第二处消费：platform 写入 _session_platform_cache，供执行层
+        _platform_allowed 使用（1.5.0 QQ 限定）。
         """
         if not session_id:
             return None
@@ -548,6 +818,10 @@ class StellaSoraPlugin(MaiBotPlugin):
                 if len(self._session_identity_cache) >= MAX_SESSION_CACHE_ENTRIES:
                     self._session_identity_cache.clear()
                 self._session_identity_cache[session_id] = identity
+                platform = str(stream.get("platform") or "").strip().lower()
+                if len(self._session_platform_cache) >= MAX_SESSION_CACHE_ENTRIES:
+                    self._session_platform_cache.clear()
+                self._session_platform_cache[session_id] = platform
                 return identity
         except Exception as exc:
             self.ctx.logger.warning("Hook 解析会话身份失败（fail-open 放行）: %s", exc)
@@ -563,23 +837,33 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def _filter_planner_tools(
         self, tool_definitions: list | None = None, session_id: str = "", **kwargs
     ) -> dict:
-        """未授权聊天的 planner 工具清单前置拦截：剔除即零 token 暴露。
+        """未授权/非平台聊天的 planner 工具清单前置拦截：剔除即零 token 暴露。
 
-        只在本次请求定义里按名剔除（deferred 提醒文本不经本 hook，残留一行精简
-        提醒属已知边界）；执行层另有各工具 handler 的 _denied 兜底。
+        P3 两层口径：**平台 + 黑白名单双判定**——仅当确认为 QQ 平台且通过名单
+        才保留工具；非 QQ、反查失败（未知平台/身份）一律剔除（保守剔除与执行层
+        同口径，宁可漏不可错）。deferred 提醒文本不经本 hook，残留一行精简提醒
+        属已知边界；执行层另有 handler 的 _denied/_platform_allowed 兜底。
         """
         defs = tool_definitions if isinstance(tool_definitions, list) else []
         if not defs:
             return {"action": "continue"}
         identity = self._session_identity_cache.get(session_id)
-        if identity is None:
+        platform = self._session_platform_cache.get(session_id)
+        if identity is None or platform is None:
             identity = await self._resolve_session_identity(session_id)
-        if identity is None:
-            return {"action": "continue"}
+            platform = self._session_platform_cache.get(session_id)
+        # 反查失败（身份或平台未知）：保守剔除
+        if identity is None or not platform:
+            return self._strip_tool_definitions(defs, kwargs, session_id)
         group_id, user_id = identity
-        denied = self._denied(group_id=group_id, user_id=user_id)
-        if not denied:
-            return {"action": "continue"}
+        if not str(platform).strip().lower() in self._SUPPORTED_PLATFORMS:
+            return self._strip_tool_definitions(defs, kwargs, session_id)
+        if self._denied(group_id=group_id, user_id=user_id):
+            return self._strip_tool_definitions(defs, kwargs, session_id)
+        return {"action": "continue"}
+
+    def _strip_tool_definitions(self, defs: list, kwargs: dict, session_id: str) -> dict:
+        """从工具定义清单剔除本插件工具并回填 modified_kwargs（整体替换语义）。"""
         kept = [
             d for d in defs
             if not isinstance(d, dict) or d.get("function", {}).get("name") not in _TOOL_NAMES
@@ -591,562 +875,139 @@ class StellaSoraPlugin(MaiBotPlugin):
         modified = {**kwargs, "session_id": session_id, "tool_definitions": kept}
         return {"action": "continue", "modified_kwargs": modified}
 
-    # ===== 直接发送模式 =====
-
-    # 直发 Prompt 双模板：how 用 docs/prompts_how.md（含 {persona_block}/{question}/{material} 与内联游戏知识+回答规则 1-9），
-    # what 用 docs/prompts_what.md（模块化材料说明 +【约会】输出规则 + 禁止编造）。
-    # 由模块级 _load_prompt_doc_how() / _load_prompt_doc_what() 加载（模块级缓存，修改后需重启生效）；
-    # 加载失败为 None，_direct_send 开头显式判 None 返回"未找到相关攻略。"，不回退内嵌旧文。
-    # 本 Prompt 为插件自维护文档模板，非 prompts/ 目录模板，不受多语言同步约束。
-    _DIRECT_SEND_PROMPT_HOW: Optional[str] = _load_prompt_doc_how()
-    _DIRECT_SEND_PROMPT_WHAT: Optional[str] = _load_prompt_doc_what()
-
-    async def _config_get_value(self, key: str, default: Any) -> Any:
-        """读取宿主全局配置值（Host 返回 {success, value} 结构，解包 value）。"""
-        result = await self.ctx.config.get(key, default)
-        if isinstance(result, dict) and "value" in result:
-            return result.get("value") if result.get("success") else default
-        return result
-
-    async def _build_persona_block(self) -> str:
-        """构建与 replyer 同源的人格与表达风格块。
-
-        读取路径与主程序 _build_personality_prompt / _select_reply_style 一致：
-        personality.personality / bot.nickname / bot.alias_names / personality.reply_style /
-        experimental.emotion_trait
-        """
-        try:
-            bot_name = str(await self._config_get_value("bot.nickname", "") or "").strip()
-            alias_names = await self._config_get_value("bot.alias_names", []) or []
-            personality = str(
-                await self._config_get_value("personality.personality", "") or ""
-            ).strip()
-            reply_style = str(
-                await self._config_get_value("personality.reply_style", "") or ""
-            ).strip()
-            emotion_trait = str(
-                await self._config_get_value("experimental.emotion_trait", "") or ""
-            ).strip()
-
-            if not bot_name and not personality:
-                return ""
-
-            bot_aliases = (
-                f"，也有人叫你{','.join(str(a) for a in alias_names)}" if alias_names else ""
-            )
-            lines = [f"【你的身份与人格】", f"你的名字是{bot_name or '麦麦'}{bot_aliases}。"]
-            lines.append(personality or "是人类。")
-            if reply_style:
-                lines.append(f"【表达风格】\n{reply_style}")
-            if emotion_trait:
-                # 与主程序 PERSONALITY_EMOTION_SUFFIXES 保持一致的本地副本
-                # （不直接 import src.*，保证插件在 Runner 沙箱内的独立性）
-                emotion_suffixes = {
-                    "rational_calm": "你在对话中保持理性冷静，情绪波动小，即使遇到有趣的事也只会淡淡回应。",
-                    "neutral": "你情绪平稳，表达自然，偶尔流露出真实情绪。",
-                    "sentimental": "你情感丰富细腻，容易共情，表达中带着真实的喜怒哀乐。",
-                }
-                suffix = emotion_suffixes.get(emotion_trait)
-                if suffix:
-                    lines.append(suffix)
-            return "\n".join(lines) + "\n\n"
-        except Exception as exc:
-            self.ctx.logger.warning("构建人格块失败，将使用无人格模式: %s", exc)
-            return ""
-
-    async def _send_direct_answer(self, answer: str, stream_id: str, use_forward: bool) -> bool:
-        """直发成品统一出口：how 走合并转发（长文收进转发卡不刷屏），what 维持文本。
-
-        forward 为整卡单节点；processed_plain_text 传成品摘要，供消息历史展示
-        （宿主默认"[转发消息]"无信息量）。宿主侧失败返回 False（不抛异常），
-        传输异常同样归一为 False。
-        """
-        try:
-            if use_forward:
-                return bool(
-                    await self.ctx.send.forward(
-                        [
-                            {
-                                "nickname": _FORWARD_NICKNAME,
-                                "segments": [{"type": "text", "content": answer}],
-                            }
-                        ],
-                        stream_id,
-                        processed_plain_text=answer[:120],
-                    )
-                )
-            return bool(await self.ctx.send.text(answer, stream_id))
-        except Exception:
-            self.ctx.logger.exception("直发成品发送异常: stream=%s", stream_id)
-            return False
-
-    async def _direct_send(
-        self,
-        *,
-        tool_name: str,
-        question: str,
-        material: str,
-        direct: bool = True,
-        presets: bool = False,
-        query: str = "",
-        use_forward: bool = False,
-        **kwargs,
-    ) -> dict:
-        """攻略加工：LLM 把攻略资料加工成中文成品。
-
-        direct=True（默认）：加工后发送聊天——how（use_forward=True）以合并转发
-          整卡送达，what 为普通文本；返回"已发送"。
-          加工 prompt 注入 bot 人格——成品即最终回复，需要与 bot 口吻一致。
-        direct=False：加工后返回 LLM 成品给 planner，由 replyer 组织回复。
-          加工 prompt **不注入人格**——中间产物保持客观攻略体，人格由
-          replyer 统一注入；否则人格化语气会在 replyer 历史渲染（无归属
-          纯文本）中被误归属为用户发言（bot 与用户同名时必现）。
-
-        失败语义：提示词文档缺失/目标缺失返回"未找到相关攻略。"；
-        LLM 加工失败（异常/success 非 True/响应空白）且资料非空时，
-        降级为失败回传——用系统说明前缀包装原始资料返回 planner，不再谎报"未找到"。
-        """
-        not_found = {"name": tool_name, "content": "未找到相关攻略。"}
-
-        # 提示词双模板选择：how → prompts_how.md，what → prompts_what.md
-        is_what = tool_name.endswith("_what")
-        prompt_template = self._DIRECT_SEND_PROMPT_WHAT if is_what else self._DIRECT_SEND_PROMPT_HOW
-        # 提示词单一事实源守卫：加载失败时不静默兜底、不回退内嵌旧文
-        if prompt_template is None:
-            self.ctx.logger.error("%s 直发提示词文档缺失，无法加工攻略，返回未找到", tool_name)
-            return not_found
-
-        question = (question or "").strip()
-        if not question:
-            self.ctx.logger.warning("直接发送模式缺少用户问题，返回未找到")
-            return not_found
-
-        stream_id = self._resolve_stream_id(kwargs)
-        if direct and not stream_id:
-            self.ctx.logger.warning("直接发送模式缺少 stream_id，无法确定发送目标")
-            return not_found
-
-        # 直发成品缓存查取：仅对 direct=True 生效；TTL <= 0 时显式跳过
-        cache_key = ""
-        if direct and self.config.query.answer_cache_ttl > 0:
-            inject_persona = self.config.query.inject_persona
-            cache_key = f"{tool_name}|{query}|{question}|{presets}|{self.config.query.llm_model}|{self.config.plugin.config_version}|{inject_persona}|{self._code_fingerprint()}"
-            cache = self._get_answer_cache()
-            cached_answer = cache.get(cache_key)
-            if cached_answer:
-                self.ctx.logger.info("直接发送缓存命中: key=%s", cache_key)
-                if not await self._send_direct_answer(cached_answer, stream_id, use_forward):
-                    self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
-                    return not_found
-                # 发送成功即登记去重守卫，保证重复可拦截
-                if query and stream_id:
-                    self._recent_direct[(stream_id, query)] = time.time()
-                    self.ctx.logger.info("直发去重登记: key=%s", (stream_id, query))
-                self.ctx.logger.info(
-                    "直接发送完成(缓存): %s -> stream=%s, 长度=%d",
-                    tool_name,
-                    stream_id,
-                    len(cached_answer),
-                )
-                return {
-                    "name": tool_name,
-                    "content": _ALREADY_SENT_CONTENT,
-                }
-            else:
-                self.ctx.logger.info("直接发送缓存未命中: key=%s", cache_key)
-
-        # 人格注入只发生在直发模式：回传模式的成品是中间产物，
-        # 客观攻略体避免 replyer 归属混乱（人格由 replyer 统一负责）
-        if self.config.query.inject_persona and direct:
-            persona_block = await self._build_persona_block()
-        elif not direct:
-            persona_block = (
-                "【输出要求】以下是转交给主回复流程的攻略材料，"
-                "请用客观、清晰、条理分明的攻略体输出，"
-                "不要使用任何人格语气或傲娇卖萌措辞。\n\n"
-            )
-        else:
-            persona_block = ""
-        # 游戏知识已内联至 prompts_how.md 正文，无需运行时注入；what 模板无知识块
-        prompt = prompt_template.format(
-            persona_block=persona_block,
-            question=question,
-            material=material,  # 资料全量交由 LLM 加工，不截断
-        )
-        llm_model = (self.config.query.llm_model or "").strip()
-
-        def _llm_failed(reason: str) -> dict:
-            """LLM 加工失败的统一降级出口。
-
-            资料非空 → 失败回传：用系统说明前缀包装原始资料返回 planner，
-            不写直发成品缓存，不再谎报"未找到"；
-            资料为空 → 无内容可回传，维持"未找到相关攻略。"。
-            """
-            if (material or "").strip():
-                self.ctx.logger.warning(
-                    "LLM 加工失败，降级回传原始资料（不写成品缓存）: 原因=%s, tool=%s",
-                    reason,
-                    tool_name,
-                )
-                return {"name": tool_name, "content": _FAILURE_RELAY_PREFIX + material}
-            self.ctx.logger.warning(
-                "LLM 加工失败且资料为空，返回未找到: 原因=%s, tool=%s", reason, tool_name
-            )
-            return not_found
-
-        try:
-            gen_kwargs: dict[str, Any] = {"prompt": prompt}
-            if llm_model:
-                # 任务名必须经 task_name 传：SDK 2.8.1 起 payload 恒含 task_name，
-                # 宿主据此把 model 解释为「直选模型名」而非任务名——继续传
-                # model="utils" 会被当作物理模型名解析失败（llm.generate 必炸）。
-                gen_kwargs["task_name"] = llm_model
-            # 内部 LLM 预算须小于工具预算（见模块顶部常量注释），避免慢模型下
-            # LLM 先于工具超时导致静默降级；timeout_ms 由 SDK 绑定为本次 RPC 超时
-            gen_kwargs["timeout_ms"] = _LLM_RPC_TIMEOUT_MS
-            llm_result = await self.ctx.llm.generate(**gen_kwargs)
-        except Exception as exc:
-            self.ctx.logger.exception("直接发送模式 LLM 调用异常")
-            return _llm_failed(f"LLM 调用异常: {exc}")
-
-        answer = str((llm_result or {}).get("response") or "").strip()
-        if not (llm_result or {}).get("success") or not answer:
-            return _llm_failed(str((llm_result or {}).get("error") or "LLM 未返回内容"))
-
-        # 回传模式（direct=False）：LLM 成品返回给 planner，由 replyer 带人格回复。
-        # 必须让归属标记跟随正文进入 reply_reference：主程序会把 reply_reference
-        # 渲染成 user 角色消息（无来源标记），裸正文会被当成"用户自己粘贴的内容"
-        # （bot 与用户同名时必现）。标记行随正文走，replyer 端才能识别归属。
-        if not direct:
-            wrapped = (
-                "[系统说明：以下是攻略插件查询到的攻略资料，是你（bot）查询所得，"
-                "不是用户说的话。调用 reply 工具时，请把下方【攻略资料】整块"
-                "（含首行标记）原样放入 reply_reference 参数，不要删改标记行，"
-                "由回复流程基于它组织语言]\n"
-                "【攻略资料·bot查询所得，非用户发言】\n"
-                + answer
-            )
-            self.ctx.logger.info(
-                "攻略已加工回传: %s, 长度=%d", tool_name, len(wrapped)
-            )
-            return {"name": tool_name, "content": wrapped}
-
-        if not await self._send_direct_answer(answer, stream_id, use_forward):
-            self.ctx.logger.error("直接发送模式消息发送失败: stream=%s", stream_id)
-            return not_found
-
-        # 去重登记：只有真正直发成功后才写入
-        if query and stream_id:
-            self._recent_direct[(stream_id, query)] = time.time()
-            self.ctx.logger.info("直发去重登记: key=%s", (stream_id, query))
-
-        # 写入直发成品缓存
-        if direct and self.config.query.answer_cache_ttl > 0 and cache_key:
-            cache = self._get_answer_cache()
-            cache.set(cache_key, answer)
-
-        self.ctx.logger.info(
-            "直接发送完成: %s -> stream=%s, 长度=%d", tool_name, stream_id, len(answer)
-        )
-        return {
-            "name": tool_name,
-            "content": _ALREADY_SENT_CONTENT,
-        }
-
     # ===== Tool 组件 =====
 
     @Tool(
-        "lookup_game_term",
-        description="查询星塔旅人游戏专有名词的中英文对照和游戏内ID。"
-                    "输入：中文名或英文名（单个词，不要传整句）。"
-                    "输出：{id, en, cn, cat} 或未找到。"
-                    "适用：遇到不认识的游戏术语时，先调用此工具获取ID和英文名，再调用其他工具。",
-        parameters=[
-            ToolParameterInfo(
-                name="term",
-                param_type=ToolParamType.STRING,
-                description="中文名或英文名（单个词，不要传整句）",
-                required=True,
-            ),
-        ],
-        platforms="qq",
-        core_tool=True,  # 高频低风险短描述工具：进每轮可见清单，省一次 tool_search 往返
-    )
-    async def handle_lookup(self, term: str = "", **kwargs):
-        if self._denied(**kwargs):
-            return {"name": "lookup_game_term", "content": "当前聊天不在星塔旅人插件的允许范围内。"}
-        self._apply_overrides_config()
-        term = (term or "").strip()
-        if not term:
-            return {"name": "lookup_game_term", "content": "缺少查询词。"}
-        result = lookup_term(term)
-        return {
-            "name": "lookup_game_term",
-            "content": json.dumps(result, ensure_ascii=False),
-        }
-
-    @Tool(
-        "stellasora_what",
-        description="查询星塔旅人客观游戏资料：角色（属性/技能/面板/培养素材/礼物/专武/命座）、"
-                    "秘纹（属性/适配/旋律）、首领怪物（弱点/抗性/机制）、当期讨伐、卡池资讯（含往期，用 as_of 参数）。"
-                    "调用边界：只出客观事实，无主观建议——主观评价类问题不要调用本工具；"
-                    "配队/纹章/秘纹搭配/技能优先度改用 stellasora_how。传参规则见参数说明。",
-        parameters=[
-            ToolParameterInfo(
-                name="query",
-                param_type=ToolParamType.STRING,
-                description="角色/秘纹/首领等对象名本身：只传名字，不带'攻略/资料/素材'等后缀词（中/英均可）；"
-                "概念页直接传概念词——'卡池'返回进行中与近期卡池起止时间，"
-                "'联合讨伐'/'终焉绝响'返回当期首领弱点/抗性/机制，'秘纹'返回秘纹属性总览",
-                required=True,
-            ),
-            ToolParameterInfo(
-                name="question",
-                param_type=ToolParamType.STRING,
-                description="用户的原始问题原文（如'XX的完整资料'），用于生成贴合问题的回答；无法提取时可不传",
-                required=False,
-            ),
-            ToolParameterInfo(
-                name="as_of",
-                param_type=ToolParamType.STRING,
-                description="卡池时间锚点（ISO 日期 YYYY-MM-DD，仅卡池概念页查询时使用）："
-                "用户问往期/历史/指定时间点的卡池（如'三周前的up池'）时，把时间语义解析成该日期传入；当前/本期卡池不传",
-                required=False,
-            ),
-        ],
-        platforms="qq",
-        timeout_ms=_TOOL_RPC_TIMEOUT_MS,
-    )
-    async def handle_what(self, query: str = "", question: str = "", as_of: str = "", **kwargs):
-        if self._denied(**kwargs):
-            return {"name": "stellasora_what", "content": "当前聊天不在星塔旅人插件的允许范围内。"}
-        self._apply_overrides_config()
-        query = (query or "").strip()
-        if not query:
-            return {"name": "stellasora_what", "content": "缺少查询词。"}
-        self.ctx.logger.info("what 查询: %s (group=%s user=%s)", query, kwargs.get("group_id", ""), kwargs.get("user_id", ""))
-        # effective_question（用户原话，question 缺失时回退 query）先于 query_what 计算：
-        # 供工具内部模块化选段（_detect_what_modules）与下方联合查询检测复用同一原话
-        effective_question = (question or "").strip() or query
-        # 抓取/字典/替换为同步重活（urllib 网络 + 正则 CPU），放入线程池，
-        # 避免阻塞 runner 事件循环
-        text = await asyncio.to_thread(
-            query_what,
-            query,
-            self._net_cache_dir_ready(),
-            effective_question,
-            as_of,
-        )
-        # 未找到时不走 LLM 加工，直接返回
-        if "未在字典中找到" in text:
-            return {"name": "stellasora_what", "content": "未在星塔旅人游戏中找到该角色或装备。"}
-        # 命中时 LLM 加工；direct_send=true 直发聊天，false 回传给 replyer
-        # 联合查询检测：用户原话命中 ≥2 个角色名时强制回传，planner 汇总后单条回复避免刷屏
-        # count_character_names 内含正则匹配，同样为同步 CPU 重活，放入线程池
-        direct = self.config.query.direct_send and (
-            await asyncio.to_thread(count_character_names, effective_question)
-        ) < 2
-        # 去重守卫：同流同主题在 dedup_window 内直接拦截
-        dedup_resp = self._dedup_guard("stellasora_what", query, direct, **kwargs)
-        if dedup_resp is not None:
-            return dedup_resp
-        return await self._direct_send(
-            tool_name="stellasora_what",
-            question=effective_question,
-            material=text,
-            direct=direct,
-            presets=False,
-            query=query,
-            **kwargs,
-        )
-
-    @Tool(
         "stellasora_how",
-        description="查询星塔旅人操作指南：配队、纹章搭配、秘纹搭配、技能升级优先度；"
-                    "也答'XX的攻略/怎么玩'与属性泛查（如'风队'）。"
-                    "用户问'XX的完整资料'改用 stellasora_what。"
-                    "question 必须传用户原话（联合查询识别依赖原文），详见参数说明。",
+        description="查询星塔旅人一图流攻略：返回角色或属性的开局/配队/纹章/秘纹攻略图"
+                    "（GameKee 攻略组授权转载）。'XX攻略/XX怎么玩/风队怎么玩'调用本工具。"
+                    "角色客观资料（属性/技能/素材）不在本工具范围。",
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="角色名，可空格分隔多个（如'XX YY'）；纯属性泛查直接传属性词；question 缺失时作为兜底归一（中/英均可）",
+                description="用户的问题原文或角色名（如'艾蕾攻略'/'风队怎么玩'/'春科直伤篇'）；"
+                "支持别名与属性泛查（水/火/光/暗/风/地 + 队/系）",
                 required=True,
-            ),
-            ToolParameterInfo(
-                name="question",
-                param_type=ToolParamType.STRING,
-                description="用户的原始问题原文，逐字传入（如'XX YY攻略'）——联合查询识别与'第一个角色'排序依赖原文，不可改写或省略",
-                required=True,
-            ),
-            ToolParameterInfo(
-                name="presets",
-                param_type=ToolParamType.BOOLEAN,
-                description="是否查询预设码（仅用户明确要求预设码时为 true）",
-                required=False,
             ),
         ],
         platforms="qq",
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
-    async def handle_how(self, query: str = "", question: str = "", presets: bool = False, **kwargs):
+    async def handle_how(self, query: str = "", **kwargs):
+        """一图流攻略查询（1.5.0 GameKee 源）：匹配 → 下载 → 合并转发图片。
+
+        P3 两层鉴权：执行层在 _denied（黑白名单）之外先核平台——非 QQ 或
+        平台反查失败（未知）保守拒绝且不发起任何抓取（新链路每次调用有
+        真实网络成本，宁可漏不可错）。
+        """
+        if not await self._platform_allowed(**kwargs):
+            return {"name": "stellasora_how", "content": "该平台暂不支持星塔旅人攻略查询。"}
         if self._denied(**kwargs):
             return {"name": "stellasora_how", "content": "当前聊天不在星塔旅人插件的允许范围内。"}
-        self._apply_overrides_config()
         query = (query or "").strip()
         if not query:
             return {"name": "stellasora_how", "content": "缺少查询词。"}
-        self.ctx.logger.info(
-            "how 查询: %s presets=%s (group=%s user=%s)",
-            query, presets, kwargs.get("group_id", ""), kwargs.get("user_id", ""),
-        )
-        # 表查询/区块解析为同步重活，放入线程池执行
-        effective_question = (question or "").strip() or query
-        # 统一表驱动链路：问句提取角色（含别名预处理，支持多角色）→
-        # 兜底归一 query 词 → char_id 集 → find_team_rows 交集查询。
-        # 问句未命中任何角色时尝试纯属性泛查（如"风队"），仍未命中则"未找到相关攻略"。
-        # 问句保序提取——联合查询详略与首角色排序依赖问句出现顺序。
-        found_names = await asyncio.to_thread(find_character_names_ordered, effective_question)
-        if not found_names:
-            # 问句未命中角色名：用 query 参数做兜底归一（支持空格分隔多名）
-            for token in query.split():
-                res = lookup_term(token)
-                if res and not res.get("not_found") and res.get("cat") == "Character":
-                    cn = res["cn"]
-                    if cn not in found_names:
-                        found_names.append(cn)
-        if found_names:
-            member_ids = await asyncio.to_thread(self._resolve_character_ids, found_names)
-            rows = await asyncio.to_thread(find_team_rows, member_ids)
-            miss_desc = f"角色={found_names} member_ids={member_ids}"
-        else:
-            # 纯属性泛查：问句含「元素词+队/系/属性」→ 该元素全量候选行，交优先级过滤
-            element = detect_element_query(effective_question)
-            if not element:
-                self.ctx.logger.info("how 表查询未命中角色且非属性泛查: query=%s question=%s", query, effective_question)
-                return await self._send_or_relay("未找到相关攻略。", effective_question, presets, **kwargs)
-            member_ids = []
-            rows = await asyncio.to_thread(find_team_rows, [], element)
-            miss_desc = f"元素={element}"
-        if not rows:
-            self.ctx.logger.info("how 表未命中: %s（交集为空）", miss_desc)
-            return await self._send_or_relay("未找到相关攻略。", effective_question, presets, **kwargs)
-        # 热门优先过滤（单角色/纯属性泛查统一）：热门全出，热门区块<3 按表序补冷门至 3；
-        # 问句含 全部/所有/完整/详细 时不过滤
-        rows = await asyncio.to_thread(apply_priority_filter, rows, effective_question)
-        text = await asyncio.to_thread(
-            query_how_rows,
-            rows,
-            bool(presets),
-            effective_question,
-        )
-        return await self._send_or_relay(text, effective_question, presets, **kwargs)
+        self.ctx.logger.info("how 查询: %s (group=%s user=%s)", query, kwargs.get("group_id", ""), kwargs.get("user_id", ""))
 
-    # ===== 去重守卫 =====
-
-    def _dedup_guard(self, tool_name: str, query: str, direct: bool, **kwargs) -> Optional[dict]:
-        """直发去重守卫：同流同主题在 dedup_window 内直接拦截。
-
-        返回拦截响应 dict；放行时返回 None。同时清理过期键（含硬上界保护，防多群内存增长）。
-        """
         stream_id = self._resolve_stream_id(kwargs)
-        now = time.time()
-        # 清理过期键（含硬上界保护，防多群内存增长）
-        if len(self._recent_direct) > MAX_DEDUP_ENTRIES:
-            self._recent_direct.clear()
-        else:
-            expired = [k for k, ts in self._recent_direct.items() if now - ts > 10 * self.config.query.dedup_window]
-            for k in expired:
-                del self._recent_direct[k]
-        dedup_key = (stream_id, query)
-        if direct and dedup_key in self._recent_direct and (now - self._recent_direct[dedup_key]) < self.config.query.dedup_window:
-            elapsed = int(now - self._recent_direct[dedup_key])
-            self.ctx.logger.info("直发去重拦截: key=%s 距上次=%ds", dedup_key, elapsed)
-            return {"name": tool_name, "content": "该主题的攻略刚刚已直接发送过，请勿重复发送。请立即调用 stop 工具结束本轮。"}
-        return None
+        if not stream_id:
+            return {"name": "stellasora_how", "content": "缺少发送目标（stream_id）。"}
 
-    @staticmethod
-    def _resolve_character_ids(names: list) -> list[int]:
-        """角色中文名列表 → 去重后的 CharId 列表（经共享查词服务归一）。"""
-        ids: list[int] = []
-        for name in names:
-            res = lookup_term(name)
-            if res and not res.get("not_found") and res.get("cat") == "Character":
-                try:
-                    char_id = int(str(res["id"]).split(".")[1])
-                except (IndexError, ValueError):
-                    continue
-                if char_id not in ids:
-                    ids.append(char_id)
-        return ids
+        # 懒刷新拿索引（P2 入口③：fresh 零探查；stale 先刷新；失败带旧快照/上抛）
+        try:
+            index = await self.ensure_gamekee_index()
+        except GameKeeProbeFailure as exc:
+            self.ctx.logger.error("GameKee 索引不可用: %s", exc)
+            await self.ctx.send.text("攻略源暂时不可用，请稍后再试。", stream_id)
+            return {"name": "stellasora_how", "content": "已向聊天发送'攻略源暂时不可用'提示，请调用 stop 结束本轮。"}
 
-    async def _send_or_relay(self, text: str, effective_question: str, presets, **kwargs):
-        """how 查询的直发/回传公共路径（未找到直发提示 + 去重守卫 + LLM 加工）。
-
-        直发判定由配置 direct_send 决定；直发成品经合并转发整卡送达
-        （_send_direct_answer），未找到提示仍为单行文本。
-        未找到语义（用户裁定）：direct_send=true 时不再回传 planner——
-        直接向聊天发送用户可读提示并返回"已发送"确认，planner 只需 stop 结束本轮，
-        避免 planner 拿到否定结果后再组织一轮多余回复；direct_send=false 维持回传。
-        """
-        query = effective_question
-        direct = self.config.query.direct_send
-        stream_id = self._resolve_stream_id(kwargs)
-        # 去重守卫前移到未找到短路之前：未找到直发提示同样登记去重键（见下），
-        # 同 query 重复未找到只发一条提示，防 planner 重试导致"没有查到相关内容"刷屏
-        dedup_resp = self._dedup_guard("stellasora_how", query, direct, **kwargs)
-        if dedup_resp is not None:
-            return dedup_resp
-        # 未找到短路（用户裁定）：不走 LLM 加工、不让 planner 组织否定回复。
-        # 直发模式：提示文本直接发送到聊天，planner 收"已发送"告知只需 stop；
-        # 回传模式：维持原文返回 planner（不直发，replyer 自行组织）。
-        if not (text or "").strip() or "未找到相关攻略" in text:
-            not_found = {"name": "stellasora_how", "content": "未找到相关攻略。"}
-            if not direct:
-                return not_found
-            self.ctx.logger.info("how 未找到，直发模式直接发送提示: stream=%s", stream_id)
-            if stream_id:
-                try:
-                    await self.ctx.send.text("攻略库里没有查到相关内容，换个说法或换个角色试试～", stream_id)
-                except Exception:
-                    self.ctx.logger.exception("how 未找到提示发送异常")
-                    return not_found
-                # 提示直发与成品同等登记去重：窗口内同主题重试直接拦截
-                if query:
-                    self._recent_direct[(stream_id, query)] = time.time()
+        # 匹配（同步轻活，直接执行）
+        hits, miss_reason = gamekee_match_guides(index, query, aliases=self._resolve_guide_aliases())
+        if not hits:
+            self.ctx.logger.info("how 未命中: query=%s reason=%s", query, miss_reason)
+            await self.ctx.send.text("攻略库里暂时没有该角色/属性的图流攻略，换个说法或换个角色试试～", stream_id)
             return {
                 "name": "stellasora_how",
-                "content": (
-                    "已向聊天发送'未找到相关攻略'的提示。你不需要也不应该再调用 reply 工具，"
-                    "请立即调用 stop 工具结束本轮即可。"
-                ),
+                "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
             }
-        return await self._direct_send(
-            tool_name="stellasora_how",
-            question=effective_question,
-            material=text,
-            direct=direct,
-            presets=presets,
-            query=query,
-            use_forward=True,
-            **kwargs,
-        )
+
+        # 下载图片（同步重活进线程池；webp 可配）
+        prefer_webp = bool(self.config.gamekee.prefer_webp)
+        cache_dir = Path(self.ctx.paths.runtime_dir) / "cache" / "gamekee_images"
+        images: list[dict] = []
+        download_errors: list[str] = []
+        for hit in hits:
+            src = hit["image_urls"][-1]  # 末张 = 完整版长图
+            try:
+                data = await asyncio.to_thread(
+                    gamekee_download_image, src, cache_dir, prefer_webp
+                )
+                images.append({
+                    "name": hit["name"],
+                    "note": hit.get("note") or "",
+                    "element_cn": _ELEMENT_CN_LABELS.get(hit.get("element"), hit.get("element", "")),
+                    "base64": base64.b64encode(data).decode("ascii"),
+                })
+            except GameKeeError as exc:
+                download_errors.append(f"{hit['name']}: {str(exc)[:120]}")
+        if not images:
+            self.ctx.logger.error("how 图片全部下载失败: %s", "; ".join(download_errors))
+            await self.ctx.send.text("攻略图片下载失败，请稍后再试。", stream_id)
+            return {"name": "stellasora_how", "content": "已向聊天发送'图片下载失败'提示，请调用 stop 结束本轮。"}
+        if download_errors:
+            self.ctx.logger.warning("how 部分图片下载失败（跳过节点）: %s", "; ".join(download_errors))
+
+        # 统一合并转发（用户裁决：单角色/属性泛查都走 forward；单角色=单节点图文混排，
+        # 多角色=每角色一节点；节点内备注 + 来源）
+        nodes = []
+        for img in images:
+            segments = [
+                {
+                    "type": "image",
+                    "content": img["base64"],
+                    "filename": f"{img['name']}_guide.webp",
+                }
+            ]
+            note_parts = [f"【{img['element_cn']}】{img['name']}"]
+            if img["note"]:
+                note_parts.append(img["note"])
+            note_parts.append("来源：GameKee 星塔旅人 wiki（星塔攻略组）")
+            segments.append({"type": "text", "content": "\n".join(note_parts)})
+            nodes.append({"nickname": _FORWARD_NICKNAME, "segments": segments})
+        try:
+            sent = await self.ctx.send.forward(nodes, stream_id)
+        except Exception:
+            self.ctx.logger.exception("how 合并转发发送异常: stream=%s", stream_id)
+            return {"name": "stellasora_how", "content": "攻略图片发送失败，请调用 stop 结束本轮。"}
+        if not sent:
+            self.ctx.logger.error("how 合并转发返回失败: stream=%s", stream_id)
+            return {"name": "stellasora_how", "content": "攻略图片发送失败，请调用 stop 结束本轮。"}
+        return {
+            "name": "stellasora_how",
+            "content": (
+                f"攻略图已直接发送到聊天（{len(images)} 张）。用户已经可以看到完整答案，"
+                "你不需要也不应该再调用 reply 工具。请立即调用 stop 工具结束本轮。"
+            ),
+        }
 
     # ===== Command 指令 =====
 
     @Command(
         "st_update",
-        description="触发星塔旅人全量数据更新：中英字典重建 + 攻略/预设码/ss-data/榜单离线同步，后台执行完成后插件自动重载生效（首次安装也用它初始化数据）",
+        description="触发星塔旅人数据更新（操作员）：强刷当期两榜数据 + 探查 GameKee 攻略源更新，后台执行完成后报告各榜结果（1.5.0 起不再 reload 插件，数据即时生效）",
         pattern=r"^/st_update",
         permission="operator",
     )
     async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """全量更新入口：鉴权与在飞闸门后转后台执行，handler 秒回。
+        """/st_update 入口（1.5.0）：鉴权 → 提前登记在飞闸门 → 后台执行。
 
-        字典重建 + 离线同步全程可超宿主组件 RPC 的 60s 超时预算，必须 create_task
-        后台化；返回拦截等级 2 使触发消息不再进入 planner。_update_task 句柄兼作
-        任务强引用与在飞判定（后台化后连点会双写数据，必须拦）。
+        闸门登记**先于** await 发送进度消息（审查修复：旧实现登记在 await 之后，
+        连发两调用可能同时通过）。全程可超宿主组件 RPC 60s 超时，必须 create_task
+        后台化；返回拦截等级 2 使触发消息不进 planner。_update_task 兼作任务强引用。
         """
+        if not await self._platform_allowed(**kwargs):
+            return False, "该平台暂不支持星塔旅人更新指令。", 1
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人更新指令。", 1
 
@@ -1154,11 +1015,12 @@ class StellaSoraPlugin(MaiBotPlugin):
             return False, "已有更新任务进行中，请稍候。", 1
 
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
-        await self._send_update_msg(
-            "正在后台同步星塔旅人数据（字典+离线全量）...", effective_stream_id
-        )
+        # 闸门先行：登记任务句柄后再 await 发送（防连发竞态双写数据）
         self._update_task = asyncio.create_task(self._run_full_update(effective_stream_id))
-        return True, "已启动星塔旅人全量数据更新", 2
+        await self._send_update_msg(
+            "正在后台更新星塔旅人数据（强刷两榜 + 探查攻略源）...", effective_stream_id
+        )
+        return True, "已启动星塔旅人数据更新", 2
 
     async def _send_update_msg(self, text: str, stream_id: str) -> None:
         """向触发流发送更新进度消息；失败仅告警（进度丢失不影响更新本身）。"""
@@ -1170,75 +1032,68 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("发送更新进度消息异常: %s", exc)
 
     async def _run_full_update(self, stream_id: str) -> None:
-        """/st_update 后台全流程：字典重建 → 离线全量同步 → 插件自 reload 使新字典生效。
+        """/st_update 后台全流程（1.5.0）：强刷两榜 + GameKee 探查 + 重置每日计时。
 
-        字典/名字索引是进程内单例（只解析一次），磁盘重建后必须经 reload（宿主
-        purge 插件模块→重 import→on_load）才会捡新——不 reload 则新角色被旧字典
-        挡在名字解析门外（历史故障根因）。reload 锚定"字典阶段成功"：离线数据
-        本就即时生效，字典新而内存旧才是必须消除的状态。
+        不再 reload 插件：字典（唯一进程单例）已删，榜单/索引数据落盘即时生效
+        （裁决 e）。三路结果独立报告（K 节断言：一榜失败不吞另一榜与探查）。
+        探查接管后台排程：手动触发时先 _reset_probe_waiter 让后台任务让路，
+        完成后按结果重置计时（失败不重置——last_verified 只表示成功校验）。
         """
-        data_root = Path(self.ctx.paths.data_dir)
-        cache_dir = Path(self.ctx.paths.runtime_dir) / "cache"
+        lb_dir = self._lb_data_dir_ready()
 
-        # 1. 字典重建（dict.json/names.json 原子落盘；内存捡新在末步 reload）
+        # 1. GameKee 探查（仅接管"启动延迟"中的后台任务；正常等待不动）
+        probe_summary = "探查失败"
         try:
-            dict_stats = await asyncio.to_thread(update_dict_via_preferred_path, data_root)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:  # SystemExit 等 BaseException 不得静默击穿后台任务
-            self.ctx.logger.exception("字典更新异常")
-            await self._send_update_msg(
-                f"星塔旅人字典更新失败：{str(exc)[:200]}。插件未重载，可稍后重试 /st_update。",
-                stream_id,
-            )
-            return
+            if self._background_in_boot_delay():
+                self._reset_probe_waiter()
+            index = await self._run_gamekee_probe(trigger="manual_update")
+            chars = len(index.get("characters") or [])
+            probe_summary = f"索引已更新（{chars} 小节），每日探查计时已重置"
+        except GameKeeProbeFailure as exc:
+            probe_summary = f"探查失败（{str(exc)[:80]}），每日探查计时未重置"
+        # 探查失败后若接管取消了后台排程，恢复一个唤醒任务（P2 排程恢复规则）
+        self._reschedule_after_manual_probe()
 
-        # 2. 离线数据全量同步（infodocs/预设码+统一表/ss-data/榜单；产物即时生效）
-        sync_error: str | None = None
-        try:
-            sync_res = await asyncio.to_thread(
-                sync_offline_data,
-                sync_all=True,
-                offline_dir=data_root / "offline",
-                cache_dir=cache_dir,
-            )
-            self.ctx.logger.info("离线数据同步完成: %s", sync_res)
-        except asyncio.CancelledError:
-            raise  # 停机/卸载取消：干净传播，不发失败消息也不 reload
-        except BaseException as exc:
-            self.ctx.logger.exception("星塔旅人离线数据同步异常")
-            sync_error = str(exc)[:200]
+        # 2. 强刷两榜（绕过内容 TTL；两榜独立报告）
+        board_results = await asyncio.to_thread(refresh_board_for_update, lb_dir)
+        bb, fe = board_results.get("bb", {}), board_results.get("fe", {})
+        bb_text = self._format_board_update_result("联合讨伐", bb)
+        fe_text = self._format_board_update_result("终焉绝响", fe)
 
-        # 3. 缓存失效接线：新表即时读取 + 成品缓存清空
-        #（answer 缓存仅事件循环侧访问，不得挪进 to_thread）
-        reload_team_table()
-        self._clear_answer_cache()
+        await self._send_update_msg(
+            "星塔旅人数据更新完成：\n"
+            f"· 攻略源：{probe_summary}\n"
+            f"· {bb_text}\n"
+            f"· {fe_text}",
+            stream_id,
+        )
 
-        if sync_error:
-            await self._send_update_msg(
-                f"离线数据同步失败：{sync_error}（字典已更新，正在重载生效；"
-                "离线数据可稍后重跑 /st_update）",
-                stream_id,
-            )
-        else:
-            await self._send_update_msg(
-                f"星塔旅人数据更新完成（新增词条 {dict_stats.get('added', 0)}），"
-                "插件正在重载生效...",
-                stream_id,
-            )
+    def _reschedule_after_manual_probe(self) -> None:
+        """手动探查接管后恢复后台唤醒（P2 排程恢复规则，审查修正版）。
 
-        # 4. 自 reload：协程最后一跳——成功时本实例随即销毁，其后不得再发送任何消息
-        try:
-            res = await self.ctx.component.reload_plugin(self.ctx.plugin_id)
-            ok = bool(res.get("success")) if isinstance(res, dict) else bool(res)
-        except Exception as exc:
-            self.ctx.logger.warning("插件自 reload 调用失败: %s", exc)
-            ok = False
-        if not ok:
-            # 宿主 reload 失败会回滚激活旧实例，本协程仍在旧实例上存活，可提示补救
-            await self._send_update_msg(
-                "数据已更新，但自动重载未生效，请重启 MaiBot 使新字典生效。", stream_id
-            )
+        仅当后台任务**已退出**（让路/取消）时才按结果重建：
+        - 手动成功 → last_verified 已推进 → 正常 24h 调度；
+        - 手动失败 → last_failure_at+30min 重试点。
+        后台任务仍在等自己的到期点（正常等待期间）时**完全不动**——手动失败
+        不得把还很远的 24h 截止点改成 30min 重试（计划 P2 恢复规则的限定条件）。
+        """
+        task = self._gamekee_probe_task
+        if task is not None and not task.done():
+            return  # 正常等待期间：保持原排程，手动失败不影响
+        self._gamekee_probe_task = asyncio.create_task(self._schedule_gamekee_probe())
+
+    @staticmethod
+    def _format_board_update_result(mode_cn: str, result: Dict[str, Any]) -> str:
+        """单榜强刷结果 → 一行用户可见文本（独立报告，不吞失败）。"""
+        status = result.get("status", "error")
+        detail = result.get("detail", "")
+        if status == "ok":
+            return f"{mode_cn}：强刷成功（{detail}）"
+        if status == "not_found":
+            return f"{mode_cn}：{detail}"
+        if status == "no_pointer":
+            return f"{mode_cn}：{detail}"
+        return f"{mode_cn}：失败（{detail}）"
 
     @Command(
         "st_bb",
@@ -1259,34 +1114,70 @@ class StellaSoraPlugin(MaiBotPlugin):
         return await self._handle_lb_board("fe", stream_id=stream_id, **kwargs)
 
     async def _handle_lb_board(self, mode: str, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """排行榜双命令共用体：黑白名单闸门 → to_thread 渲染 → 主动发送。
+        """排行榜双命令共用体（1.5.0 图片化）：鉴权+平台 → 拉数据 → HTML 渲染 → 合并转发。
 
         kwargs 必须从命令 handler 透传（宿主注入的 group_id/user_id 为 _denied
         依据，漏传即空身份导致白名单模式全拒）。宿主对命令返回值只记日志不发送
-        （/st_update 同款 self-send 约定），返回值仅作执行摘要。渲染结果
-        (nodes, notice)：单行提示走文本，榜单走合并转发——长文本收进转发卡不刷屏。
+        （self-send 约定），返回值仅作执行摘要。数据层异常（指针缺失/未开榜/
+        拉取失败）走短文本；渲染/发送失败记日志给短提示——**不回退文本榜**
+        （文本榜排版已被聊天侧否决）。
         """
+        if not await self._platform_allowed(**kwargs):
+            return False, "该平台暂不支持星塔旅人排行榜查询。", 1
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人排行榜查询。", 1
 
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
         ttl = int(self.config.leaderboard.ttl_minutes)
+        lb_dir = self._lb_data_dir_ready()
         try:
-            nodes, notice = await asyncio.to_thread(
-                query_lb_board,
-                mode,
-                ttl,
-                self._net_cache_dir_ready(),
+            # 1. 指针 + 数据（同步网络/磁盘重活进线程池；异常消息即用户可见文案）
+            prefix, sid = await asyncio.to_thread(resolve_current_board, mode, lb_dir)
+            cn_data, header, age = await asyncio.to_thread(
+                load_board_for_render, prefix, sid, ttl, lb_dir
             )
+        except ValueError as exc:
+            return False, str(exc), 1
+        except BoardUnavailable as exc:
+            notice = str(exc)
+            self.ctx.logger.info("排行榜不可用: %s", notice)
+            try:
+                await self.ctx.send.text(notice, effective_stream_id)
+            except Exception as send_exc:
+                self.ctx.logger.exception("排行榜提示发送异常: %s", send_exc)
+                return False, f"星塔旅人排行榜提示发送失败: {send_exc}", 1
+            return True, "星塔旅人排行榜提示已发送", 2
         except Exception as exc:
             self.ctx.logger.exception("排行榜查询异常: %s", exc)
             return False, f"星塔旅人排行榜查询失败: {exc}", 1
 
+        # 2. HTML 分页 + 渲染（同步 CPU 重活进线程池；渲染本身是宿主 async 能力）
         try:
-            if notice:
-                sent = await self.ctx.send.text(notice, effective_stream_id)
-            else:
-                sent = await self.ctx.send.forward(nodes, effective_stream_id)
+            pages = await asyncio.to_thread(
+                build_board_pages, prefix, sid, cn_data, format_age_text(age)
+            )
+            images = await render_board_pages(self, pages)
+        except Exception as exc:
+            self.ctx.logger.exception("排行榜渲染失败: %s", exc)
+            try:
+                await self.ctx.send.text("排行榜图片渲染失败，请稍后再试。", effective_stream_id)
+            except Exception as send_exc:
+                self.ctx.logger.exception("排行榜渲染提示发送异常: %s", send_exc)
+                return False, f"星塔旅人排行榜渲染失败: {exc}", 1
+            return True, "星塔旅人排行榜渲染失败提示已发送", 2
+
+        # 3. 统一合并转发（用户裁决：单页/多页都走 forward，每页一节点）
+        nodes = []
+        for page, image_b64 in zip(pages, images):
+            nodes.append({
+                "nickname": _FORWARD_NICKNAME,
+                "segments": [
+                    {"type": "image", "content": image_b64, "filename": f"{prefix}_{sid}_p{page['start'] // 25 + 1}.png"},
+                    {"type": "text", "content": f"{header} {page['label']} · 更新于 {format_age_text(age)}"},
+                ],
+            })
+        try:
+            sent = await self.ctx.send.forward(nodes, effective_stream_id)
         except Exception as exc:
             self.ctx.logger.exception("排行榜发送异常: %s", exc)
             return False, f"星塔旅人排行榜发送失败: {exc}", 1

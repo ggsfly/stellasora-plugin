@@ -1,246 +1,114 @@
-# 星塔旅人攻略查询 (Stella Sora Guide)
+# 星塔旅人攻略与排行榜 (Stella Sora Guide)
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-MaiBot 的星塔旅人（Stella Sora）游戏攻略查询插件。在 QQ 群里直接用中文提问，
-机器人自动抓取 [stelladb](https://stelladb.pages.dev/) 攻略并返回**官方中文译名**的自然语言回答。
+MaiBot 的星塔旅人（Stella Sora）攻略与排行榜插件。QQ 群里中文提问，机器人返回
+[GameKee 星塔旅人 wiki](https://www.gamekee.com/stellasora)「一图流攻略」原图
+（@星塔攻略组授权转载）；`/st_bb`・`/st_fe` 渲染当期国服排行榜图片。
 
 ## 功能
 
-| 工具 | 回答的问题 | 示例 |
+| 入口 | 回答的问题 | 形态 |
 |------|-----------|------|
-| `stellasora_what` | "是什么"：角色属性/技能/培养素材/礼物、秘纹、首领弱点与机制、当期讨伐、卡池资讯 | 猫眼的培养素材是什么？ |
-| `stellasora_how` | "怎么玩"：配队、纹章词条、秘纹推荐、技能升级优先度（用户要求时附预设码） | 夏花的纹章优先级？ |
-| `lookup_game_term` | 游戏术语中英对照与游戏内 ID（供 planner 内部调用） | — |
+| `stellasora_how` 工具 | "XX攻略 / XX怎么玩 / 风队怎么玩"——角色/属性的一图流攻略 | GameKee 原图直发（合并转发） |
+| `/st_bb` | 当期联合讨伐（Boss Blitz）国服 Top100 | 图片榜单（合并转发） |
+| `/st_fe` | 当期终焉绝响（Finale Echoing）国服 Top100 | 图片榜单（合并转发） |
+| `/st_update`（操作员） | 强刷两榜数据 + 探查 GameKee 攻略源更新 | 文本报告 |
 
 ### 特性
 
 | 特性 | 说明 |
 |------|------|
-| **离线优先** | 优先读取本地持久化数据（`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/`），无实时外部网络依赖 |
-| **全权更新命令** | 操作员 `/st_update` 一键完成字典重建+离线全量同步并自动重载插件生效；每日 17:00 后台定时静默同步离线数据 |
-| **直接发送模式** | 内部 LLM 加工后直发聊天（攻略指南为合并转发卡，长文不刷屏），支持人格与表达风格注入（默认开启） |
-| **官方中文输出** | 全量中英对照字典，术语与技能描述对齐官方译名 |
-| **模块化选段** | 按问题意图只提供相关模块给 LLM，资料不截断 |
-| **表驱动查询** | 基于统一队伍-槽位表（`team_table.json`）按成员交集抽取区块，降低 token 消耗 |
-| **分组与详略策略** | 同区块多队伍合并展示；问询角色详述，其余成员作为队友并集简列 |
-| **纹章网格对齐** | 基于绝对列索引解析，精确对齐 70/80/90 级纹章词条 |
-| **排行榜查询** | `/st_bb`・`/st_fe` 分别查询当期联合讨伐/终焉绝响国服 Top100，以合并转发消息发送，触发时按赛季指针拉取，瘦身落盘 + TTL 缓存 |
-| **权限控制** | 支持群聊/私聊的白名单与黑名单模式；未授权聊天的 planner 工具清单经 Hook 前置同步剔除（token 零暴露） |
+| **GameKee 中文源** | 六大属性一图流（水/火/光/暗/风/地，24 个角色小节），结构化 API 解析，不爬 SPA 页面 |
+| **原图直发** | 攻略图 CDN webp 转换（同尺寸约 1/9 体积，`prefer_webp` 可关）；末张=完整版长图 |
+| **图片榜单** | HTML 表格经宿主浏览器渲染：名次不补零、分数右对齐千分位完整、长昵称截断不挤分数列 |
+| **懒刷新索引** | 内存索引 + TTL（默认 6h）懒刷新；后台每 24h 探查更新（`updated_at` 比对，无变化不重建） |
+| **失败即暴露** | 索引不可用/图片下载失败/未收录角色均有明确用户提示，不静默降级 |
+| **权限控制** | 群聊/私聊黑白名单；planner 工具清单 Hook 前置剔除（未授权零 token）；仅 QQ 平台 |
 | **零第三方依赖** | 纯 Python 标准库实现 |
 
 ## 安装
 
-### 方式一：插件市场（推荐）
+### 插件市场（推荐）
 
 MaiBot WebUI → 插件市场 → 搜索"星塔旅人" → 安装
 
-### 方式二：手动安装
-
-> 建议将目录名与插件 ID 对齐（`ggsfly_stellasora-plugin`），避免与插件市场未来的安装目录同名冲突导致重复 ID 双杀（宿主会同时剔除两个同名插件）。
+### 手动安装
 
 ```bash
-# 克隆到 MaiBot 的 plugins 目录
 cd MaiBot/plugins
 git clone https://github.com/ggsfly/stellasora-plugin.git ggsfly_stellasora-plugin
 ```
 
-重启 MaiBot 后插件自动加载。
+重启 MaiBot 后插件自动加载。**无需数据初始化**——攻略索引在首次查询时自动拉取，
+`/st_update`（操作员）可立即强刷两榜与攻略源。
 
-### 数据初始化（必须）
+### 宿主要求
 
-数据文件（字典 `dict.json`、离线攻略 `offline/` 等）**不随仓库分发**，安装后需生成一次。数据写入宿主授权目录，插件源码目录保持干净：
-
-- **持久数据**：`<MaiBot>/data/plugins/ggsfly.stellasora-plugin/`（dict/names/offline/报告）
-- **网络缓存**：`<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/cache/`
-
-**最简方式：插件加载后，由操作员在聊天中发送 `/st_update`**——后台完成字典构建与离线数据全量同步，完成后插件自动重载生效（需宿主操作员权限，见「配置」）。
-
-命令行方式（在插件目录下，用 MaiBot 根目录 `.venv` 的 Python 执行；仅离线数据已就绪、只补字典时可用）：
-
-```bash
-# Windows（MaiBot 根目录的 .venv 含 maibot_sdk，系统 python 通常没有）
-..\..\.venv\Scripts\python.exe tools/update_dict.py --mode remote
-..\..\.venv\Scripts\python.exe tools/sync_data.py --all
-```
-
-命令行方式重建的字典需重启 MaiBot 后生效（自动重载仅由 `/st_update` 触发）。
+- MaiBot **1.4.8+**、SDK 2.23.0+（manifest 已钉死）
+- 排行榜图片渲染依赖宿主 `plugin_runtime.render`（默认开启）：宿主机需有
+  Chrome/Edge（自动探测）或配置 `browser_ws_endpoint`
+- manifest capabilities：`send.text / send.forward / render.html2png / chat.get_all_streams`
 
 ## 配置
 
-插件配置位于 `config.toml`（也可在 WebUI 插件配置页修改，热更新即时生效）：
+`config.toml`（WebUI 插件配置页可改，热更新生效）：
 
 ```toml
 [plugin]
-# 配置版本。变更会使直发成品缓存 key 变化（旧答案自动失效）；若 config.toml 钉死旧版本号，请手动同步以免命中旧缓存
-config_version = "1.3.0"
-
-[leaderboard]
-# /st_bb・/st_fe 排行榜瘦身缓存有效期（分钟）：有效期内重复触发零网络；上游每 5 分钟滚动更新，0=每次触发都重新拉取
-ttl_minutes = 10
+config_version = "1.4.0"
 
 [access_control]
-# 鉴权模式：
-#   off       = 不限制（默认，所有聊天可用）
-#   whitelist = 仅白名单内的群/用户可用
-#   blacklist = 黑名单内的群/用户禁用
-mode = "off"
-
-# 白名单（群号或用户号，每行一个）。群聊按群号判断，私聊按用户号判断
+mode = "off"          # off / whitelist / blacklist
 whitelist = []
-# 例：
-# whitelist = [
-#   "123456789",    # 某个群
-#   "987654321",    # 某个用户（私聊）
-# ]
-
-# 黑名单（格式同上）
 blacklist = []
 
-[query]
-# 直接发送模式：插件内部用 LLM 加工攻略成品后直接发送到聊天，工具只向 planner 返回"已发送"
-# 关闭（false）则退回旧行为：攻略原文交给 planner 翻译（回复质量取决于 planner 转述）
-direct_send = true
-# 同流同主题直发去重窗口（秒）：同一 stream_id + query 在此时间内重复调用直接拦截，
-# 防止 what+how 双直发刷屏
-dedup_window = 60
-# 直发成品缓存时长（秒），0=禁用（24 小时内重复提问秒回）
-answer_cache_ttl = 86400
-# 直接发送使用的模型任务名（如 utils/replyer/planner，对应主程序模型配置里的任务）；
-# 留空使用默认模型。推荐 utils（快速响应 2-4s，术语翻译已在代码中完成）
-# 查询失败时工具统一返回"未找到相关攻略"，不会回传原文
-llm_model = "utils"
-# 直接发送时注入 bot 人格与表达风格（读取主程序人格配置，成品回答与 bot 口吻一致）；
-# 关闭则使用无人格的攻略助手口吻
-inject_persona = true
+[leaderboard]
+ttl_minutes = 10      # 榜单瘦身缓存有效期（分钟），0=每次触发都重新拉取
 
-[overrides]
-# 中文别名/俗称 → 官方中文名映射
-# 用户在群里用简称提问时，插件自动映射到官方角色/术语名再查攻略
-# 每条别名为一个 [[overrides.aliases]] 条目，WebUI 会渲染为可增删的列表编辑器
+[gamekee]
+index_ttl_minutes = 360   # 攻略索引 TTL（分钟）：查询时过期先刷新
+prefer_webp = true        # 攻略图 CDN webp 转换；关闭发原 PNG（约 2MB/张）
 
-[[overrides.aliases]]
-alias = "春科"
-official = "科洛妮丝（新春）"
-
-[[overrides.aliases]]
-alias = "土"
-official = "地"
+[overrides.aliases]
+# 中文别名 → 索引角色名（如 春科→科洛妮丝新春、土→地）
 ```
-
-> **提示**：修改主程序全局人格配置（如 bot_config 的 personality/nickname/reply_style 等）不会触发插件配置热重载，已缓存的直发答案口吻最长 24 小时内保持原口吻。如需立即刷新口吻，可手动清空 `<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/webcache/answers/` 目录，或将 answer_cache_ttl 设置为 0 禁用后再改回。
 
 ### 建议配置
 
-公开部署时建议改为白名单模式，只允许自己的群使用查询工具：
-
-```toml
-[access_control]
-mode = "whitelist"
-whitelist = ["你的群号"]
-```
-
-公开部署时同时建议在宿主 `bot_config.toml` 配置操作员，确保 `/st_update` 只有你本人可触发：
+公开部署建议白名单模式 + 宿主 `bot_config.toml` 配置操作员：
 
 ```toml
 [plugin]
-permission = ["qq:你的QQ号"]  # 操作员列表：仅列表内用户可执行操作员级（/st_update 等）命令
+permission = ["qq:你的QQ号"]  # /st_update 仅操作员可触发
 ```
 
 ## 使用示例
 
-在 QQ 群里直接提问即可：
-
 ```
-千都世先升级什么技能？
-猫眼的培养素材是什么？
-夏花的纹章优先级？
-猫眼火队的秘纹推荐顺序？
-土印记队的预设码是什么？
+艾蕾攻略          → 艾蕾一图流（单节点图文）
+春科直伤篇        → 科洛妮丝新春·直伤篇（别名+分篇点名）
+水系攻略          → 水系全部角色图（每角色一节点）
+/st_bb            → 联合讨伐图片榜单
+/st_fe            → 终焉绝响图片榜单
+/st_update        → 强刷两榜 + 探查攻略源（操作员）
 ```
 
-机器人会自动完成：术语查词（"土"→官方"地"）→ 抓取对应攻略 → 官方中文输出。
+## 数据目录
 
-**回答示例（夏花的纹章优先级）：**
+| 路径 | 内容 |
+|---|---|
+| `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/gamekee/` | state.json（探查时间戳）+ index.json（索引快照） |
+| `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/leaderboard/` | 榜单瘦身缓存（meta/season/{sid}_top.json） |
+| `<MaiBot>/temp/plugins/ggsfly.stellasora-plugin/cache/gamekee_images/` | 攻略图片缓存（SHA-256 文件名，7 天/128MiB 回收） |
 
-> 夏花是风属性角色，以下是她的纹章推荐词条（按出现顺序列举）：
->
-> **70级纹章（三角形）**：风系穿透 110 / 技能伤害 20% / 暴击率 15%
-> **80级纹章（圆形）**：支援技能等级 +3 / 风系穿透 110 / 技能伤害 20%
-> **90级纹章（六边形）**：花海·侵蚀 +3 / 全能领导 +3 / 自我提升 +3
-
-## 数据维护
-
-插件采用**本地离线优先**架构，平时查询无需联网。三类数据及其更新方式：
-
-| 数据 | 生成方式 | 内容 | 落盘位置 |
-|------|---------|------|---------|
-| 字典 `dict.json` + `names.json` | `/st_update` 自动调用 `tools/update_dict.py`（或手动命令行运行） | 官方中英对照译名 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
-| 离线攻略/预设码 `offline/` | `/st_update` / 每日定时 / 手动 `tools/sync_data.py` | 六元素 infodoc、索引、预设码、ss-data 数据集、榜单数据 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/offline/` |
-| 更新报告 `_update_report.json` | 上述更新产出 | 新增/更新/保留条目统计 | `<MaiBot>/data/plugins/ggsfly.stellasora-plugin/` |
-
-### 1. 一键初始化 / 更新：`/st_update`
-
-**操作员**在聊天中发送 `/st_update`（需宿主操作员权限，见第 3 节），插件在后台依次完成：
-
-1. **字典重建**：检测本地 ss-data 克隆（`MaiBot/plugins/ss-data`）——有则 `git pull` 增量更新 + local 模式，无则 remote 模式 sparse-clone GitHub；`dict.json` 不存在时从零构建（首装即此路径）；
-2. **离线全量同步**：infodoc/索引/预设码/统一表/ss-data/榜单；
-3. **缓存失效接线**：表缓存与直发成品缓存立即清空；
-4. **插件自动重载**：新字典即时生效——重启 MaiBot 不再必要。
-
-期间同一聊天会收到开始/完成两条进度消息；执行中重复触发会被拒绝（"已有更新任务进行中"）。代理：默认 `http://127.0.0.1:7890`（环境变量 `HTTPS_PROXY` 可覆盖；命令行 `--proxy ""` 强制直连）。
-
-命令行方式（备用，不经插件）：`tools/update_dict.py` + `tools/sync_data.py --all`——**字典经此重建后需重启 MaiBot 才生效**。一致性回归：`python tests/test_all.py`（MaiBot 根目录 `.venv` 的 Python）。
-
-### 2. 每日定时自动更新
-
-插件后台协程每日 **17:00** 静默拉取全量离线数据（不含字典），成功后原子覆写本地数据并清除直发成品缓存；网络异常时保留本地数据降级，不影响查询。**新角色入库后需操作员运行一次 `/st_update` 重建字典方可查询**（每日定时不触碰字典、不触发重载）。
-
-### 3. 权限说明
-
-> `/st_update` 为**操作员级别**命令（`permission="operator"`），由主程序统一鉴权。需要在 `bot_config.toml` 的 `[plugin].permission` 中把管理员账号（如 `qq:123456789`）加入操作员列表，或在 WebUI 命令设置中对该命令单独放行，否则所有用户都被拒绝。插件内的黑白名单（`access_control`）仍作为聊天范围约束叠加生效。重载执行的数秒内本插件的命令/查询会被短暂拒绝。
-
-### 4. 排行榜查询
-
-聊天中发送 `/st_bb`（联合讨伐）或 `/st_fe`（终焉绝响）——所有人可用、受黑白名单约束，返回当期赛季排行榜**国服 Top 100**，以合并转发消息发送（表头节点 + 每 25 名一个节点，长榜单收进转发卡不刷屏）；单行提示（如"当期未开榜"）仍为普通文本。两榜独立成命令。
-
-- **按需拉取**：数据仅在触发命令时更新（不进每日定时同步），每次触发强刷当期赛季指针 `season.json`，赛季轮换自动跟随，终焉绝响赛季初上游未发布榜单时显示"当期未开榜"。
-- **瘦身缓存**：上游 20MB 级赛季文件仅在拉取时提取玩家榜（排名/昵称/分数）落盘为 <200KB 瘦身缓存；`[leaderboard] ttl_minutes`（默认 10 分钟）内重复触发零网络，拉取失败时降级展示本地缓存并标注数据年龄。
-
-### 5. 命令行独立同步
+## 测试
 
 ```bash
-# 全量同步（元素 infodoc + 索引 + 预设码 + ss-data 数据集 + 榜单数据）
-python tools/sync_data.py --all
-
-# 仅同步单项（元素名 / index / presets / character / disc / gacha / raid / blitz / duel / meta / blitz_season）
-python tools/sync_data.py --element ignis
-
-# 字典更新（local 需 --source 指向 ss-data 克隆；remote 仅下载语言目录）
-python tools/update_dict.py --mode local --source /path/to/ss-data
-python tools/update_dict.py --mode remote
-
-# 代理控制：优先级 --proxy 参数 > 环境变量 HTTPS_PROXY/HTTP_PROXY > 默认代理
-python tools/sync_data.py --all --proxy ""   # 强制直连
+F:/MaiBot/.venv/Scripts/python.exe tests/test_all.py           # 全量
+F:/MaiBot/.venv/Scripts/python.exe tests/test_all.py G U V     # 指定节
 ```
 
-### 提示词文档
+## 许可
 
-直发模式的 LLM 提示词为两份单一事实源，`plugin.py` 启动时读取并缓存，修改后需**重启插件**；文档缺失或读取失败时直发查询返回「未找到相关攻略。」并记录 error：
-
-- `docs/prompts_how.md`（`stellasora_how`）：内联游戏机制知识与回答规则
-- `docs/prompts_what.md`（`stellasora_what`）：模块化材料说明与回答规则
-
-> 提示词只约束 LLM 的**输出表达**；是否触发工具由 planner（工具 `description`）决定，材料范围由 `service.py` 路由决定。
-
-## 关于与致谢
-
-- **本项目由 AI 辅助开发制作**
-- [stelladb](https://stelladb.pages.dev/) — 攻略数据
-- [ss-data](https://github.com/AutumnVN/ss-data) — 游戏解包字典数据（原 StellaSoraData）
-- [Mistique's Field Reports 社区](https://docs.google.com/spreadsheets/d/1otsS2C1RkXLaFSvp2SMOS-vtRBaEBpZlcgR361_fdAE) — 元素队攻略与预设码
-
-## 许可证
-
-[GPL-3.0-or-later](LICENSE)
-
+GPL-3.0-or-later。攻略图版权归 @星塔攻略组（B站），经授权转载于 GameKee。

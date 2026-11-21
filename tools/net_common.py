@@ -8,27 +8,9 @@ import urllib.request
 _PLUGIN_ID = "ggsfly.stellasora-plugin"
 
 
-def host_root() -> Path:
-    """宿主（MaiBot）根目录。
-
-    以插件目录标准布局推导：tools/net_common.py 的上三级即 MaiBot 根目录。
-    Cookbook 数据一律写宿主 data/temp，不再落入插件源码目录。
-    """
-    return Path(__file__).resolve().parents[3]
-
-
 def host_data_dir() -> Path:
-    """宿主分配给插件的持久数据目录（data/plugins/<plugin_id>/）。"""
-    return host_root() / "data" / "plugins" / _PLUGIN_ID
-
-
-def host_cache_dir() -> Path:
-    """宿主分配给插件的网络缓存目录（temp/plugins/<plugin_id>/cache/）。"""
-    return host_root() / "temp" / "plugins" / _PLUGIN_ID / "cache"
-
-
-# 默认代理地址；可通过环境变量 HTTPS_PROXY / HTTP_PROXY 或构造函数 proxy 参数覆盖
-_DEFAULT_PROXY = "http://127.0.0.1:7890"
+    """宿主分配给插件的持久数据目录（CLI 运行兜底；插件运行时由 ctx.paths.data_dir 覆盖）。"""
+    return Path(__file__).resolve().parents[2] / "data" / "plugins" / _PLUGIN_ID
 
 
 def resolve_proxy(proxy: Optional[str]) -> Optional[str]:
@@ -76,34 +58,3 @@ def atomic_write(file_path: Path, content: str) -> None:
         raise
 
 
-def read_offline_file(file_path: Path) -> Optional[str]:
-    """读取离线持久化文件，若为 json 则提取 data 字段，若为纯文本则直接返回。"""
-    if not file_path.is_file():
-        return None
-    try:
-        text = file_path.read_text(encoding="utf-8").strip()
-        if not text:
-            return None
-        if file_path.suffix == ".json":
-            data = json.loads(text)
-            if isinstance(data, dict):
-                content = data.get("data") or data.get("content")
-                return content if isinstance(content, str) and content else None
-            elif isinstance(data, str) and data:
-                return data
-        return text
-    except Exception:
-        return None
-
-
-def resolve_offline_dir(cache_dir: Path, offline_dir: Optional[Path] = None) -> Optional[Path]:
-    """解析离线数据目录：显式传入优先；缺省仅认 cache_dir 同级的 offline/，否则 None。
-
-    生产调用方（plugin/sync_data）一律显式传 offline_dir；None 表示该 fetcher
-    无离线数据可读（纯在线/测试场景），不猜路径、不回退宿主目录。
-    """
-    if offline_dir is not None:
-        return Path(offline_dir)
-    if (cache_dir / "offline").is_dir():
-        return cache_dir / "offline"
-    return None

@@ -2,6 +2,27 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.5.0] - 2026-11-22
+
+### 主要功能
+
+- **攻略查询迁移至 GameKee 中文源**：`stellasora_how` 重写为"一图流攻略"查询——从 GameKee 星塔旅人 wiki 的六大属性页（水/火/光/暗/风/地，@星塔攻略组授权转载）解析角色小节，返回攻略原图直发（合并转发）。结构化 API（`/v1/content/detail` + `game-alias` 头）替代 SPA 页面抓取；`content_json` 节点解析（header2 小节 → 末张完整版长图）；支持中文别名、分篇点名（"直伤篇"）与属性泛查（"风队"）。
+- **排行榜图片化**：`/st_bb`・`/st_fe` 改为 HTML 表格经宿主浏览器渲染（`render.html2png`）出图、合并转发发送——名次不补零、分数右对齐千分位完整、长昵称截断不挤分数列（文本榜排版已被聊天侧否决）。数据层语义不变（赛季指针/BB meta 降级/FE 不猜赛季/TTL 瘦身缓存/失败降级陈旧缓存）。
+- **`/st_update` 重定义**：强刷当期两榜（绕过内容 TTL、两榜独立报告）+ 探查 GameKee 攻略源更新 + 重置每日探查计时；不再 reload 插件（字典已删，数据落盘即时生效）。
+- **GameKee 更新探查机制**：三时间戳（last_probe_attempt/last_verified/index_built_at）持久化 state.json；后台每 24h 探查（比对 updated_at，无变化不重建索引）；查询懒刷新（索引 TTL 默认 6h）；探查失败 30 分钟重试（不连拉不断停摆）；single-flight 并发合并（并发入口共享同一批结果，失败同样合并）。
+- **攻略图片缓存**：CDN webp 转换（不缩分辨率，原图 2.1MB → 230KB），SHA-256 文件名磁盘缓存（7 天/128MiB 按最旧回收），域名白名单 + 魔数校验（HTML 拦截页明确报错）。
+
+### 细节（修复与破坏性变更）
+
+- **破坏性变更：旧数据源全家下线**——移除 `stellasora_what`/`lookup_game_term` 工具、中英字典（dict/names）、stelladb infodoc、预设码表、LLM 加工直发链路、每日 17:00 定时同步及全部相关模块（service/fetcher_*/sync_data/build_dict/update_dict/dict_lookup/team_table/term_replace/text_clean/cache，由 git 历史保存）。旧 offline 数据文件原地保留不再读取。
+- **破坏性变更：QQ 限定收紧**——how 工具与三命令执行层校验平台（Hook 可见性 + 执行层双闸），非 QQ 或平台未知保守拒绝且不发起网络请求。
+- **破坏性变更：manifest**——version 1.5.0；host min **维持 1.3.15**、sdk min **维持 2.16.0**（全部新特性 render.html2png/send.forward/hook spec 在该版本已具备——宿主 git tag 与 SDK 官方 CHANGELOG 逐项核实，无钉死 1.4.8 的必要）；capabilities 收窄为 `send.text/send.forward/render.html2png/chat.get_all_streams`（移除 config.get/llm.generate/component.reload_plugin/send.image）。
+- **配置破坏性变更**：`config_version 1.3.0 → 1.4.0`，移除整个 `[query]`（direct_send/dedup_window/answer_cache_ttl/llm_model/inject_persona），新增 `[gamekee]`（index_ttl_minutes=360、prefer_webp=true）；Runner 自动归一化旧配置。
+- **榜单缓存路径变更**：`offline/ssleaderboard/` → `<data_dir>/leaderboard/`（满足旧 offline 不读写）；升级后首次 `/st_bb` 需联网重建，属预期。
+- **修复：/st_update 在飞闸门登记时机**——提前到 await 发送进度消息之前（旧实现连发两调用可同时通过闸门双写数据）。
+- **修复：Hook 反查顺带缓存平台**——session→platform 缓存供执行层校验复用（直调工具不经 Hook 时主动反查一次）。
+- 测试重写：G/I/J/K/R/S/T/U/V 九节（GameKee 解析匹配、探查调度 single-flight、图片下载契约、榜单数据层/图片链路、st_update 三路独立报告）；测试持久目录与运行目录全隔离（不触真实宿主数据）；MockSend 支持 image 段断言。
+
 ## [1.4.2] - 2026-09-30
 
 ### 新功能

@@ -1,30 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""星塔旅人插件统一回归测试（单文件精简版）。
+"""星塔旅人插件统一回归测试（1.5.0 精简版）。
 
 运行方式：
     python tests/test_all.py              # 全量
-    python tests/test_all.py B G J        # 只跑指定节
+    python tests/test_all.py G U V        # 只跑指定节
 
-测试节（按此顺序执行；B 必须最先——其 json.load 计数断言依赖进程内首次触达 service）：
-  B 字典单例与并发  —— dict.json 全进程只解析一次、_init_lock 并发安全、实例共享
-  A 字典数据完整性  —— dict.json/names.json 合法性、字段完整、抽样一致、体积上限
-  D 中文别名与术语替换 —— [overrides.aliases] 模型、DictLookup 链式别名、动态配置、单遍交替正则 vs legacy 等价
-  E 索引页抓取      —— fetch_infodoc_index 缓存命中、URL 正确、异常降级空串
-  F how 表驱动查询  —— query_how_rows 按区块抓取、预设码行、rotation 字段、表交集
-  G 直发端到端      —— 合并转发直发/缓存/去重/鉴权/人格开关/知识注入/SDK 透传（核心用例）
-  H 输出格式        —— LLM 输出原样直发（verbatim trust，经合并转发）+ infodoc 输出规则关键词
-  I 非阻塞探针      —— 同步重活在 to_thread 中执行，不阻塞事件循环；异常干净传播
-  J 工具参数描述    —— stellasora_how.query 禁止「攻略」等后缀词（群聊回退 bug 回归）
-  K 手动更新指令    —— @Command('st_update') 鉴权拦截、后台化全流程（字典→同步→自 reload）、在飞闸门、缓存清空
-  L 定时自动同步    —— 每日 17:00 等待秒数计算、后台定时调度、同步完成清空缓存、on_unload 优雅取消
-  M 统一队伍-槽位表构建器 —— 解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化
-  N slot 查询服务   —— 表加载/交集查询/元素过滤/缓存失效/按名提取区块/详略策略；数据目录重定向（原 Q）
-  P 热门优先级与属性泛查 —— 元素泛查检测、热门过滤组级补齐（<3补冷门至3）、priority 字段固化、端到端集成
-  O ss-data 与 what 五类 —— 关键词路由、卡池/讨伐/角色/秘纹/怪物资料、面板等级上限、参数回填、来源中文
-  R 排行榜命令     —— /st_bb・/st_fe 瘦身提取、赛季指针跟随、TTL 缓存、空窗/降级、合并转发节点（零网络）
-  S 排行榜命令插件链路 —— kwargs 透传鉴权（白名单回归）、合并转发 self-send 契约、拒绝不发送
-  T Hook 前置过滤   —— maisaka.planner.before_request 黑白名单剔除工具、会话身份缓存、fail-open、声明契约
+测试节（1.5.0 重写后 9 节）：
+  G how 一图流端到端 —— GameKee 契约：命中/末图/泛查/别名分篇/未收录/索引不可用/下载失败/平台两层
+  I 非阻塞探针      —— 图片下载 to_thread 不阻塞事件循环；异常干净传播
+  J 工具参数描述    —— stellasora_how 1.5.0 description/参数契约
+  K 手动更新指令    —— /st_update 强刷两榜+探查+重置计时、三路独立报告、提前闸门、不自 reload
+  R 排行榜数据层    —— 瘦身提取/指针/TTL/降级/BoardUnavailable/强刷独立/HTML 分页纯函数
+  S 排行榜命令链路  —— 图片节点合并转发/渲染失败短提示/notice/鉴权/平台
+  T Hook 前置过滤   —— planner 工具剔除（1.5.0 仅 how）、fail-open、缓存
+  U GameKee 解析匹配 —— content_json 结构/规范化/末图/队伍码边界/别名/分篇/属性泛查/畸形容错
+  V 探查调度与图片  —— P2 single-flight/时间戳纪律/域名白名单/魔数/缓存
 """
 from __future__ import annotations
 
@@ -33,6 +24,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -49,17 +41,29 @@ NAMES_PATH = DATA_DIR / "names.json"
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
 
-import service  # noqa: E402
-import team_table  # noqa: E402
-from dict_lookup import DictLookup  # noqa: E402
-from fetcher_google_doc import GoogleDocFetcher  # noqa: E402
-from fetcher_stelladb import StelladbFetcher, _extract_board_top  # noqa: E402
-from term_replace import TermReplacer  # noqa: E402
+import leaderboard as lbmod  # noqa: E402
+import leaderboard_render as lbrender  # noqa: E402
+import gamekee as gkmod  # noqa: E402
 from maibot_sdk.context import PluginContext, PluginPaths  # noqa: E402
 
 import plugin as plug  # noqa: E402
 
 failures: list = []
+
+# 存活插件实例注册表：make_plugin 登记，供 V 节等需要干净计时断言的场景
+# 统一取消僵尸实例的 GameKee 后台探查任务（全量 >60s 时僵尸会醒来污染计数）
+_LIVE_PLUGINS: list = []
+
+
+def cancel_gamekee_tasks() -> int:
+    """取消全部存活实例的 GameKee 后台探查任务，返回取消数（仅测试用）。"""
+    cancelled = 0
+    for inst in _LIVE_PLUGINS:
+        t = getattr(inst, "_gamekee_probe_task", None)
+        if t is not None and not t.done():
+            t.cancel()
+            cancelled += 1
+    return cancelled
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -174,23 +178,66 @@ class _ListLogHandler(logging.Handler):
         self.records.append(record)
 
 
-def make_plugin(ttl: int = 0, dedup: int = 0):
+class _FakeHTTPResponse:
+    """模拟 urlopen 返回的文件对象。"""
+
+    def __init__(self, data: bytes, code: int = 200):
+        self._data, self._code = data, code
+
+    def getcode(self) -> int:
+        return self._code
+
+    def read(self, *args) -> bytes:
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class _FakeOpener:
+    """模拟 fetcher._opener（_build_opener 产物），在实例级网络边界拦截请求。"""
+
+    def __init__(self, handler):
+        self._handler = handler
+        self.calls: list = []
+
+    def open(self, req, timeout=10):
+        self.calls.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return self._handler(req, timeout=timeout)
+
+
+def make_plugin(ttl: int = 0, dedup: int = 0):  # ttl/dedup 参数保留兼容旧调用签名（1.5.0 无 query 配置）
     """创建插件实例 + mock ctx（缓存/去重参数默认关闭以便隔离用例）。
 
-    data_dir 指向真实宿主持久数据目录（供读路径查询），runtime_dir 用临时目录
-    隔离直发/网络缓存，避免污染宿主运行时。
+    data_dir 与 runtime_dir 都指向临时目录（P5 隔离纪律：任何写缓存的新测试
+    不得触碰真实宿主持久目录）。旧链路（how 直发/what）仍需真实 dict/names 与
+    offline 攻略数据做只读查询源——拷贝进临时 data_dir，插件实例对该目录的任何
+    写入都留在临时区，不污染宿主数据（旧链路于 1.5.0 步骤 6 整体删除）。
+    实例注册到模块级 _LIVE_PLUGINS：1.5.0 起 on_load 会启动 GameKee 后台探查
+    任务（60s 延迟），长测试（全量 >60s）中僵尸实例醒来会污染调用计数桩——
+    需要干净计时断言的节（V）开头统一 cancel_gamekee_tasks()。
     """
     p = plug.create_plugin()
     cache = Path(tempfile.mkdtemp(prefix="stellasora_test_all_"))
+    data_tmp = Path(tempfile.mkdtemp(prefix="stellasora_test_data_"))
+    for name in ("dict.json", "names.json"):
+        src = DATA_DIR / name
+        if src.is_file():
+            shutil.copyfile(src, data_tmp / name)
+    offline_src = DATA_DIR / "offline"
+    if offline_src.is_dir():
+        shutil.copytree(offline_src, data_tmp / "offline")
+    _LIVE_PLUGINS.append(p)
     ctx = PluginContext(
         plugin_id="ggsfly.stellasora-plugin",
         rpc_call=None,
-        paths=PluginPaths(data_dir=DATA_DIR, runtime_dir=cache),
+        paths=PluginPaths(data_dir=data_tmp, runtime_dir=cache),
     )
     p._set_context(ctx)
     p._plugin_config_instance = plug.StellaSoraConfig()
-    p._plugin_config_instance.query.answer_cache_ttl = ttl
-    p._plugin_config_instance.query.dedup_window = dedup
     ctx.config = MockConfig(
         {
             "bot": {"nickname": "麦麦", "alias_names": []},
@@ -205,1075 +252,239 @@ def make_plugin(ttl: int = 0, dedup: int = 0):
     return p, ctx
 
 
-# ===== 节 B：字典单例与并发（必须最先执行） =====
-
-def run_singleton() -> None:
-    print("--- B 字典单例与并发 ---")
-    _orig_json_load = json.load
-    counter = {"total": 0, "dict": 0}
-
-    def counting_json_load(fp, *args, **kwargs):
-        counter["total"] += 1
-        if "dict.json" in getattr(fp, "name", ""):
-            counter["dict"] += 1
-        return _orig_json_load(fp, *args, **kwargs)
-
-    json.load = counting_json_load
-    try:
-        tmp_a = Path(tempfile.mkdtemp(prefix="stellasora_singleton_a_"))
-        tmp_b = Path(tempfile.mkdtemp(prefix="stellasora_singleton_b_"))
-        svc_a = service._get_services(tmp_a)
-        svc_b = service._get_services(tmp_b)
-        lookup_a, last_a, st_a, replacer_a = svc_a
-        lookup_b, last_b, st_b, replacer_b = svc_b
-
-        check("B1 dict.json 全进程只解析一次", counter["dict"] == 1,
-              f"解析 {counter['dict']} 次（总 json.load {counter['total']}：dict 1 + names 1）")
-        check("B2 两个 cache_dir 共享同一 lookup", lookup_a is lookup_b)
-        check("B3 cache_dir 变化仅重建 fetcher", st_a is not st_b)
-        check("B4 replacer 随 lookup 复用（cache_dir 变化不重建）", replacer_a is replacer_b)
-        check("B5 未收录术语返回 not_found", service.lookup_term("NoSuchTermXYZ").get("not_found") is True)
-
-        # 并发冒烟：10 线程同时取服务，计数不变且拿到同一实例
-        barrier = threading.Barrier(10)
-        results: list = []
-
-        def thread_get():
-            barrier.wait()
-            results.append(service._get_services(tmp_a)[0])
-
-        before = counter["total"]
-        threads = [threading.Thread(target=thread_get) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        check("B6 并发 10 线程计数不变", counter["total"] == before, f"{before} -> {counter['total']}")
-        check("B7 并发返回同一 lookup", all(r is lookup_a for r in results))
-        check("B8 角色名计数走共享 lookup", service.count_character_names("夏花 小禾") >= 2)
-        # B8b 形态后缀角色（XX（源初）等）含旧名子串：掩码去重叠只计长名，
-        # 不误判联合查询（实例故障：尘沙（源初）问句 count=2 → what 被强制回传）
-        check("B8b 形态后缀角色按长名计数（旧名子串不双计）",
-              service.count_character_names("尘沙（源初）的技能面板") == 1
-              and service.count_character_names("科洛妮丝（新春）攻略") == 1
-              and service.count_character_names("尘沙（源初）和艾蕾") == 2)
-        names_cached = lookup_a.get_character_names()
-        check("B9 get_character_names 缓存命中", names_cached is lookup_a.get_character_names())
-    finally:
-        json.load = _orig_json_load
-
-
-# ===== 节 A：字典数据完整性 =====
-
-# 抽样一致性：(中文名, 英文名, 期望 cat 前缀)
-DICT_SAMPLES = [
-    ("琥珀", "Amber", "Character"),
-    ("小禾", "Nazuna", "Character"),
-    ("风影", "Wraith", "Character"),
-    ("感电", "Shock", "Word"),
-    ("冻结", "Freeze", "Word"),
-]
-
-
-def run_dict_data() -> None:
-    print("--- A 字典数据完整性 ---")
-    if not DICT_PATH.is_file() or not NAMES_PATH.is_file():
-        hard_fail(f"missing {DICT_PATH} or {NAMES_PATH}")
-    with DICT_PATH.open("r", encoding="utf-8") as fp:
-        main_dict = json.load(fp)
-    with NAMES_PATH.open("r", encoding="utf-8") as fp:
-        name_index = json.load(fp)
-    print(f"[info] dict entries: {len(main_dict):,} | names entries: {len(name_index):,}")
-
-    bad_fields = [
-        key for key, entry in main_dict.items()
-        if not isinstance(entry, dict)
-        or any(not isinstance(entry.get(f), str) or not entry.get(f) for f in ("en", "cn", "cat"))
-    ]
-    check("A1 字段完整（en/cn/cat 均非空字符串）", not bad_fields, f"异常条目数 {len(bad_fields)}")
-
-    dangling = [name for name, key in name_index.items() if key not in main_dict]
-    check("A2 names 索引无悬空引用", len(dangling) <= 5, f"悬空 {len(dangling)} 条（容差 5）")
-
-    missed = [cn for cn, en, cat in DICT_SAMPLES
-              if cn not in name_index or not name_index[cn].startswith(f"{cat}.")]
-    check("A3 抽样中英对照可查且类别正确", not missed, f"未命中 {missed}")
-
-    dict_size, names_size = DICT_PATH.stat().st_size, NAMES_PATH.stat().st_size
-    check("A4 体积上限（dict≤10MB, names≤5MB）",
-          dict_size <= 10 * 1024 * 1024 and names_size <= 5 * 1024 * 1024,
-          f"dict {dict_size:,}B / names {names_size:,}B")
-
-
-# 术语替换等价性样例（在 D 节内执行）：覆盖关键歧义类——长名抢短名、词边界、
-# 占位符、预设码、混合中文、空串、纯中文
-REPLACE_SAMPLES = [
-    "",
-    "这是一句纯中文，不含任何英文术语。",
-    "Skill DMG % and Skill DMG on one line",           # 长名优先
-    "Skill Crit Rate vs Crit Rate vs Crit DMG",
-    "PEN and PENDING and PENSIVE in sentence",          # 词边界
-    "Lv Lv. level levels Level10",
-    "&Param1& and &Param2& untouched",                  # 占位符
-    "preset AAAABBBBCCCCDDDDEEEE keep as-is",           # 预设码
-    "夏花的 Support Skill Lv. 3 推荐 Charge Eff. (Main) 词条，Skill DMG % 20%",
-    "土印记队 Main Discs 推荐：PEN、Crit Rate、Crit DMG、Energy Limit",
-]
-
-
-# ===== 节 D：中文别名与术语替换 =====
-
-def run_overrides() -> None:
-    print("--- D 中文别名与术语替换 ---")
-    cfg = plug.StellaSoraConfig()
-    check("D1 默认别名模型（非空 AliasEntry、首条春科→科洛妮丝（新春）、无 replacements 残留）",
-          len(cfg.overrides.aliases) > 0
-          and all(isinstance(a, plug.AliasEntry) for a in cfg.overrides.aliases)
-          and cfg.overrides.aliases[0].alias == "春科"
-          and cfg.overrides.aliases[0].official == "科洛妮丝（新春）"
-          and not hasattr(cfg.overrides, "replacements"))
-
-    lookup = DictLookup(DATA_DIR, custom_aliases={"土": "地", "花玲": "花铃", "春科": "科洛妮丝（新春）"})
-    res_tu = lookup.lookup_term("土")
-    check("D4 俗称 土→地(Terra)", bool(res_tu and res_tu.get("en") == "Terra"), str(res_tu))
-    res_hl = lookup.lookup_term("花玲")
-    check("D5 笔误 花玲→花铃(Character)", bool(res_hl and res_hl.get("cat") == "Character"), str(res_hl))
-    lookup.set_custom_aliases({"泥土": "土", "土": "地"})
-    check("D6 链式别名 泥土→土→地", bool(lookup.lookup_term("泥土") and lookup.lookup_term("泥土").get("cn") == "地"))
-
-    service.configure_overrides(aliases={"土": "地", "花玲": "花铃"})
-    check("D7 service 动态别名生效", bool(service.lookup_term("土") and service.lookup_term("土").get("cn") == "地"))
-
-    import inspect
-    sig = inspect.signature(TermReplacer.__init__)
-    check("D8 TermReplacer 无 custom_replacements",
-          "custom_replacements" not in sig.parameters
-          and not hasattr(TermReplacer, "set_custom_replacements"))
-
-    # —— 术语替换等价性（原 C 节，与别名同属中文归一化主题）——
-    replacer = TermReplacer(DATA_DIR)
-    print(f"[info] mapping 词条数: {len(replacer.mapping):,}")
-    mismatched = []
-    for sample in REPLACE_SAMPLES:
-        if replacer.replace(sample) != replacer.replace_legacy(sample):
-            mismatched.append(sample[:40])
-    check("C1 单遍交替正则与 legacy 等价（代表样例）", not mismatched, f"分歧 {mismatched}")
-    replaced = replacer.replace("Skill DMG and Crit Rate")
-    check("C2 英转中实际生效", "技能伤害" in replaced and "Crit Rate" not in replaced, replaced)
-
-
-# ===== 节 E：索引页抓取 =====
-
-class _FakeHTTPResponse:
-    """模拟 urlopen 返回的文件对象。"""
-
-    def __init__(self, data: bytes, code: int = 200):
-        self._data, self._code = data, code
-
-    def getcode(self) -> int:
-        return self._code
-
-    def read(self) -> bytes:
-        return self._data
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-
-class _FakeOpener:
-    """模拟 fetcher._opener（_build_opener 产物），在 fetcher 级网络边界拦截请求。
-
-    fetcher 使用实例级 opener（支持按实例配置代理），测试同样在实例上注入
-    _FakeOpener，而非全局 patch urllib.request.urlopen（那会波及进程内其它代码）。
-    """
-
-    def __init__(self, handler):
-        self._handler = handler
-        self.calls: list = []
-
-    def open(self, req, timeout=10):
-        self.calls.append(req.full_url if hasattr(req, "full_url") else str(req))
-        return self._handler(req, timeout=timeout)
-
-
-def run_fetcher_index() -> None:
-    print("--- E 索引页抓取 ---")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        fetcher = StelladbFetcher(Path(tmpdir))
-        html = "<html><body><div>Team Rotation: Aqua Team</div></body></html>".encode("utf-8")
-
-        fake_opener = _FakeOpener(lambda req, timeout=10: _FakeHTTPResponse(html))
-        fetcher._opener = fake_opener
-
-        res1 = fetcher.fetch_infodoc_index()
-        check("E1 首抓返回非空且 URL 正确",
-              bool(res1) and "Team Rotation: Aqua Team" in res1
-              and fake_opener.calls == ["https://stelladb.pages.dev/infodoc"], str(fake_opener.calls))
-        res2 = fetcher.fetch_infodoc_index()
-        check("E2 二次命中缓存（仅 1 次请求）", res2 == res1 and len(fake_opener.calls) == 1)
-
-        def error_open(req, timeout=10):
-            raise urllib.error.URLError("Network unreachable")
-
-        with tempfile.TemporaryDirectory() as err_tmp:
-            err_fetcher = StelladbFetcher(Path(err_tmp))
-            err_fetcher._opener = _FakeOpener(error_open)
-            check("E3 网络异常降级空串不崩溃", err_fetcher.fetch_infodoc_index() == "")
-
-
-# ===== 节 F：how 表驱动查询（query_how_rows 按区块抓取 + 预设码 + Rotation 字段） =====
-
-# F 节 fixture 预设码（任意 20+ 位 base64 形态串，仅作输出保真断言用）
-F_FIXTURE_CODE = "AAAAnAAAAJUAAACfwYADbAZgADsMAJGAAGww"
-
-# F 节 fixture 统一表行：结构 = team_table.json 行契约
-# （slots[3] 定位主/支援、team_name_infodoc 优先、guide_ref 指向区块、rotation 构建期固化）
-F_FIXTURE_ROWS = [
-    {   # 行A：小禾主控 + 格芮/科洛妮丝支援 → Terra Mark (S. Coronis Ver.) 区块
-        "main_key": F_FIXTURE_CODE,
-        "preset_code": F_FIXTURE_CODE,
-        "element": "terra",
-        "slots": [
-            {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-            {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-            {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"},
-        ],
-        "team_name_preset": "Original Terra Mark",
-        "team_name_infodoc": "Terra Mark (S. Coronis Ver.)",
-        "guide_ref": {"element": "terra", "block": "Terra Mark (S. Coronis Ver.)"},
-        "rotation": "ZZROTMARK 先普攻接大招的循环手法",
-    },
-    {   # 行B：锚名≠主控（Otoha (Laser) 队主控是珂赛特）——角色定位取行内槽位
-        "main_key": "terra::Otoha (Laser)::Flora",
-        "preset_code": None,
-        "element": "terra",
-        "slots": [
-            {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
-            {"char_id": 145, "en": "Otoha", "cn": "乙叶"},
-            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
-        ],
-        "team_name_preset": "",
-        "team_name_infodoc": "Otoha (Laser)",
-        "guide_ref": {"element": "terra", "block": "Otoha (Laser)"},
-        "rotation": "",
-    },
-    {   # 行C：guide_ref=None（未关联码行）——只出队名+成员+预设码，无区块四类字段
-        "main_key": "terra::Gerie (Auto Attack) WIP::Ridge",
-        "preset_code": "AAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA",
-        "element": "terra",
-        "slots": [
-            {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
-            {"char_id": 110, "en": "Tilia", "cn": "缇莉亚"},
-        ],
-        "team_name_preset": "Gerie Auto Attack Preset",
-        "team_name_infodoc": "",
-        "guide_ref": None,
-        "rotation": "",
-    },
-    {   # 行D：猫眼主控 + 科洛妮丝（新春）支援 → Chaton (Dark Ray) 区块（别名用例）
-        "main_key": "terra::Chaton (Dark Ray)::Flora",
-        "preset_code": None,
-        "element": "terra",
-        "slots": [
-            {"char_id": 114, "en": "Chaton", "cn": "猫眼"},
-            {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"},
-            {"char_id": 126, "en": "Flora", "cn": "紫槿"},
-        ],
-        "team_name_preset": "",
-        "team_name_infodoc": "Chaton (Dark Ray)",
-        "guide_ref": {"element": "terra", "block": "Chaton (Dark Ray)"},
-        "rotation": "",
-    },
-]
-
-# F 节 fixture infodoc：四区块真实结构（锚点行/段头/角色行/秘纹/纹章转置）+
-# 末尾干扰区块（ZZOTHERTEAM 断言按区块抓取不泄漏其他队伍内容）
-F_FIXTURE_INFODOC = """Terra Mark (S. Coronis Ver.) | ⏏ Back to Top ⏏
-Description | Skill Upgrade Priority
-Nazuna (5★) | 10/10/1/10 (Main Skill only)
-ZZDESCMAIN 小禾主控描述内容
-Priority Potentials | Recommended Main Discs
-ZZDISCA (C1) | ZZDISCB (C6)
-Optional Potentials | Emblem
-Affix Priority | Terra PEN | 110 | Crit Rate | 15%
-Main Skill Lv. | +3 levels | Terra DMG | 20%
-Description | Skill Upgrade Priority
-Gerie (4★) | 1/1/10/1 (Support Skill only)
-ZZDESCSUPP 格芮支援描述内容
-Otoha (Laser) | ⏏ Back to Top ⏏
-Description | Skill Upgrade Priority
-Cosette (4★) | 1/10/1/1 (Main Skill only)
-ZZMAINNOTE 珂赛特主控描述内容
-Description | Skill Upgrade Priority
-Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
-ZZSUPPNOTE 乙叶支援描述内容
-Chaton (Dark Ray) | ⏏ Back to Top ⏏
-Description | Skill Upgrade Priority
-Chaton (5★) | 1+/10/1/1+ (Main Skill >> Auto Attack = Ultimate)
-ZZCHATDESC 猫眼主控描述内容
-Description | Skill Upgrade Priority
-Springseek Coronis (5★) | 1/1/10/1 (Support Skill only)
-ZZCORONISDESC 科洛妮丝支援描述内容
-Other Team | ⏏ Back to Top ⏏
-ZZOTHERTEAM 其他队伍内容不应出现
-"""
-
-# F10 fixture umbra infodoc：两个同角色不同玩法区块（翡冷翠 Main Skill / Minion），
-# 模板抄 F_FIXTURE_INFODOC 真实结构（锚点行/段头/角色行/秘纹/纹章转置）改名字与标记；
-# Mistique/Coronis 段无描述标记——模拟"区块内缺段成员由队友并集 rescue"的关联形态
-F10_UMBRA_INFODOC = """Firenze (Main Skill) | ⏏ Back to Top ⏏
-Description | Skill Upgrade Priority
-Firenze (5★) | 10/10/1/10 (Main Skill only)
-ZZMS-F-DESC 翡冷翠主控描述内容
-Description | Skill Upgrade Priority
-Cosette (4★) | 1/1/10/1 (Support Skill only)
-ZZMS-COS-DESC 珂赛特支援描述内容
-Description | Skill Upgrade Priority
-Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
-ZZMS-OTO-DESC 乙叶支援描述内容
-Description | Skill Upgrade Priority
-Mistique (4★) | 1/1/10/1 (Support Skill only)
-Description | Skill Upgrade Priority
-Coronis (5★) | 1/1/10/1 (Support Skill only)
-Firenze (Minion) | ⏏ Back to Top ⏏
-Description | Skill Upgrade Priority
-Firenze (5★) | 10/10/1/10 (Main Skill only)
-ZZMI-F-DESC 翡冷翠仆从主控描述内容
-Description | Skill Upgrade Priority
-Cosette (4★) | 1/1/10/1 (Support Skill only)
-ZZMI-COS-DESC 珂赛特支援描述内容
-Description | Skill Upgrade Priority
-Otoha (5★ Excl.) | 1/1/10/1 (Support Skill only)
-ZZMI-OTO-DESC 乙叶支援描述内容
-Description | Skill Upgrade Priority
-Mistique (4★) | 1/1/10/1 (Support Skill only)
-Description | Skill Upgrade Priority
-Coronis (5★) | 1/1/10/1 (Support Skill only)
-"""
-
-# F10 fixture 行：同 guide_ref 区块多行并组（Main Skill×4 行各不同码 / Minion×3 行无码）
-_F10_MS_REF = {"element": "umbra", "block": "Firenze (Main Skill)"}
-_F10_MI_REF = {"element": "umbra", "block": "Firenze (Minion)"}
-
-
-def _f10_row(
-    slots: list,
-    ref: dict,
-    team_name: str,
-    code: str | None,
-    main_key: str,
-) -> dict:
-    """构造 F10 fixture 表行（行结构 = team_table.json 行契约）。"""
-    return {
-        "main_key": main_key,
-        "preset_code": code,
-        "element": "umbra",
-        "slots": slots,
-        "team_name_preset": "Otoha (Weeping Sky)",
-        "team_name_infodoc": team_name,
-        "guide_ref": ref,
-        "rotation": "",
-    }
-
-
-_S_MS = [
-    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
-     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
-     {"char_id": 145, "en": "Otoha", "cn": "乙叶"}],
-    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
-     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
-     {"char_id": 135, "en": "Mistique", "cn": "雾语"}],
-    [{"char_id": 110, "en": "Firenze", "cn": "翡冷翠"},
-     {"char_id": 142, "en": "Cosette", "cn": "珂赛特"},
-     {"char_id": 118, "en": "Coronis", "cn": "科洛妮丝"}],
-]
-F10_FIXTURE_ROWS = [
-    _f10_row(_S_MS[0], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0xAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::1"),
-    _f10_row(_S_MS[1], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0yAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::2"),
-    _f10_row(_S_MS[2], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS0zAAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::3"),
-    _f10_row(_S_MS[0], _F10_MS_REF, "Firenze (Main Skill)", "AAAAMS00AAAAJwAAACfzbAbAADAQBgNhsWIAGAw", "umbra::MS::4"),
-    _f10_row(_S_MS[0], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::1"),
-    _f10_row(_S_MS[1], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::2"),
-    _f10_row(_S_MS[2], _F10_MI_REF, "Firenze (Minion)", None, "umbra::MI::3"),
-]
-
-
-def run_query_how_section() -> None:
-    print("--- F how 表驱动查询 ---")
-    import unittest.mock
-
-    row_a, row_b, row_c, row_d = F_FIXTURE_ROWS
-    with tempfile.TemporaryDirectory(prefix="stellasora_f_") as tmp:
-        # infodocs 目录 fixture：monkeypatch 模块常量 _INFODOCS_DIR（不触真实离线数据）
-        infodocs_dir = Path(tmp)
-        (infodocs_dir / "terra.json").write_text(
-            json.dumps({"data": F_FIXTURE_INFODOC}, ensure_ascii=False), encoding="utf-8"
-        )
-        with unittest.mock.patch.object(service, "_INFODOCS_DIR", infodocs_dir):
-            # F1 组头+成员行：编号队名头+槽位定位标签（主控/支援），只抓命中区块。
-            # 问句含触发词"完整"→两问询角色全详述（详略策略回归；科洛妮丝（新春）
-            # 无区块段，由队友并集 rescue）
-            mat_a = service.query_how_rows([row_a], with_presets=False, question="小禾 格芮完整攻略")
-            check("F1 组头+槽位定位标签，不含未命中区块内容",
-                  "1. 地系印记 (S. 科洛妮丝 Ver.)" in mat_a
-                  and "小禾（主控位）" in mat_a
-                  and "格芮（支援位）" in mat_a
-                  and "ZZOTHERTEAM" not in mat_a)
-
-            # F2 四类字段齐全（描述/技能/秘纹/纹章）+ 纹章转置分档（70级/80级）
-            check("F2 四类字段齐全且纹章转置分档",
-                  "描述：" in mat_a
-                  and "技能升级优先度：10/10/1/10" in mat_a
-                  and "技能升级优先度：1/1/10/1" in mat_a
-                  and "推荐主位秘纹：" in mat_a and "ZZDISCA" in mat_a
-                  and "纹章推荐：" in mat_a
-                  and "70级：" in mat_a and "80级：" in mat_a
-                  and "110" in mat_a and "15%" in mat_a)
-
-            # F3 支援位问询（锚名≠主控）：问句角色=乙叶（槽位支援位）→ 问询角色排首位。
-            # 详略策略（1 角色→仅乙叶详述）：珂赛特/紫槿进队友并集行，主控字段不再渲染
-            mat_b = service.query_how_rows([row_b], with_presets=False, question="乙叶攻略")
-            check("F3 支援位问询定位正确（锚名≠主控）",
-                  "乙叶（支援位）" in mat_b
-                  and "ZZSUPPNOTE" in mat_b
-                  and "队友：珂赛特（主控位）、紫槿（支援位）" in mat_b
-                  and "ZZMAINNOTE" not in mat_b)
-
-            # F4 rotation 直读行内字段；空 rotation 行不产生输出手法块
-            check("F4 rotation 行字段直读（行A含/行B无输出手法块）",
-                  "ZZROTMARK" in mat_a and "循环手法" in mat_a
-                  and "输出手法" not in mat_b)
-
-            # F5 预设码行：码原文保真+主控/援护标注，位于组头之后；关闭时不出现
-            mat_p = service.query_how_rows([row_a], with_presets=True, question="小禾 格芮完整攻略")
-            idx_t, idx_c = mat_p.find("1. 地系印记 (S. 科洛妮丝 Ver.)"), mat_p.find("预设码：")
-            check("F5 预设码行格式与保序",
-                  idx_t > -1 and idx_c > idx_t
-                  and f"预设码：{F_FIXTURE_CODE}（主控小禾、援护格芮、科洛妮丝（新春））" in mat_p
-                  and "预设码" not in mat_a)
-
-            # F6 guide_ref=None 行优雅降级：组头+成员+预设码，无区块四类字段
-            mat_c = service.query_how_rows([row_c], with_presets=True, question="格芮攻略")
-            check("F6 未关联行优雅降级（组头+成员+预设码，无四类字段）",
-                  "1. 格芮 普攻 预设" in mat_c
-                  and "格芮（主控位）" in mat_c
-                  and "紫槿（支援位）" in mat_c
-                  and "预设码：" in mat_c
-                  and "描述：" not in mat_c and "纹章推荐：" not in mat_c)
-
-            # F7+F8 别名问句（原 F15-1/F15-4 迁移）：提取官方名 + 双"本角色"标签
-            service.configure_overrides(aliases={"春科": "科洛妮丝（新春）"})
-            try:
-                extracted = service.find_character_names_ordered("春科 猫眼 谁好")
-                check("F7 俗称别名提取为官方角色名",
-                      "科洛妮丝（新春）" in extracted and "猫眼" in extracted,
-                      f"提取结果: {extracted}")
-                mat_d = service.query_how_rows([row_d], with_presets=False, question="春科 猫眼攻略")
-                # 详略策略（2 角色→仅第一个即别名角色详述）：科洛妮丝（新春）详述
-                # 可观测（别名识别），猫眼（第二问询角色/主控位）进队友并集行
-                check("F8 别名问句首角色详述+第二问询角色进并集（详略策略翻转）",
-                      "科洛妮丝（新春）（支援位）" in mat_d
-                      and "ZZCORONISDESC" in mat_d
-                      and "猫眼（主控位）" in mat_d
-                      and "ZZCHATDESC" not in mat_d)
-            finally:
-                service.configure_overrides(aliases={})
-
-            # F10 分组渲染：mock umbra.json 写入同一 tmp 目录，
-            # 同 guide_ref 区块跨行并组——组头编号、区块字段去重、队友并集 rescue、组尾预设码
-            (infodocs_dir / "umbra.json").write_text(
-                json.dumps({"data": F10_UMBRA_INFODOC}, ensure_ascii=False), encoding="utf-8"
-            )
-            mat_f = service.query_how_rows(F10_FIXTURE_ROWS, with_presets=True)
-            group_heads_f = re.findall(r"^\d+\. ", mat_f, flags=re.M)
-            ms_cnt = {m: mat_f.count(m) for m in ("ZZMS-F-DESC", "ZZMS-COS-DESC", "ZZMS-OTO-DESC")}
-            mi_cnt = {m: mat_f.count(m) for m in ("ZZMI-F-DESC", "ZZMI-COS-DESC", "ZZMI-OTO-DESC")}
-            check("F10 同区块分组：组头恰2且区块名+字段去重各恰1次+缺段标记不泄漏",
-                  len(group_heads_f) == 2
-                  and "1. 翡冷翠 (主技能)" in mat_f
-                  and "2. 翡冷翠 (仆从)" in mat_f
-                  and all(v == 1 for v in ms_cnt.values()) and all(v == 1 for v in mi_cnt.values())
-                  and mat_f.count("ZZMS-MIS-DESC") == 0 and mat_f.count("ZZMS-COR-DESC") == 0,
-                  f"group_heads={group_heads_f}, ms={ms_cnt}, mi={mi_cnt}")
-            check("F10 队友并集：两组各一并集行+四支援成员齐全",
-                  mat_f.count("队友：雾语（支援位）、科洛妮丝（支援位）") == 2
-                  and "珂赛特" in mat_f and "乙叶" in mat_f
-                  and "雾语（支援位）" in mat_f and "科洛妮丝（支援位）" in mat_f)
-            check("F10 组尾预设码：组1四码各一行+旧'配队'头不出现",
-                  len(re.findall(r"^预设码：", mat_f, flags=re.M)) == 4
-                  and "预设码：AAAAMS0xAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in mat_f
-                  and "预设码：AAAAMS00AAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in mat_f
-                  and "配队" not in mat_f)
-
-        # F11 真实表翡冷翠（不在 patch context 内——读真实离线数据）：
-        # 4 行按 preset 码独立成组，组头为预设队名
-        service.reload_team_table()
-        # F11 真实表翡冷翠：暗系真实数据中 7 支队伍按区块聚合为 2 个大组，旧'配队'头消失且队友并集正确
-        rows_firenze = service.find_team_rows([110])
-        mat_real_f = service.query_how_rows(rows_firenze, question="翡冷翠攻略")
-        check("F11 真实表翡冷翠分组渲染：聚合为大组且旧'配队'头消失+含队友并集",
-              len(re.findall(r"^\d+\. ", mat_real_f, flags=re.M)) >= 2
-              and "翡冷翠（主控位）" in mat_real_f
-              and "配队" not in mat_real_f
-              and len(re.findall(r"^队友：", mat_real_f, flags=re.M)) >= 2,
-              f"rows={len(rows_firenze)}")
-
-        # F13 None 行独立成组+防御：不同 preset_code 各自成组（首行首槽无 char_id
-        # 测并集 ident 回退），空行列表返回空串
-        rows_none = [
-            {
-                "main_key": "terra::Alpha::1",
-                "preset_code": "Preset Alpha",
-                "element": "terra",
-                "slots": [
-                    {"en": "Gerie", "cn": "格芮"},
-                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                ],
-                "team_name_preset": "Preset Alpha",
-                "team_name_infodoc": "",
-                "guide_ref": None,
-                "rotation": "",
-            },
-            {
-                "main_key": "terra::Beta::1",
-                "preset_code": "Preset Beta",
-                "element": "terra",
-                "slots": [
-                    {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                ],
-                "team_name_preset": "Preset Beta",
-                "team_name_infodoc": "",
-                "guide_ref": None,
-                "rotation": "",
-            },
-        ]
-        mat_none = service.query_how_rows(rows_none)
-        check("F13 None行独立成组：组头恰2（预设Alpha/Beta）+缺char_id不崩",
-              len(re.findall(r"^\d+\. ", mat_none, flags=re.M)) == 2
-              and "1. 预设 Alpha" in mat_none and "2. 预设 Beta" in mat_none
-              and "格芮（主控位）" in mat_none
-              and service.query_how_rows([]) == "")
-
-
 # ===== 节 G：直发端到端（核心用例精简版） =====
 
+# ===== 节 G：how 一图流端到端（1.5.0 GameKee 契约：匹配→下载→统一合并转发） =====
+
 async def run_direct_send() -> None:
-    print("--- G 直发端到端 ---")
+    """1.5.0 G 节重写：handle_how 新契约（GameKee 图流直发，无 LLM 加工）。
 
-    # ===== G 节 fixture 表衔接：monkeypatch service.load_team_table 返回 fixture 表
-    # dict（rows+report），handle_how 真实路径经 load_team_table 即得 fixture——不写磁盘。
-    # 未关联行（guide_ref=None）只出队名+成员+预设码骨架；G9c 小禾+格芮行挂真实
-    # Terra Mark (S. Coronis Ver.) guide_ref，验证按区块抓取真实离线数据。
-    import unittest.mock
+    旧 LLM 直发断言（人格/task_name/缓存/去重 prompt 注入）随旧链路废弃；
+    _direct_send 保留至步骤 5（what 链路仍在用），其单测（G20/G23-G25/G28）
+    相应保留。所有 how 用例显式传 platform="qq"（P3 执行层平台校验）。
+    """
+    print("--- G how 一图流端到端 ---")
 
-    def _fixture_row(slots: list, *, code: str | None = None, guide_ref: dict | None = None, rotation: str = "") -> dict:
-        """构造单行 fixture 表行（行结构 = team_table.json 行契约）。"""
+    # 共享桩索引：艾蕾（单图）、薇洛（盛夏）、科洛妮丝新春双分篇（fixture 覆盖别名/分篇）
+    def make_index():
         return {
-            "main_key": code or f"fixture::{slots[0]['en']}",
-            "preset_code": code,
-            "element": "terra",
-            "slots": slots,
-            "team_name_preset": "Original Terra Mark",
-            "team_name_infodoc": "Terra Mark (S. Coronis Ver.)",
-            "guide_ref": guide_ref,
-            "rotation": rotation,
+            "built_at": int(time.time()),
+            "pages": {},
+            "characters": [
+                {"name": "艾蕾", "element": "water", "note": "技伤≈印记，整体相较千小妹提升30%。", "image_urls": ["//cdnimg-v2.gamekee.com/a/ele.png"]},
+                {"name": "薇洛（盛夏）", "element": "water", "note": "", "image_urls": ["//cdnimg-v2.gamekee.com/a/v1.png", "//cdnimg-v2.gamekee.com/a/v_long.png"]},
+                {"name": "科洛妮丝新春·印记篇", "element": "earth", "note": "禾一位高配升级版", "image_urls": ["//cdnimg-v2.gamekee.com/a/k1.png"]},
+                {"name": "科洛妮丝新春·直伤篇", "element": "earth", "note": "玫瑰上限高吃操作", "image_urls": ["//cdnimg-v2.gamekee.com/a/k2.png"]},
+            ],
         }
 
-    _CODE_A = "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw"
-    g_fixture_table = {
-        "rows": [
-            # 夏花单角色行（G1/G4/G5/G8/G10-G18/G26/G27）
-            _fixture_row(
-                [{"char_id": 133, "en": "Nazuka", "cn": "夏花"},
-                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
-                code=_CODE_A, rotation="夏花循环手法测试",
-            ),
-            # 猫眼单角色行（G11）
-            _fixture_row(
-                [{"char_id": 114, "en": "Chaton", "cn": "猫眼"},
-                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
-            ),
-            # 夏花+小禾同行（G9 联合查询交集命中）
-            _fixture_row(
-                [{"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                 {"char_id": 133, "en": "Nazuka", "cn": "夏花"},
-                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
-            ),
-            # 小禾+格芮 Terra Mark 行（G9c 双本角色标签，挂真实离线区块）
-            _fixture_row(
-                [{"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                 {"char_id": 149, "en": "Gerie", "cn": "格芮"},
-                 {"char_id": 159, "en": "Springseek Coronis", "cn": "科洛妮丝（新春）"}],
-                code="AAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA",
-                guide_ref={"element": "terra", "block": "Terra Mark (S. Coronis Ver.)"},
-                rotation="小禾格芮循环手法测试",
-            ),
-        ],
-        "report": {"invalid_rows": []},
-    }
-    g_team_table_patch = unittest.mock.patch.object(
-        service, "load_team_table", return_value=g_fixture_table
-    )
+    WEBP = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 16
 
-    # G1 直发成功：stream 正确 + 人格注入 + model=utils 透传（原用例 1+20 合并）
+    def install_stubs(plugin=None, *, index=None, download=None):
+        """patch plug 模块级 gamekee_* 绑定（handle_how 经模块 globals 解析，
+        实例属性无效——Python 名字解析规则）。plugin 参数保留兼容旧调用。"""
+        if index is None:
+            plug.gamekee_build_index = lambda proxy_url=None: make_index()
+        elif callable(index):
+            plug.gamekee_build_index = index
+        else:
+            plug.gamekee_build_index = lambda proxy_url=None: index
+        if download is None:
+            plug.gamekee_download_image = lambda src, cache, prefer_webp=True: WEBP
+        else:
+            plug.gamekee_download_image = download
+
     p, ctx = make_plugin()
     await p.on_load()
-    g_team_table_patch.start()
+    _stop_bg(p)
+    install_stubs(p)
     llm, send = ctx.llm, ctx.send
-    r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g1")
-    check("G1 直发成功且引导调 wait 禁 reply（经合并转发）",
-          "已直接发送" in r["content"] and "stop 工具" in r["content"] and len(send.forwarded) == 1
-          and send.forwarded[0][0] == "stream_g1")
-    check("G1b 转发卡整卡单节点（署名+全文）",
-          len(send.forwarded[0][1]) == 1
-          and send.forwarded[0][1][0].get("nickname") == "星塔旅人"
-          and fwd_text(send.forwarded[0][1]) == "mock LLM 攻略成品")
-    check("G2 prompt 注入人格与表达风格",
-          "你的名字是麦麦" in llm.calls[0]["prompt"] and "表达风格" in llm.calls[0]["prompt"])
-    check("G3 SDK 透传 task_name=utils", llm.calls[0].get("task_name") == "utils")
+    qq_kwargs = {"platform": "qq"}
 
-    # G4-G6 失败分支：LLM 软失败→降级回传原始资料 / 硬异常→降级回传 / stream 缺失→未找到
-    # （修复点2：资料查询成功但 LLM 加工失败时不再谎报"未找到"，而是带系统说明回传原始资料）
-    ctx.llm = MockLLM(fail=True)
+    # G1 命中单角色：统一合并转发单节点（图段+备注段）+ stop 指引
+    r = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g1", **qq_kwargs)
+    check("G1 命中单角色统一合并转发（图段+备注段+stop指引）",
+          "已直接发送" in str(r.get("content", "")) and "stop 工具" in str(r.get("content", ""))
+          and len(send.forwarded) == 1 and send.forwarded[0][0] == "stream_g1",
+          str(r.get("content", ""))[:60])
+    node = send.forwarded[0][1][0]
+    segs = node.get("segments", [])
+    img_seg = next((s for s in segs if s.get("type") == "image"), None)
+    txt_seg = next((s for s in segs if s.get("type") == "text"), None)
+    check("G1b 节点结构（署名+image段含base64+text段含属性/名称/备注/来源）",
+          node.get("nickname") == "星塔旅人"
+          and img_seg is not None and len(img_seg.get("content", "")) > 0
+          and txt_seg is not None and "【水】艾蕾" in txt_seg["content"]
+          and "技伤≈印记" in txt_seg["content"]
+          and "GameKee" in txt_seg["content"],
+          str(txt_seg["content"][:40]) if txt_seg else "no text seg")
+    check("G1c 无 LLM 参与（攻略图直发，无加工）", len(llm.calls) == 0)
+
+    # G2 多图角色取末张（完整版长图）
+    downloaded: list = []
+
+    def record_download(src, cache, prefer_webp=True):
+        downloaded.append(src)
+        return WEBP
+
+    install_stubs(p, download=record_download)
+    await p.handle_how(query="薇洛攻略", group_id="g1", stream_id="stream_g2", **qq_kwargs)
+    check("G2 多图角色取末张完整长图", downloaded == ["//cdnimg-v2.gamekee.com/a/v_long.png"], str(downloaded))
+
+    # G3 属性泛查：每角色一节点（水系=艾蕾+薇洛）
+    install_stubs(p)
+    n_before = len(send.forwarded)
+    r3 = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g3", **qq_kwargs)
+    nodes3 = send.forwarded[n_before][1]
+    check("G3 属性泛查每角色一节点（2节点+返回张数）",
+          len(nodes3) == 2 and "（2 张）" in str(r3.get("content", "")),
+          f"nodes={len(nodes3)}")
+    # 每个节点都含 image 段
+    check("G3b 每节点均含图片段",
+          all(any(s.get("type") == "image" for s in n.get("segments", [])) for n in nodes3))
+
+    # G4 别名+分篇：春科→科洛妮丝新春全部分篇；点名直伤篇只发该篇
+    p._plugin_config_instance.overrides.aliases = [plug.AliasEntry(alias="春科", official="科洛妮丝新春")]
+    n_before = len(send.forwarded)
+    await p.handle_how(query="春科攻略", group_id="g1", stream_id="stream_g4", **qq_kwargs)
+    names4 = [_node_text_of(send.forwarded[n_before][1])]
+    check("G4 别名命中全部分篇（2节点）", len(send.forwarded[n_before][1]) == 2,
+          f"nodes={len(send.forwarded[n_before][1])}")
+    n_before = len(send.forwarded)
+    await p.handle_how(query="春科直伤篇", group_id="g1", stream_id="stream_g4b", **qq_kwargs)
+    check("G4b 分篇点名只发该篇（1节点且文本含直伤篇）",
+          len(send.forwarded[n_before][1]) == 1
+          and "直伤篇" in _node_text_of(send.forwarded[n_before][1]),
+          _node_text_of(send.forwarded[n_before][1])[:40])
+
+    # G5 未收录：明确提示不发送图片
     n_sent, n_fwd = len(send.sent), len(send.forwarded)
-    r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g4")
-    relay_content = str(r.get("content", ""))
-    check("G4 LLM 软失败→降级回传原始资料（前缀+原文+非未找到+不直发）",
-          relay_content.startswith("[系统说明")
-          and plug._FAILURE_RELAY_PREFIX in relay_content
-          and "夏花" in relay_content
-          and "未找到相关攻略" not in relay_content
-          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
-    ctx.llm = MockLLM(hard_fail=True)
-    r = await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g5")
-    relay_content = str(r.get("content", ""))
-    check("G5 LLM 硬异常→降级回传原始资料（前缀+原文+非未找到）",
-          relay_content.startswith("[系统说明")
-          and "不要调用其他搜索工具" in relay_content
-          and "未找到相关攻略" not in relay_content)
-    ctx.llm = MockLLM()
-    r = await p.handle_what(query="猫眼", group_id="g1", stream_id="")
-    check("G6 stream 缺失→未找到", r["content"] == "未找到相关攻略。")
+    r5 = await p.handle_how(query="不存在的角色XYZ", group_id="g1", stream_id="stream_g5", **qq_kwargs)
+    check("G5 未收录明确提示（不发送图片+stop指引）",
+          len(send.sent) == n_sent + 1 and "没有" in send.sent[-1][1]
+          and len(send.forwarded) == n_fwd
+          and "已向聊天发送" in str(r5.get("content", ""))
+          and "stop 工具" in str(r5.get("content", "")))
 
-    # G7 鉴权：白名单外的群被拒
+    # G6 索引不可用（无快照+探查失败）：明确提示
+    def boom_build(proxy_url=None):
+        raise plug.GameKeeError("probe down")
+
+    p._gamekee_index = None
+    p._gamekee_state.clear()
+    install_stubs(p, index=boom_build)
+    n_sent = len(send.sent)
+    r6 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g6", **qq_kwargs)
+    check("G6 索引不可用明确提示（不发送图片+stop指引）",
+          len(send.sent) == n_sent + 1 and "不可用" in send.sent[-1][1]
+          and "已向聊天发送" in str(r6.get("content", "")))
+    # 恢复索引快照（后续用例依赖）
+    p._gamekee_index = make_index()
+    p._gamekee_state["last_verified"] = p._now()
+    install_stubs(p)
+
+    # G7 部分下载失败：跳过失败节点仍发送成功部分
+    def flaky_download(src, cache, prefer_webp=True):
+        if "v1.png" in src or "v_long.png" in src:
+            raise plug.GameKeeError("image boom")
+        return WEBP
+
+    install_stubs(p, download=flaky_download)
+    n_before = len(send.forwarded)
+    r7 = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g7", **qq_kwargs)
+    check("G7 部分下载失败跳过节点仍发送（1节点=仅艾蕾）",
+          "已直接发送" in str(r7.get("content", "")) and "（1 张）" in str(r7.get("content", ""))
+          and len(send.forwarded[n_before][1]) == 1,
+          str(r7.get("content", ""))[:50])
+
+    # G8 全部下载失败：明确提示不发送
+    def all_fail(src, cache, prefer_webp=True):
+        raise plug.GameKeeError("down")
+
+    install_stubs(p, download=all_fail)
+    n_sent = len(send.sent)
+    r8 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g8", **qq_kwargs)
+    check("G8 全部下载失败明确提示（不发送+stop指引）",
+          len(send.sent) == n_sent + 1 and "下载失败" in send.sent[-1][1]
+          and "已向聊天发送" in str(r8.get("content", "")))
+    install_stubs(p)
+
+    # G9 平台校验（P3 执行层）：非 QQ/未知平台保守拒绝且零网络
+    dl_calls_before_g9 = len(downloaded) if isinstance(downloaded, list) else 0
+    r9a = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g9a", platform="telegram")
+    r9b = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g9b", user_id="u_unknown")
+    check("G9 非QQ/未知平台保守拒绝（不发送不下载）",
+          "不支持" in str(r9a.get("content", "")) and "不支持" in str(r9b.get("content", ""))
+          and len(downloaded) == dl_calls_before_g9,
+          f"dl_delta={len(downloaded) - dl_calls_before_g9}")
+
+    # G10 黑白名单仍然生效（平台先于名单？否——名单拒绝优先级独立，两层都要过）
     p._plugin_config_instance.access_control.mode = "whitelist"
-    r = await p.handle_how(query="夏花", group_id="g999", stream_id="stream_g7")
-    check("G7 白名单拒绝", "允许范围" in r["content"])
+    p._plugin_config_instance.access_control.whitelist = ["g1"]
+    r10 = await p.handle_how(query="艾蕾攻略", group_id="g999", stream_id="stream_g10", **qq_kwargs)
+    check("G10 白名单拒绝", "允许范围" in str(r10.get("content", "")))
     p._plugin_config_instance.access_control.mode = "off"
 
-    # G8 人格开关：关闭后 prompt 无人格，开启后恢复
-    ctx.llm = llm
-    p._plugin_config_instance.query.inject_persona = False
-    await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g8a")
-    no_persona = "你的名字是麦麦" not in llm.calls[-1]["prompt"]
-    p._plugin_config_instance.query.inject_persona = True
-    await p.handle_how(query="夏花", group_id="g1", stream_id="stream_g8b")
-    check("G8 人格开关生效", no_persona and "你的名字是麦麦" in llm.calls[-1]["prompt"])
+    # G11 索引 TTL 内的第二次查询零探查（fresh 复用）
+    fresh_calls = [0]
 
-    # G9 修复点3：联合查询（≥2 角色名）不再强制回传——direct_send=true 时直发聊天
-    n_fwd = len(send.forwarded)
-    ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9")
-    check("G9 联合查询（≥2 角色名）改直发（转发一次+已发送确认+联合问题入 prompt）",
-          len(send.forwarded) == n_fwd + 1
-          and "已直接发送" in str(ret.get("content", ""))
-          and "stop 工具" in str(ret.get("content", ""))
-          and "你的名字是麦麦" in llm.calls[-1]["prompt"]
-          and "小禾" in llm.calls[-1]["prompt"])
+    def counting_build(proxy_url=None):
+        fresh_calls[0] += 1
+        return make_index()
 
-    # G9b alternative：direct_send=false → 回传行为正常（加工成品回传 planner，不直发聊天）
-    p._plugin_config_instance.query.direct_send = False
+    install_stubs(p, index=counting_build)
+    p._gamekee_state["last_verified"] = p._now()
+    await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g11", **qq_kwargs)
+    check("G11 TTL 内二次查询零探查（fresh 复用索引）", fresh_calls[0] == 0, f"build calls={fresh_calls[0]}")
+
+    # G12 缺 query 参数：明确返回缺少查询词（不发送）
     n_sent, n_fwd = len(send.sent), len(send.forwarded)
-    ret = await p.handle_how(query="夏花", question="夏花 小禾 谁的纹章好", group_id="g1", stream_id="stream_g9b")
-    check("G9b direct_send=false 联合查询回传（客观体+系统说明包装+不直发）",
-          "客观" in llm.calls[-1]["prompt"]
-          and "你的名字是麦麦" not in llm.calls[-1]["prompt"]
-          and "系统说明" in str(ret.get("content", ""))
-          and "mock LLM 攻略成品" in str(ret.get("content", ""))
+    r12 = await p.handle_how(query="", group_id="g1", stream_id="stream_g12", **qq_kwargs)
+    check("G12 缺 query 明确返回（不发送）",
+          "缺少查询词" in str(r12.get("content", ""))
           and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
-    p._plugin_config_instance.query.direct_send = True
 
-    # G9c 未命中（用户裁定更新）：单角色表未命中 + 直发模式 → 提示文本直接发送到聊天，
-    # 不回传 planner（planner 收到已发送告知 + wait 指引），不走 LLM
-    n_sent = len(send.sent)
-    n_llm = len(llm.calls)
-    r_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9c")
-    check("G9c 单角色表未命中→直发模式直接发送提示（不回传planner+不走LLM）",
-          len(send.sent) == n_sent + 1
-          and "没有查到相关内容" in send.sent[-1][1]
-          and "stop 工具" in str(r_miss.get("content", ""))
-          and len(llm.calls) == n_llm,
-          f"r_miss={r_miss}")
 
-    # G9d 未命中（多角色交集为空）→ 同样直接发送提示
-    n_sent = len(send.sent)
-    n_llm = len(llm.calls)
-    r_miss2 = await p.handle_how(query="夏花", question="夏花 猫眼 配队", group_id="g1", stream_id="stream_g9d")
-    check("G9d 多角色交集为空→直发模式直接发送提示（不回传planner+不走LLM）",
-          len(send.sent) == n_sent + 1
-          and "没有查到相关内容" in send.sent[-1][1]
-          and "stop 工具" in str(r_miss2.get("content", ""))
-          and len(llm.calls) == n_llm,
-          f"r_miss2={r_miss2}")
 
-    # G9d2 回传模式未命中：direct_send=false 维持旧行为（返回"未找到相关攻略。"给 planner，不直发）
-    p._plugin_config_instance.query.direct_send = False
-    n_sent, n_fwd = len(send.sent), len(send.forwarded)
-    r_relay_miss = await p.handle_how(query="赤霞", group_id="g1", stream_id="stream_g9d2")
-    check("G9d2 回传模式未命中→返回planner原文（不直发）",
-          r_relay_miss == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-          and len(send.sent) == n_sent and len(send.forwarded) == n_fwd)
-    p._plugin_config_instance.query.direct_send = True
-
-    # G9e presets=true 直发：资料含"预设码："行（码原文）——透传至 LLM prompt
-    n_fwd = len(send.forwarded)
-    await p.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_g9e")
-    check("G9e presets=true 资料+prompt 含预设码行",
-          len(send.forwarded) == n_fwd + 1
-          and "预设码：" in llm.calls[-1]["prompt"]
-          and "AAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw" in llm.calls[-1]["prompt"])
-
-    # G9f-G9h 运行时兼容验证（question 契约改必传 + query 多名兜底）：
-    # SDK 层 required=True 语义未经宿主运行时实测（无宿主环境），handler 层
-    # 优雅降级在此验证——question 缺省（""/None）经 (question or "").strip()
-    # 兜底不抛异常，走 query 归一路径命中角色。
-    ctx.llm, ctx.send = MockLLM(), MockSend()
-    r_qf = await p.handle_how(query="小禾 格芮", question="", group_id="g1", stream_id="stream_g9f")
-    check("G9f question 空串→query 兜底命中双角色（不抛异常+直发+两名入 prompt）",
-          "已直接发送" in r_qf.get("content", "")
-          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
-
-    ctx.llm, ctx.send = MockLLM(), MockSend()
-    r_qg = await p.handle_how(query="小禾 格芮", question=None, group_id="g1", stream_id="stream_g9g")
-    check("G9g question=None→不抛异常且 query 兜底命中（直发+两名入 prompt）",
-          "已直接发送" in r_qg.get("content", "")
-          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
-
-    # G9h 4.3 多名兜底路径：问句无可提取角色名时 query 按空格分词逐个归一
-    ctx.llm, ctx.send = MockLLM(), MockSend()
-    r_qh = await p.handle_how(query="小禾 格芮", question="他俩怎么配队", group_id="g1", stream_id="stream_g9h")
-    check("G9h 问句未命中→query 多名分词兜底命中双角色（直发+两名入 prompt）",
-          "已直接发送" in r_qh.get("content", "")
-          and "小禾" in ctx.llm.calls[0]["prompt"] and "格芮" in ctx.llm.calls[0]["prompt"])
-
-    # G10-G12 去重守卫：同流同 query 拦截 / 不同 query 放行 / 窗口过期放行
-    # dedup_window=60：G10 的拦截断言依赖默认 60s 窗口生效
-    p2, ctx2 = make_plugin(dedup=60)
-    await p2.on_load()
-    llm2, send2 = ctx2.llm, ctx2.send
-    # G10a 未找到直发同样登记去重：同 query 重复未找到第二次被拦（尘沙（源初）重复提示回归）
-    r_nf1 = await p2.handle_how(query="赤霞", group_id="g1", stream_id="stream_dedup_nf")
-    r_nf2 = await p2.handle_how(query="赤霞", group_id="g1", stream_id="stream_dedup_nf")
-    check("G10a 未找到直发去重（第二次拦截+stop 指引+提示只发一条）",
-          "已向聊天发送" in str(r_nf1.get("content", ""))
-          and "刚刚已直接发送过" in str(r_nf2.get("content", ""))
-          and "stop 工具" in str(r_nf2.get("content", ""))
-          and len([t for t in send2.sent if "没有查到相关内容" in t[1]]) == 1)
-    await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
-    r2b = await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup")
-    check("G10 同流同 query 去重拦截（LLM/转发各一次）",
-          "勿重复发送" in r2b.get("content", "") and len(llm2.calls) == 1 and len(send2.forwarded) == 1)
-
-    ctx2.llm, ctx2.send = MockLLM(), MockSend()
-    p2._recent_direct.clear()
-    await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup11")
-    r11 = await p2.handle_how(query="猫眼", group_id="g1", stream_id="stream_dedup11")
-    check("G11 不同 query 不拦截", "已直接发送" in r11.get("content", "") and len(ctx2.send.forwarded) == 2)
-
-    ctx2.llm, ctx2.send = MockLLM(), MockSend()
-    p2._recent_direct.clear()
-    p2._recent_direct[("stream_dedup13", "夏花")] = time.time() - 200  # 时间戳前推 200s 超过默认 60s 窗口
-    r13 = await p2.handle_how(query="夏花", group_id="g1", stream_id="stream_dedup13")
-    check("G12 窗口过期不拦截", "已直接发送" in r13.get("content", ""))
-
-    # G13-G15 直发成品缓存：命中 / 配置更新清空 / presets 独立缓存键
-    p15, ctx15 = make_plugin(dedup=0, ttl=86400)
-    await p15.on_load()
-    llm15, send15 = ctx15.llm, ctx15.send
-    llm15.answer = "夏花纹章推荐成品攻略"
-    await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    r15b = await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    check("G13 缓存命中（LLM 一次/转发两次/内容相同）",
-          len(llm15.calls) == 1 and len(send15.forwarded) == 2
-          and fwd_text(send15.forwarded[0][1]) == fwd_text(send15.forwarded[1][1]) == "夏花纹章推荐成品攻略"
-          and "已直接发送" in r15b.get("content", ""))
-
-    # G14 配置更新去抖：无答案相关变化 → 保留缓存；相关字段实质变化 → 清缓存
-    await p15.on_config_update(scope="self", config_data={}, version="1.2.3")
-    await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15c")
-    check("G14a 无实质变化的配置更新保留缓存（LLM 仍 1 次）",
-          len(llm15.calls) == 1 and len(send15.forwarded) == 3)
-
-    p15._plugin_config_instance.query.llm_model = "alternate"  # 答案相关字段实质变化（不在缓存 key 内，证明清的是缓存）
-    await p15.on_config_update(scope="query", config_data={}, version="1.2.3")
-    await p15.handle_how(query="夏花", group_id="g1", stream_id="stream_cache15")
-    check("G14 答案相关配置变化清空缓存（LLM 重新生成）", len(llm15.calls) == 2 and len(send15.forwarded) == 4)
-
-    # G14b 别名变更进入答案指纹（回归：AliasEntry 为 pydantic 模型，须先转纯 dict
-    # 才能 json.dumps；旧实现直接序列化抛 TypeError 被吞 → 别名恒不入指纹、变更不清缓存）
-    fp_before = p15._answer_relevant_fingerprint()
-    p15._plugin_config_instance.overrides.aliases = [plug.AliasEntry(alias="新俗称", official="夏花")]
-    fp_after = p15._answer_relevant_fingerprint()
-    check("G14b 别名变更改变答案指纹（不再被序列化异常吞掉）", fp_before != fp_after)
-
-    # G15 presets 独立缓存键（需要 ttl>0 才有成品缓存行为）
-    p18, ctx18 = make_plugin(ttl=86400)
-    await p18.on_load()
-    llm18, send18 = ctx18.llm, ctx18.send
-    await p18.handle_how(query="夏花", presets=False, group_id="g1", stream_id="stream_cache18")
-    await p18.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_cache18")
-    await p18.handle_how(query="夏花", presets=True, group_id="g1", stream_id="stream_cache18")
-    check("G15 presets 独立缓存键（1→2→命中 2）",
-          len(llm18.calls) == 2 and len(send18.forwarded) == 3)
-
-    # G16 游戏知识内联验证：how 模板已内联游戏知识，直发 prompt 恒含知识标头
-    p19, ctx19 = make_plugin()
-    await p19.on_load()
-    llm19 = ctx19.llm
-    await p19.handle_how(query="夏花", group_id="g1", stream_id="stream_k19a")
-    has_knowledge = "【游戏机制知识（回答格式必须遵守）】" in llm19.calls[0]["prompt"]
-    check("G16 游戏知识内联 how 模板（恒含知识标头）", has_knowledge)
-
-    # G17 llm_model 空串 → generate kwargs 不含 task_name 键（负路径，宿主回落默认任务）
-    p20, ctx20 = make_plugin()
-    await p20.on_load()
-    p20._plugin_config_instance.query.llm_model = ""
-    r21 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_g17")
-    check("G17 llm_model 空串不含 task_name 键",
-          "task_name" not in ctx20.llm.calls[0] and "已直接发送" in r21.get("content", ""))
-
-    # G18 直发 prompt 注入反 markdown 约束（规则 9）
-    ctx20.llm, ctx20.send = MockLLM(), MockSend()
-    p20._plugin_config_instance.query.llm_model = "utils"
-    p20._recent_direct.clear()
-    r22 = await p20.handle_how(query="夏花", group_id="g1", stream_id="stream_anti_md")
-    check("G18 反 markdown 指令注入",
-          "不要使用任何 markdown 格式" in ctx20.llm.calls[0]["prompt"]
-          and "已直接发送" in r22.get("content", ""))
-
-    # G19 提示词单一事实源：docs/prompts_how.md 加载成功且含关键规则标记（走插件同一加载路径）
-    p23, ctx23 = make_plugin()
-    await p23.on_load()
-    loaded_prompt = plug._load_prompt_doc_how()
-    check("G19 how 提示词文档加载成功且含三标记",
-          isinstance(loaded_prompt, str)
-          and "不要使用任何 markdown 格式" in loaded_prompt
-          and "2000 字" in loaded_prompt
-          and "预设码保持原样" in loaded_prompt)
-    loaded_prompt_what = plug._load_prompt_doc_what()
-    check("G19b what 提示词文档加载成功且含人格占位符",
-          isinstance(loaded_prompt_what, str)
-          and "{persona_block}" in loaded_prompt_what
-          and "{question}" in loaded_prompt_what
-          and "{material}" in loaded_prompt_what)
-    # G19c 加载结果只含围栏内正文，围栏外的维护者元说明（文件性质/占位符说明/
-    # 作用边界/重启生效）不得进入 LLM 上下文（否则模型产生"读取配置文件"的
-    # 元认知而答非所问——hotfix 回归）
-    check("G19c 加载结果排除围栏外元说明（what/how）",
-          "作用边界" not in loaded_prompt_what
-          and "占位符说明" not in loaded_prompt_what
-          and "需**重启插件**才能生效" not in loaded_prompt_what
-          and "{persona_block}" in loaded_prompt_what
-          and "{question}" in loaded_prompt_what
-          and "{material}" in loaded_prompt_what
-          and "占位符说明" not in loaded_prompt
-          and "需**重启插件**才能生效" not in loaded_prompt
-          and "不要使用任何 markdown 格式" in loaded_prompt)
-
-    # G20-G21 失败路径：monkeypatch how 提示词文档路径为不存在并清空模块缓存，
-    # 按插件加载同一路径重新赋值类属性 → _direct_send 返回未找到 + 双路 error 日志
-    ctx_logger = logging.getLogger("plugin.ggsfly.stellasora-plugin")  # 与 make_plugin 的 plugin_id 对应
-    module_logger = logging.getLogger("stellasora.plugin")
-    ctx_handler, module_handler = _ListLogHandler(), _ListLogHandler()
-    ctx_logger.addHandler(ctx_handler)
-    module_logger.addHandler(module_handler)
-    saved_doc_path_how = plug._PROMPT_DOC_PATH_HOW
-    saved_doc_cache_how = plug._PROMPT_DOC_CACHE_HOW
-    saved_prompt_how = plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW
-    plug._PROMPT_DOC_PATH_HOW = Path(tempfile.mkdtemp(prefix="stellasora_g20_")) / "prompts_how.md"
-    plug._PROMPT_DOC_CACHE_HOW = None
-    plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW = plug._load_prompt_doc_how()
-    try:
-        ctx23.llm, ctx23.send = MockLLM(), MockSend()
-        r23 = await p23._direct_send(
-            tool_name="stellasora_how", question="夏花攻略", material="资料",
-            direct=True, query="夏花", stream_id="stream_g20",
-        )
-        check("G20 how 提示词文档缺失→未找到且不调 LLM 不发送",
-              r23 == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-              and ctx23.llm.calls == [] and ctx23.send.sent == [])
-        check("G21 提示词文档缺失记录 error 日志（加载器+守卫双路）",
-              any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in module_handler.records)
-              and any(r.levelno == logging.ERROR and "提示词" in r.getMessage() for r in ctx_handler.records))
-    finally:
-        plug._PROMPT_DOC_PATH_HOW = saved_doc_path_how
-        plug._PROMPT_DOC_CACHE_HOW = saved_doc_cache_how
-        plug.StellaSoraPlugin._DIRECT_SEND_PROMPT_HOW = saved_prompt_how
-        ctx_logger.removeHandler(ctx_handler)
-        module_logger.removeHandler(module_handler)
-
-    # 修复点2：LLM 加工失败降级回传（资料非空 → 系统说明+原始资料；不再谎报"未找到"）。
-    # 硬异常经 handle_how 真实链路已由 G5 覆盖，不再单测。
-    relay_prefix = plug._FAILURE_RELAY_PREFIX
-
-    # G23 direct=False（回传路径）统一降级语义：前缀+资料原文
-    p23b, ctx23b = make_plugin()
-    await p23b.on_load()
-    ctx23b.llm = MockLLM(hard_fail=True)
-    r23b = await p23b._direct_send(
-        tool_name="stellasora_what", question="猫眼资料", material="回传模式原始资料ABC",
-        direct=False, query="猫眼",
+def _node_text_of(nodes) -> str:
+    """转发节点数组 → 全部文本段拼接（不含图片段）。"""
+    return "\n".join(
+        seg.get("content", "") for node in nodes for seg in node.get("segments", [])
+        if seg.get("type") == "text"
     )
-    check("G23 direct=False 路径统一降级回传",
-          r23b.get("content") == relay_prefix + "回传模式原始资料ABC"
-          and ctx23b.send.sent == [])
 
-    # G24 降级动作记录 warning 日志（失败原因 + 降级动作）
-    g24_logger = logging.getLogger("plugin.ggsfly.stellasora-plugin")
-    g24_handler = _ListLogHandler()
-    g24_logger.addHandler(g24_handler)
-    try:
-        p24, ctx24 = make_plugin()
-        await p24.on_load()
-        ctx24.llm = MockLLM(fail=True)
-        r24 = await p24._direct_send(
-            tool_name="stellasora_how", question="夏花攻略", material="日志断言资料",
-            direct=True, query="夏花", stream_id="stream_g24",
-        )
-        check("G24 降级回传记录 warning 日志（失败原因+降级动作）",
-              "[系统说明" in str(r24.get("content", ""))
-              and any(r.levelno == logging.WARNING and "降级回传" in r.getMessage()
-                      and "mock LLM down" in r.getMessage() for r in g24_handler.records))
-    finally:
-        g24_logger.removeHandler(g24_handler)
 
-    # G25 资料为空（空串/纯空白）+ LLM 失败 → 维持"未找到相关攻略。"
-    p25, ctx25 = make_plugin()
-    await p25.on_load()
-    ctx25.llm = MockLLM(hard_fail=True)
-    r25a = await p25._direct_send(
-        tool_name="stellasora_how", question="夏花攻略", material="",
-        direct=True, query="夏花", stream_id="stream_g25a",
-    )
-    r25b = await p25._direct_send(
-        tool_name="stellasora_how", question="夏花攻略", material="   ",
-        direct=True, query="夏花", stream_id="stream_g25b",
-    )
-    check("G25 资料为空+LLM 失败→未找到（空串与纯空白一致）",
-          r25a == {"name": "stellasora_how", "content": "未找到相关攻略。"}
-          and r25b == {"name": "stellasora_how", "content": "未找到相关攻略。"})
+def _stop_bg(plugin) -> None:
+    """停掉实例的 GameKee 后台探查任务（单测只测手动/懒刷新入口）。"""
+    t = getattr(plugin, "_gamekee_probe_task", None)
+    if t is not None and not t.done():
+        t.cancel()
 
-    # G26 降级回传不写直发成品缓存：同查询第二次仍重新调 LLM、内存缓存保持为空
-    # （对照 G13：成功路径第二次命中缓存 LLM 只调 1 次）
-    p26, ctx26 = make_plugin(ttl=86400)
-    await p26.on_load()
-    ctx26.llm = MockLLM(fail=True)
-    r26a = await p26.handle_how(query="夏花", group_id="g1", stream_id="stream_g26")
-    r26b = await p26.handle_how(query="夏花", group_id="g1", stream_id="stream_g26")
-    check("G26 降级回传不写缓存（二次查询重调 LLM+内存缓存为空+不直发）",
-          len(ctx26.llm.calls) == 2
-          and len(p26._get_answer_cache()._memory_cache) == 0
-          and str(r26a.get("content", "")).startswith("[系统说明")
-          and str(r26b.get("content", "")).startswith("[系统说明")
-          and ctx26.send.sent == [])
-
-    # G28 加工成功（响应纯空白视为失败）→ 降级回传：success=True 但 response 空白
-    p28, ctx28 = make_plugin()
-    await p28.on_load()
-    ctx28.llm = MockLLM(answer="   ")
-    r28 = await p28._direct_send(
-        tool_name="stellasora_how", question="夏花攻略", material="空白响应降级资料",
-        direct=True, query="夏花", stream_id="stream_g28",
-    )
-    check("G28 success=True 但响应空白→降级回传",
-          str(r28.get("content", "")).startswith("[系统说明")
-          and "空白响应降级资料" in str(r28.get("content", ""))
-          and "未找到相关攻略" not in str(r28.get("content", "")))
-
-    # G29/G30（表缓存 reload 接线）与 K20/L11 完全重复，已收敛到 K/L 节断言
-    g_team_table_patch.stop()
-    service.reload_team_table()
 
 
 # ===== 节 H：输出格式（verbatim trust + infodoc 输出规则） =====
 
-async def run_output_format() -> None:
-    print("--- H 输出格式 ---")
-
-    # H1 verbatim trust：LLM 返回 markdown 时不清洗，新鲜与缓存路径均原样直发
-    p, ctx = make_plugin(ttl=3600)
-    await p.on_load()
-    # 注意：_direct_send 会对 LLM 返回做 .strip()，样例两端不能是空白字符
-    markdown_response = (
-        "**夏花攻略**\n"
-        "### 推荐阵容\n"
-        "主控位：夏花，支援位：猫眼。\n"
-        "- 秘纹推荐：`风之眼`、`狂风呼啸`\n"
-        "| 纹章 | 词条 |\n"
-        "| 三角形 | 风系穿透 |"
-    )
-    ctx.llm = MockLLM(answer=markdown_response)
-    res1 = await p.handle_how(query="夏花", question="夏花怎么玩", group_id="g1", stream_id="s_h1")
-    sent1 = fwd_text(ctx.send.forwarded[0][1])
-    res2 = await p.handle_how(query="夏花", question="夏花怎么玩", group_id="g1", stream_id="s_h2")
-    sent2 = fwd_text(ctx.send.forwarded[1][1])
-    check("H1 LLM 输出原样直发（新鲜+缓存 verbatim，经合并转发单节点）",
-          sent1 == markdown_response and sent2 == markdown_response
-          and "已直接发送" in res1["content"] and "已直接发送" in res2["content"])
-
-    # H2 infodoc 输出规则关键词注入（赤霞→Chaton 火队）
-    p3, ctx3 = make_plugin()
-    await p3.on_load()
-    ctx3.llm = MockLLM(answer="赤霞攻略纯文本输出")
-
-    orig = {
-        "index": service.StelladbFetcher.fetch_infodoc_index,
-        "infodoc": service.StelladbFetcher.fetch_infodoc,
-    }
-    try:
-        service.StelladbFetcher.fetch_infodoc_index = lambda self: "Chaton (Ignis) | Rotation: E > Q > R | Chaton (Main Slot) | Flora (1st Supp. Slot)"
-        service.StelladbFetcher.fetch_infodoc = lambda self, element: (
-            "Chaton (Ignis) | Main Slot | Recommended Main Discs: DiscA (C1), DiscB\n"
-            "Emblem: Triangle | Ignis PEN\n"
-            "Priority Potentials: Mark of Flame +3\n"
-        )
-        res = await p3.handle_how(query="赤霞", question="赤霞攻略", group_id="g1", stream_id="s_h3")
-        prompt = ctx3.llm.calls[0]["prompt"]
-        # 新版关键词：分组结构说明（N. 队伍名）+ 队友并集行 + 同级词条合并；
-        # 旧单角色字样（本角色/配队N）随规则 4 改写一并清除
-        missing = [kw for kw in ("队友：", "N. ", "合并为一条", "纹章", "秘纹") if kw not in prompt]
-        leftover = [kw for kw in ("本角色", "配队N（") if kw in prompt]
-        check("H2 prompt 含分组新结构标记且旧单角色字样清除",
-              not missing and not leftover and "已直接发送" in res["content"],
-              f"缺少 {missing} 残留 {leftover}")
-    finally:
-        service.StelladbFetcher.fetch_infodoc_index = orig["index"]
-        service.StelladbFetcher.fetch_infodoc = orig["infodoc"]
-
-
 # ===== 节 I：非阻塞探针 =====
 
 async def run_nonblocking() -> None:
+    """I: 同步重活不阻塞事件循环——handle_how 的图片下载（to_thread）路径。"""
     print("--- I 非阻塞探针 ---")
     p, ctx = make_plugin()
     await p.on_load()
+    _stop_bg(p)
+    _i_index = {"built_at": int(time.time()), "pages": {"water": {"updated_at": 1}}, "characters": [{"name": "艾蕾", "element": "water", "note": "", "image_urls": ["//cdnimg-v2.gamekee.com/a/ele.png"]}]}
+    plug.gamekee_build_index = lambda proxy_url=None: _i_index
+    plug.gamekee_probe_updates = lambda proxy_url=None, timeout=20, known_updates=None: {
+        "pages": {k: {"updated_at": 1, "published_at": 1} for k in ("water", "fire", "light", "dark", "wind", "earth")},
+        "changed": True,
+    }
 
-    # 把 query_what 替换为含 0.3s 同步阻塞的函数；若它在事件循环内执行，
-    # 并发的 0.1s 探针将漂移 ≥0.15s 判 FAIL
-    orig_query_what, orig_count = plug.query_what, plug.count_character_names
-
-    def slow_query_what(*args, **kwargs):
+    def slow_download(src, cache, prefer_webp=True):
         time.sleep(0.3)
-        return "mock攻略内容"
+        return b"RIFF\x00\x00\x00\x00WEBP\x00" * 8
 
-    plug.query_what = slow_query_what
-    plug.count_character_names = lambda q: 1
+    plug.gamekee_download_image = slow_download
+    ctx.chat = MockChat(streams=[{"session_id": "sess_i", "group_id": "g1", "user_id": "u1", "platform": "qq"}])
     try:
         probe_done: list = []
 
@@ -1282,36 +493,24 @@ async def run_nonblocking() -> None:
             await asyncio.sleep(0.1)
             probe_done.append(time.monotonic() - t0)
 
-        await asyncio.gather(
-            p.handle_what(query="夏花", group_id="g1", stream_id="stream_i"),
-            probe(),
-        )
-        drift = (probe_done[0] if probe_done else float("inf")) - 0.1
+        task = asyncio.create_task(p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_i", session_id="sess_i"))
+        probe_task = asyncio.create_task(probe())
+        r = await asyncio.wait_for(task, 15)
+        await asyncio.wait_for(probe_task, 15)
+        drift = probe_done[0] - 0.1
         check("I1 同步重活不阻塞事件循环（探针漂移<0.15s）", drift < 0.15, f"漂移 {drift:.3f}s")
-    finally:
-        plug.query_what = orig_query_what
-        plug.count_character_names = orig_count
+        check("I1b how 图片直发成功", "已直接发送" in str(r.get("content", "")))
 
-    # 异常传播：query_what 抛错时 handle_what 不挂起（5s 超时保护）
-    def raise_query_what(*args, **kwargs):
-        raise RuntimeError("test error")
+        # I2 异常干净传播：下载抛错 → 明确提示不挂起
+        def raise_download(src, cache, prefer_webp=True):
+            raise plug.GameKeeError("download hard down")
 
-    plug.query_what = raise_query_what
-    try:
-        behavior = "propagated"
-        try:
-            result = await asyncio.wait_for(
-                p.handle_what(query="夏花", group_id="g1", stream_id="stream_i_b"), timeout=5.0)
-            behavior = "caught_as_not_found" if "未找到" in result.get("content", "") else "returned"
-            if behavior == "returned":
-                behavior = "unexpected_return"
-        except asyncio.TimeoutError:
-            behavior = "hung"
-        except RuntimeError:
-            behavior = "propagated"
-        check("I2 异常干净传播不挂起", behavior in ("propagated", "caught_as_not_found"), behavior)
+        plug.gamekee_download_image = raise_download
+        r2 = await asyncio.wait_for(
+            p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_i2", session_id="sess_i"), 15)
+        check("I2 下载异常干净传播（提示+不挂起）", "下载失败" in str(r2.get("content", "")))
     finally:
-        plug.query_what = orig_query_what
+        await p.on_unload()
 
 
 # ===== 节 J：工具参数描述（群聊回退 bug 回归） =====
@@ -1340,48 +539,41 @@ def run_tool_query_desc() -> None:
     how_desc = tool_descs.get("stellasora_how", "")
     how_required = tool_required.get("stellasora_how", {})
     desc = how_params.get("query", "")
-    # J1 query 参数契约：支持空格分隔多名 + question 缺失时兜底归一
-    check("J1 how.query 多名+兜底归一契约",
-          "空格分隔多个" in desc and "兜底归一" in desc and "只传名字本身" not in desc, desc)
-    # J2 工具 description 契约：用途示例（配队/攻略/秘纹）保留；属性泛查支持宣称（"风队"示例）；
-    # question 参数 required=True；query description 含多名写法
-    check("J2 how.description 保留用途示例+属性泛查支持+question 必传",
-          all(w in how_desc for w in ("攻略", "配队", "秘纹", "属性泛查", "风队"))
-          and how_required.get("question") is True
-          and "空格分隔多个" in desc,
+    # J1 query 参数契约（1.5.0）：单一 query 参数必传，覆盖问题原文/角色名/属性泛查/别名
+    check("J1 how.query 单参数原文契约（别名+属性泛查宣称）",
+          how_required.get("query") is True and "属性泛查" in desc and "别名" in desc
+          and "问题原文" in desc, desc)
+    # J2 工具 description 契约（1.5.0）：一图流/攻略图/属性示例保留；question/presets 已移除。
+    # 划界词实际为「角色客观资料……不在本工具范围」（不含字面 stellasora_what——
+    # planner 靠 tool_search 词面与 description 语义路由，划界语义由"不在本工具范围"承担）
+    check("J2 how.description 一图流契约+划界+旧参数移除",
+          all(w in how_desc for w in ("一图流", "攻略图", "风队"))
+          and "不在本工具范围" in how_desc
+          and "question" not in how_required and "presets" not in how_required,
           f"desc={how_desc}, required={how_required}")
-    # J3 query 参数契约：只收角色名，不宣称元素中文名（水/火/风/地/光/暗）
-    check("J3 how.query 清除元素中文名宣称",
-          not any(elem in desc for elem in ("水", "火", "风", "地", "光", "暗"))
-          and "元素" not in desc, desc)
-    what_desc = tool_infos.get("stellasora_what", {}).get("query", "")
-    check("J4 what.query 描述覆盖实体与概念词",
-          "角色" in what_desc and "秘纹" in what_desc and "首领" in what_desc,
-          what_desc)
-    # J5 自省修复：主观「不触发/不回答」由工具 description（planner 系统提示）承担，
-    # 提示词只承载输出约束；且维护者元说明（文件性质/作用边界/重启生效）不得进入
-    # LLM 上下文——否则模型产生「读取配置文件」的元认知而答非所问（hotfix 回归）。
-    what_tool_desc = tool_descs.get("stellasora_what", "")
-    what_prompt = plug._load_prompt_doc_what() or ""
-    check("J5 主观判定归 planner 描述 / 输出约束归 prompt / 元说明不入上下文",
-          "调用边界" in what_tool_desc and "不要调用本工具" in what_tool_desc
-          and "stellasora_how" in what_tool_desc
-          and "不新增主观评价" in what_prompt
-          and "作用边界" not in what_prompt
-          and "只约束 LLM 的输出表达" not in what_prompt
-          and "无法控制" not in what_prompt
-          and "单一事实源" not in what_prompt,
-          f"tool_desc_has_boundary={'调用边界' in what_tool_desc}")
+    # J3 query 参数：不宣称 LLM 加工/预设码（旧契约清除）
+    check("J3 how.query 清除旧契约宣称（预设码/兜底归一）",
+          "预设码" not in desc and "兜底归一" not in desc, desc)
 
 
 # ===== 节 K：手动更新指令（st_update） =====
 
+# -*- coding: utf-8 -*-
+# K 节 1.5.0 重写内容（供替换脚本读取）
+import asyncio
+import threading
+import time
+
+
 async def run_manual_update() -> None:
+    """K: /st_update 1.5.0 契约——操作员鉴权、提前闸门、强刷两榜+探查+重置计时、
+    三路结果独立报告、不自 reload、不碰字典/GameKee 索引外的任何旧链路。"""
     print("--- K 手动更新指令 ---")
     p, ctx = make_plugin()
     await p.on_load()
+    _stop_bg(p)
+    ctx.chat = MockChat(streams=[{"session_id": "sess_k", "group_id": "g1", "user_id": "u1", "platform": "qq"}])
 
-    # 1. 验证 @Command 注册属性
     func = getattr(plug.StellaSoraPlugin, "handle_update", None)
     check("K1 handle_update 方法存在", func is not None)
     attr = "__maibot_component_info__"
@@ -1394,1788 +586,137 @@ async def run_manual_update() -> None:
         check("K4b 操作员级别权限声明 permission=operator",
               md.get("permission") == "operator", f"metadata={md}")
 
-    # 2. 鉴权失败拦截
     p.config.access_control.mode = "whitelist"
-    p.config.access_control.whitelist = ["allowed_group", "allowed_user"]
-    denied_res = await p.handle_update(stream_id="s1", group_id="denied_group", user_id="denied_user")
+    p.config.access_control.whitelist = ["allowed_group"]
+    denied_res = await p.handle_update(stream_id="s1", group_id="denied_group", user_id="denied_user", platform="qq")
     check("K5 未授权调用被拦截（返回 False）", denied_res[0] is False)
     check("K6 拦截返回码为 1 且包含权限提示", denied_res[2] == 1 and "权限" in denied_res[1])
     check("K7 未授权不向聊天流发送消息", len(ctx.send.sent) == 0)
-
-    # 3. 授权调用：handler 秒回受理，后台全流程（字典→同步→缓存接线→自 reload）
+    r_plat = await p.handle_update(stream_id="s1", group_id="allowed_group", platform="telegram")
+    check("K7b 非QQ平台保守拒绝且不发送", r_plat[0] is False and len(ctx.send.sent) == 0)
     p.config.access_control.mode = "off"
-    orig_sync = plug.sync_offline_data
-    orig_dict = plug.update_dict_via_preferred_path
-    sync_called = []
-    dict_calls = []
 
-    def mock_update_dict(output, proxy=None):
-        dict_calls.append(output)
-        return {"mode": "remote", "added": 3, "updated": 1, "total": 50162}
+    probe_calls = []
 
-    def mock_sync_offline_data(**kwargs):
-        sync_called.append(kwargs)
-        return {"status": "ok"}
+    def fake_index(proxy_url=None):
+        probe_calls.append(1)
+        return {"built_at": int(time.time()), "pages": {}, "characters": [{"name": "艾蕾", "element": "water", "note": "", "image_urls": ["//x/y.png"]}]}
 
-    plug.update_dict_via_preferred_path = mock_update_dict
-    plug.sync_offline_data = mock_sync_offline_data
-    # reload 接线：后台同步产出新统一表后 reload_team_table() 失效表缓存
-    # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
-    reload_calls: list = []
-    orig_reload = plug.reload_team_table
-    plug.reload_team_table = lambda: reload_calls.append(True)
+    board_results_stub = {
+        "bb": {"status": "ok", "detail": "bb13 Top100"},
+        "fe": {"status": "not_found", "detail": "fe8 当期未开榜"},
+    }
+    board_calls = []
+
+    def fake_refresh(leaderboard_dir, proxy_url=None):
+        board_calls.append(1)
+        return board_results_stub
+
+    orig_build = plug.gamekee_build_index
+    orig_refresh = plug.refresh_board_for_update
+    plug.refresh_board_for_update = fake_refresh
     try:
-        # 准备缓存测试文件与内存数据
-        answers_dir = p._cache_dir_ready() / "answers"
-        answers_dir.mkdir(parents=True, exist_ok=True)
-        dummy_file = answers_dir / "test_answer.json"
-        dummy_file.write_text("{}", encoding="utf-8")
-        cache_mgr = p._get_answer_cache()
-        cache_mgr._memory_cache["test_key"] = "cached_val"
-
-        success, msg, code = await p.handle_update(stream_id="stream_k", group_id="any_group")
+        plug.gamekee_build_index = fake_index
+        await p._run_gamekee_probe(trigger="setup")
+        fresh_verified = p._gamekee_state["last_verified"]
+        success, msg, code = await p.handle_update(stream_id="stream_k", group_id="g1", platform="qq")
         check("K8 后台化：handler 立即返回受理 True", success is True)
         check("K9 返回码为 2（拦截触发消息不进 planner）", code == 2)
-        # 后台任务含 to_thread，必须等待任务完成后再断言
-        await asyncio.wait_for(p._update_task, 15)
-        check("K10 字典先行更新且随后调用 sync_offline_data(sync_all=True)",
-              len(dict_calls) == 1 and len(sync_called) == 1 and sync_called[0].get("sync_all") is True)
-        check("K11 开始与完成两批提示消息（完成文案含重载预告）",
-              any("正在后台同步" in t[1] for t in ctx.send.sent)
-              and any("正在重载" in t[1] for t in ctx.send.sent))
-        check("K12 磁盘 answers 缓存被清空", not dummy_file.exists())
-        check("K13 内存 answers 缓存被清空", len(cache_mgr._memory_cache) == 0)
-        check("K20 同步后调用 reload_team_table 失效表缓存", len(reload_calls) == 1)
-        check("K22 末步以 ctx.plugin_id 自 reload 恰一次",
-              ctx.component.calls == [p.ctx.plugin_id])
-        service.reload_team_table()
+        await asyncio.wait_for(p._update_task, 30)
+        check("K10 强刷绕过 TTL（探查 2 次=setup+manual，两榜各 1 次）",
+              len(probe_calls) == 2 and len(board_calls) == 1,
+              f"probe={len(probe_calls)} board={len(board_calls)}")
+        update_msgs = [t[1] for t in ctx.send.sent if "数据更新完成" in t[1]]
+        check("K11 三路独立报告（bb成功/fe未开榜/探查结果各自一行）",
+              len(update_msgs) == 1
+              and "联合讨伐：强刷成功" in update_msgs[0]
+              and "终焉绝响：fe8 当期未开榜" in update_msgs[0]
+              and "攻略源：索引已更新（1 小节）" in update_msgs[0]
+              and "每日探查计时已重置" in update_msgs[0],
+              update_msgs[0][:120] if update_msgs else "no msg")
+        check("K12 手动成功重置每日探查计时", p._gamekee_state["last_verified"] > fresh_verified)
     finally:
-        plug.update_dict_via_preferred_path = orig_dict
-        plug.sync_offline_data = orig_sync
-        plug.reload_team_table = orig_reload
+        plug.gamekee_build_index = orig_build
+        plug.refresh_board_for_update = orig_refresh
 
-    # 4. 字典失败路径（原 K14/K15 后台化重写）：不走同步、不 reload、发截断失败消息
-    n_sync, n_reload, n_sent = len(sync_called), len(ctx.component.calls), len(ctx.send.sent)
+    board_results_fail = {
+        "bb": {"status": "error", "detail": "拉取失败"},
+        "fe": {"status": "ok", "detail": "fe8 Top100"},
+    }
 
-    def mock_dict_fail(output, proxy=None):
-        raise RuntimeError("git " + "down " * 60)  # >200 字符，验证截断
+    def fake_index2(proxy_url=None):
+        return {"built_at": int(time.time()), "pages": {}, "characters": []}
 
-    plug.update_dict_via_preferred_path = mock_dict_fail
+    def fake_refresh2(leaderboard_dir, proxy_url=None):
+        return board_results_fail
+
+    plug.gamekee_build_index = fake_index2
+    plug.refresh_board_for_update = fake_refresh2
     try:
-        res = await p.handle_update(stream_id="stream_k23", group_id="any_group")
-        await asyncio.wait_for(p._update_task, 15)
-        # tail 含 handler 的开始提示，失败提示按内容筛
-        fail_msgs = [t[1] for t in ctx.send.sent[n_sent:] if "字典更新失败" in t[1]]
-        check("K23 字典失败→不同步不重载+失败消息（截断且预告可重试）",
-              res[0] is True and len(sync_called) == n_sync
-              and len(ctx.component.calls) == n_reload
-              and len(fail_msgs) == 1 and len(fail_msgs[0]) < 300 and "重试" in fail_msgs[0])
+        n_sent = len(ctx.send.sent)
+        success, msg, code = await p.handle_update(stream_id="stream_k2", group_id="g1", platform="qq")
+        await asyncio.wait_for(p._update_task, 30)
+        update_msgs = [t[1] for t in ctx.send.sent[n_sent:] if "数据更新完成" in t[1]]
+        check("K14 一榜失败不吞另一榜与探查（bb失败/fe成功/探查成功同报）",
+              len(update_msgs) == 1
+              and "联合讨伐：失败" in update_msgs[0]
+              and "终焉绝响：强刷成功" in update_msgs[0]
+              and "攻略源：索引已更新" in update_msgs[0],
+              update_msgs[0][:120] if update_msgs else "no msg")
     finally:
-        plug.update_dict_via_preferred_path = orig_dict
+        plug.gamekee_build_index = orig_build
+        plug.refresh_board_for_update = orig_refresh
 
-    # 5. 同步失败但字典成功：失败消息照发，reload 仍执行（生效锚定字典阶段）
-    n_reload, n_sent = len(ctx.component.calls), len(ctx.send.sent)
+    def boom_build(proxy_url=None):
+        raise plug.GameKeeError("probe down")
 
-    def mock_sync_fail(**kwargs):
-        raise RuntimeError("network down")
-
-    plug.sync_offline_data = mock_sync_fail
+    verified_before = p._gamekee_state.get("last_verified", 0)
+    plug.gamekee_build_index = boom_build
+    plug.refresh_board_for_update = fake_refresh
     try:
-        res = await p.handle_update(stream_id="stream_k24", group_id="any_group")
-        await asyncio.wait_for(p._update_task, 15)
-        tail = ctx.send.sent[n_sent:]
-        check("K24 同步失败不挡 reload（字典已更新语义）且消息含离线重试提示",
-              res[0] is True and len(ctx.component.calls) == n_reload + 1
-              and any("离线数据同步失败" in t[1] and "字典已更新" in t[1] for t in tail))
+        n_sent = len(ctx.send.sent)
+        success, msg, code = await p.handle_update(stream_id="stream_k3", group_id="g1", platform="qq")
+        await asyncio.wait_for(p._update_task, 30)
+        update_msgs = [t[1] for t in ctx.send.sent[n_sent:] if "数据更新完成" in t[1]]
+        check("K15 探查失败报告失败且不重置计时（verified 不动+两榜照常）",
+              len(update_msgs) == 1
+              and "探查失败" in update_msgs[0] and "未重置" in update_msgs[0]
+              and "联合讨伐：强刷成功" in update_msgs[0]
+              and p._gamekee_state["last_verified"] == verified_before,
+              update_msgs[0][:120] if update_msgs else "no msg")
     finally:
-        plug.sync_offline_data = orig_sync
+        plug.gamekee_build_index = orig_build
+        plug.refresh_board_for_update = orig_refresh
 
-    # 6. 在飞闸门：首个任务未完时第二次 /st_update 被拒且不新建/替换任务
     gate_release = threading.Event()
 
-    def mock_sync_slow(**kwargs):
+    def slow_refresh(leaderboard_dir, proxy_url=None):
         gate_release.wait(5)
-        return {"status": "ok"}
+        return board_results_stub
 
-    plug.sync_offline_data = mock_sync_slow
+    plug.gamekee_build_index = fake_index2
+    plug.refresh_board_for_update = slow_refresh
     try:
-        res1 = await p.handle_update(stream_id="stream_k25a", group_id="any_group")
+        res1 = await p.handle_update(stream_id="stream_k25a", group_id="g1", platform="qq")
         in_flight = p._update_task
-        res2 = await p.handle_update(stream_id="stream_k25b", group_id="any_group")
+        res2 = await p.handle_update(stream_id="stream_k25b", group_id="g1", platform="qq")
         check("K25 在飞连点被拒（False/码1/进行中文案）且任务句柄未被替换",
               res1[0] is True and res2[0] is False and res2[2] == 1
               and "已有更新任务进行中" in res2[1] and p._update_task is in_flight)
         gate_release.set()
-        await asyncio.wait_for(p._update_task, 15)
+        await asyncio.wait_for(p._update_task, 30)
     finally:
-        plug.sync_offline_data = orig_sync
+        plug.refresh_board_for_update = orig_refresh
+        plug.gamekee_build_index = orig_build
 
-    # 5. 离线持久化数据读取与 force_update 参数
-    with tempfile.TemporaryDirectory() as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        # 准备 offline 假数据（路径为 infodocs/*.txt 或 *.json，presets/presets.txt 或 presets.json）
-        offline_infodocs = tmp_dir / "offline" / "infodocs"
-        offline_infodocs.mkdir(parents=True, exist_ok=True)
-        (offline_infodocs / "index.json").write_text(
-            json.dumps({"data": "Offline Infodoc Index Content"}), encoding="utf-8"
-        )
-        (offline_infodocs / "ignis.json").write_text(
-            json.dumps({"data": "Offline Ignis Detailed Content"}), encoding="utf-8"
-        )
+    await p.on_unload()
 
-        offline_presets = tmp_dir / "offline" / "presets"
-        offline_presets.mkdir(parents=True, exist_ok=True)
-        (offline_presets / "presets.txt").write_text("Offline Presets TSV Content", encoding="utf-8")
 
-        st_fetcher = service.StelladbFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
-        gd_fetcher = GoogleDocFetcher(tmp_dir, offline_dir=tmp_dir / "offline")
-
-        network_calls: list = []
-
-        def mock_open(req, timeout=10):
-            url = req.full_url if hasattr(req, "full_url") else str(req)
-            network_calls.append(url)
-            return _FakeHTTPResponse(b"Online Fresh Content")
-
-        # 在 fetcher 级网络边界注入 Mock（实例级 opener，支持代理配置），
-        # 不全局 patch urllib.request.urlopen
-        st_fetcher._opener = _FakeOpener(mock_open)
-        gd_fetcher._opener = _FakeOpener(mock_open)
-
-        # 5.1 force_update=False 时直接读取 offline 本地文件，不发生网络请求
-        res_idx = st_fetcher.fetch_infodoc_index(force_update=False)
-        res_elem = st_fetcher.fetch_infodoc("ignis", force_update=False)
-        res_pre = gd_fetcher.fetch_presets(force_update=False)
-
-        check("K16 force_update=False 优先读取离线文件",
-              res_idx == "Offline Infodoc Index Content"
-              and res_elem == "Offline Ignis Detailed Content"
-              and "Offline Presets TSV Content" in res_pre)
-        check("K17 离线命中时不产生网络调用", len(network_calls) == 0, str(network_calls))
-
-        # 5.2 force_update=True 时绕过离线文件发起网络请求
-        res_idx_force = st_fetcher.fetch_infodoc_index(force_update=True)
-        res_elem_force = st_fetcher.fetch_infodoc("ignis", force_update=True)
-        res_pre_force = gd_fetcher.fetch_presets(force_update=True)
-
-        check("K18 force_update=True 强制抓取在线新数据",
-              res_idx_force == "Online Fresh Content"
-              and res_elem_force == "Online Fresh Content"
-              and "Online Fresh Content" in res_pre_force)
-        check("K19 force_update=True 发起 3 次网络请求", len(network_calls) == 3, str(network_calls))
-
-
-# ===== 节 L：定时自动同步与生命周期注销 =====
-
-async def run_daily_sync_schedule() -> None:
-    """测试每日 17:00 等待秒数计算、后台任务调度、同步缓存清理与注销。"""
-    # 1. 等待秒数算法断言
-    # Case 1: 当前 16:59:50 -> 目标当天 17:00:00 -> 10 秒
-    t1 = datetime(2026, 9, 8, 16, 59, 50)
-    delay1 = plug.StellaSoraPlugin._calculate_delay_to_sync(t1, target_hour=17, target_minute=0)
-    check("L1 未过 17:00 等待秒数精确到当天 17:00", delay1 == 10.0)
-
-    # Case 2: 当前正好 17:00:00 -> 目标明天 17:00:00 -> 86400 秒 (24h)
-    t2 = datetime(2026, 9, 8, 17, 0, 0)
-    delay2 = plug.StellaSoraPlugin._calculate_delay_to_sync(t2, target_hour=17, target_minute=0)
-    check("L2 正好 17:00:00 等待秒数为明天 17:00（86400秒）", delay2 == 86400.0)
-
-    # Case 3: 当前已过 17:00:05 -> 目标明天 17:00:00 -> 86400 - 5 = 86395 秒
-    t3 = datetime(2026, 9, 8, 17, 0, 5)
-    delay3 = plug.StellaSoraPlugin._calculate_delay_to_sync(t3, target_hour=17, target_minute=0)
-    check("L3 已过 17:00 等待秒数计算至明天 17:00（86395秒）", delay3 == 86395.0)
-
-    # Case 4: 上午 10:00:00 -> 目标当天 17:00:00 -> 7 * 3600 = 25200 秒
-    t4 = datetime(2026, 9, 8, 10, 0, 0)
-    delay4 = plug.StellaSoraPlugin._calculate_delay_to_sync(t4, target_hour=17, target_minute=0)
-    check("L4 上午时间计算至当天 17:00（25200秒）", delay4 == 25200.0)
-
-    # 2. 模拟极短延迟触发同步与缓存清理
-    sync_called = []
-    orig_sync = plug.sync_offline_data
-
-    def mock_sync_offline_data(**kwargs):
-        sync_called.append(kwargs)
-        return {"status": "ok"}
-
-    plug.sync_offline_data = mock_sync_offline_data
-    # reload 接线：定时同步产出新统一表后 reload_team_table() 失效表缓存
-    # （plugin 以 from service import reload_team_table 绑定，补丁挂 plug 命名空间）
-    reload_calls: list = []
-    orig_reload = plug.reload_team_table
-    plug.reload_team_table = lambda: reload_calls.append(True)
-    p, ctx = make_plugin(ttl=3600)
-
-    # 模拟 delay 序列：第一次返回 0.05 秒触发同步，后续返回 3600 秒防空转
-    delays = [0.05, 3600.0]
-
-    def mock_calculate_delay(*args, **kwargs):
-        if delays:
-            return delays.pop(0)
-        return 3600.0
-
-    orig_calc = p._calculate_delay_to_sync
-    p._calculate_delay_to_sync = mock_calculate_delay
-
-    try:
-        # 加载插件，启动后台任务
-        await p.on_load()
-        check("L5 on_load 成功创建后台任务 _sync_task", p._sync_task is not None and not p._sync_task.done())
-
-        # 准备缓存文件与内存数据
-        answers_dir = p._cache_dir_ready() / "answers"
-        answers_dir.mkdir(parents=True, exist_ok=True)
-        dummy_file = answers_dir / "sched_test.json"
-        dummy_file.write_text("{}", encoding="utf-8")
-        cache_mgr = p._get_answer_cache()
-        cache_mgr._memory_cache["sched_key"] = "cached_val"
-
-        # 等待后台任务唤醒并完成一次同步 (0.05s 延时 + 执行)
-        await asyncio.sleep(0.15)
-
-        check("L6 后台任务触发 sync_offline_data(sync_all=True)", len(sync_called) >= 1 and sync_called[0].get("sync_all") is True)
-        check("L7 同步后 answers 磁盘缓存被清空", not dummy_file.exists())
-        check("L8 同步后 answers 内存缓存被清空", len(cache_mgr._memory_cache) == 0)
-        check("L11 定时同步完成后调用 reload_team_table 失效表缓存", len(reload_calls) >= 1)
-        service.reload_team_table()
-
-        # 3. on_unload 优雅注销与取消
-        task_ref = p._sync_task
-        await p.on_unload()
-        check("L9 on_unload 后 _sync_task 被置为 None", p._sync_task is None)
-        check("L10 后台任务被成功取消并完成 (done)", task_ref is not None and task_ref.done())
-    finally:
-        plug.sync_offline_data = orig_sync
-        plug.reload_team_table = orig_reload
-        p._calculate_delay_to_sync = orig_calc
-        if p._sync_task and not p._sync_task.done():
-            p._sync_task.cancel()
-            await asyncio.gather(p._sync_task, return_exceptions=True)
-
-
-# ===== 节 M：统一队伍-槽位表构建器测试 =====
-
-def run_section_m() -> None:
-    """测试 team_table 构建器：解码、伪影清洗、固化关联、无码拆行、校验与 rotation 固化。"""
-    import base64
-    import struct
-
-    lookup = DictLookup(DATA_DIR)
-    lookup._load()
-
-    # M1 & M2: 预设码解码与异常兜底
-    sample_code = "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA"
-    decoded = team_table.decode_preset_code(sample_code)
-    check("M1 预设码解码样本 [156, 130, 125]", decoded == [156, 130, 125], f"decoded={decoded}")
-    check("M2 空串解码返回 None", team_table.decode_preset_code("") is None)
-    check("M3 短串与非法字符返回 None", team_table.decode_preset_code("short") is None and team_table.decode_preset_code("invalid@@@") is None)
-    check("M4 全零 CharId 返回 None", team_table.decode_preset_code("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") is None)
-
-    # M5-M7: 伪影清洗与弯引号规范化
-    artifact_doc = """Aqua
-Teresa’s Team
-\tMain Trekker
-\tPreset Code
-\tWIP
-\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
-\tAAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA
-"""
-    parsed = team_table.parse_presets_doc(artifact_doc)
-    check("M5 裸 WIP 行跳过不作为队名", len(parsed) == 2 and parsed[0]["team_name_raw"] == "Teresa’s Team")
-    check("M6 孤码正确归属前置队伍", parsed[1]["team_name_raw"] == "Teresa’s Team")
-
-    infodocs_curly = {
-        "aqua": """Teresa's Team | ⏏ Back to Top ⏏
-Nazuna (5★) | 1/1/1/1
-Donna (5★) | 1/1/1/1
-Freesia (5★) | 1/1/1/1
-⏏ BACK TO TOP ⏏
-"""
-    }
-    table_curly = team_table.build_team_table(artifact_doc, infodocs_curly, lookup, "")
-    check(
-        "M7 弯引号规范化关联直引号区块",
-        len(table_curly["rows"]) == 2
-        and table_curly["rows"][0]["guide_ref"] == {"element": "aqua", "block": "Teresa's Team"}
-        and table_curly["rows"][0]["team_name_preset"] == "Teresa’s Team"
-        and table_curly["rows"][0]["team_name_infodoc"] == "Teresa's Team",
-    )
-
-    # M8: Sparkla 3 码 -> 3 行同 guide_ref
-    sparkla_doc = """Terra
-Sparkla (Rapid Fire) WIP
-\tMain Trekker
-\tPreset Code
-\tAAAAjAAAAJwAAACfzbAbAADAQBgNhsWIAGAw
-\tAAAAjAAAAJwAAABrzbAbAADBgBgMBmAGGGAG
-\tAAAAjAAAAJwAAAB0zbAbAADBgBgMBsGAAGwA
-"""
-    infodocs_sparkla = {
-        "terra": """Sparkla (Rapid Fire) WIP | ⏏ Back to Top ⏏
-Sparkla (5★) | 1/1/1/1
-Nazuna (5★) | 1/1/1/1
-Springseek Coronis (5★) | 1/1/1/1
-Tilia (5★) | 1/1/1/1
-Ridge (5★) | 1/1/1/1
-⏏ BACK TO TOP ⏏
-"""
-    }
-    table_sparkla = team_table.build_team_table(sparkla_doc, infodocs_sparkla, lookup, "")
-    sp_rows = table_sparkla["rows"]
-    check(
-        "M8 Sparkla 3 码生成 3 行且 guide_ref 一致",
-        len(sp_rows) == 3 and all(r["guide_ref"] == {"element": "terra", "block": "Sparkla (Rapid Fire) WIP"} for r in sp_rows),
-    )
-
-    # M9: 无码区块共享前缀拆行
-    infodocs_codeless = {
-        "aqua": """Nazuna-Freesia | ⏏ Back to Top ⏏
-Nazuna (5★) | 1/1/1/1
-Freesia (5★) | 1/1/1/1
-Tilia (5★) | 1/1/1/1
-Iris (5★) | 1/1/1/1
-⏏ BACK TO TOP ⏏
-"""
-    }
-    table_codeless = team_table.build_team_table("Aqua\n", infodocs_codeless, lookup, "")
-    cl_rows = table_codeless["rows"]
-    check(
-        "M9 无码区块 4 段按前缀拆出 2 行",
-        len(cl_rows) == 2
-        and cl_rows[0]["main_key"] == "aqua::Nazuna-Freesia::Tilia"
-        and cl_rows[1]["main_key"] == "aqua::Nazuna-Freesia::Iris"
-        and cl_rows[0]["preset_code"] is None
-        and cl_rows[0]["team_name_infodoc"] == "Nazuna-Freesia",
-    )
-
-    # M10: 无效行三例（2 段块/未知成员/孤码缺名）进 report 不入 rows
-    infodocs_invalid = {
-        "aqua": """Short-Block | ⏏ Back to Top ⏏
-Nazuna (5★) | 1/1/1/1
-Freesia (5★) | 1/1/1/1
-⏏ BACK TO TOP ⏏
-"""
-    }
-    fake_code = base64.b64encode(struct.pack(">III", 999999, 130, 125) + b"\x00" * 15).decode("utf-8")
-    invalid_presets_doc = f"""Aqua
-Fake Team
-\tMain Trekker
-\tPreset Code
-\t{fake_code}
-Ignis
-\tPreset Code
-\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
-"""
-    table_invalid = team_table.build_team_table(invalid_presets_doc, infodocs_invalid, lookup, "")
-    inv_reasons = [item["reason"] for item in table_invalid["report"]["invalid_rows"]]
-    check("M10 无效行不入 rows", len(table_invalid["rows"]) == 0)
-    check(
-        "M11 无效行报告记录三类原因（缺槽位/成员未知/缺名字）",
-        any("缺槽位" in r for r in inv_reasons)
-        and any("成员未知" in r for r in inv_reasons)
-        and any("缺名字" in r for r in inv_reasons),
-        str(inv_reasons),
-    )
-
-    # M12: Rotation 固化（三行结构、非空且逐字一致）
-    index_text_fixture = """Nazuna (5★) | Flora | Wraith
-Rotation | Rotation | Rotation
-Nazuna special 5-star combo rotation | Flora combo | Wraith combo
-"""
-    rot_expected = service.extract_rotation(index_text_fixture, "Nazuna")
-    table_rot = team_table.build_team_table(
-        """Aqua
-Nazuna Team
-\tMain Trekker
-\tPreset Code
-\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
-""",
-        {"aqua": ""},
-        lookup,
-        index_text_fixture,
-    )
-    rot_actual = table_rot["rows"][0]["rotation"] if table_rot["rows"] else ""
-    check(
-        "M12 Rotation 固化非空且与 extract_rotation 逐字一致",
-        bool(rot_actual) and rot_actual == rot_expected == "Nazuna special 5-star combo rotation",
-        f"actual={repr(rot_actual)}, expected={repr(rot_expected)}",
-    )
-
-
-# ===== 节 N：slot 查询服务测试 =====
-
-def run_section_n() -> None:
-    """测试 slot 查询服务：表加载/交集查询/元素过滤/缓存失效/异常兜底/按名提取区块。"""
-    import unittest.mock
-
-    # 1. 构造内联 fixture 表：包含有码行、无码行、跨元素行
-    fixture_table = {
-        "rows": [
-            {
-                "main_key": "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
-                "preset_code": "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
-                "element": "aqua",
-                "slots": [
-                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                    {"char_id": 130, "en": "Donna", "cn": "多娜"},
-                    {"char_id": 125, "en": "Canglan", "cn": "苍兰"},
-                ],
-                "team_name_preset": "Nazuna-Donna Team",
-                "team_name_infodoc": "Nazuna-Donna",
-                "guide_ref": {"element": "aqua", "block": "Nazuna-Donna"},
-                "rotation": "Nazuna rotation",
-            },
-            {
-                "main_key": "aqua::Nazuna-Freesia::Tilia",
-                "preset_code": None,
-                "element": "aqua",
-                "slots": [
-                    {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                    {"char_id": 127, "en": "Freesia", "cn": "芙莉西亚"},
-                    {"char_id": 110, "en": "Tilia", "cn": "缇莉亚"},
-                ],
-                "team_name_preset": "",
-                "team_name_infodoc": "Nazuna-Freesia",
-                "guide_ref": {"element": "aqua", "block": "Nazuna-Freesia"},
-                "rotation": "",
-            },
-            {
-                "main_key": "ignis::Kagari::Flora",
-                "preset_code": None,
-                "element": "ignis",
-                "slots": [
-                    {"char_id": 140, "en": "Kagari", "cn": "篝"},
-                    {"char_id": 130, "en": "Donna", "cn": "多娜"},
-                    {"char_id": 115, "en": "Flora", "cn": "芙萝拉"},
-                ],
-                "team_name_preset": "",
-                "team_name_infodoc": "Kagari",
-                "guide_ref": {"element": "ignis", "block": "Kagari"},
-                "rotation": "",
-            },
-        ],
-        "report": {"invalid_rows": []},
-    }
-
-    try:
-        # 注入 fixture 表到缓存中进行隔离测试
-        service._team_table_cache = fixture_table
-
-        # N1: 单角色查询命中（含无码行）
-        rows_156 = service.find_team_rows([156])
-        check(
-            "N1 单角色查询命中所有含该角色的队伍（含无码行）",
-            len(rows_156) == 2
-            and any(r["preset_code"] is not None for r in rows_156)
-            and any(r["preset_code"] is None for r in rows_156),
-            f"rows_156={rows_156}",
-        )
-
-        # N2: 双角色交集查询精准命中
-        rows_156_130 = service.find_team_rows([156, 130])
-        check(
-            "N2 双角色交集查询精准命中同时包含两者的行",
-            len(rows_156_130) == 1
-            and rows_156_130[0]["main_key"] == "AAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA",
-            f"rows_156_130={rows_156_130}",
-        )
-
-        # N3: 元素过滤（大小写不敏感且排他）
-        rows_donna_aqua = service.find_team_rows([130], element="aqua")
-        rows_donna_ignis = service.find_team_rows([130], element="IGNIS")
-        rows_donna_terra = service.find_team_rows([130], element="terra")
-        check(
-            "N3 元素过滤大小写不敏感且精准排他",
-            len(rows_donna_aqua) == 1
-            and rows_donna_aqua[0]["element"] == "aqua"
-            and len(rows_donna_ignis) == 1
-            and rows_donna_ignis[0]["element"] == "ignis"
-            and len(rows_donna_terra) == 0,
-            f"aqua={len(rows_donna_aqua)}, ignis={len(rows_donna_ignis)}, terra={len(rows_donna_terra)}",
-        )
-
-        # N4: 零命中与冲突条件
-        rows_empty = service.find_team_rows([999999])
-        rows_conflict = service.find_team_rows([156, 140])
-        check(
-            "N4 不存在角色或冲突成员交集返回空列表",
-            rows_empty == [] and rows_conflict == [],
-            f"empty={rows_empty}, conflict={rows_conflict}",
-        )
-
-        # N5: reload_team_table 清除缓存（行为断言：reload 后 load 重新从磁盘读取真实表）
-        service.reload_team_table()
-        reloaded_table = service.load_team_table()
-        check(
-            "N5 reload_team_table 清缓存后重新从磁盘加载",
-            reloaded_table is not fixture_table
-            and isinstance(reloaded_table.get("rows"), list),
-            f"reloaded_rows={len(reloaded_table.get('rows', []))}",
-        )
-
-        # N6: 缓存加载失败处理（损坏文件 / 缺失文件 -> {"rows": [], "report": {}} 不崩溃）
-        service.reload_team_table()
-        with unittest.mock.patch.object(service.Path, "open", side_effect=ValueError("Corrupted JSON")):
-            res_corrupt = service.load_team_table()
-        check(
-            "N6 文件损坏时记录日志并返回空表结构不抛异常",
-            res_corrupt == {"rows": [], "report": {}},
-            f"res_corrupt={res_corrupt}",
-        )
-
-        service.reload_team_table()
-        with unittest.mock.patch.object(service.Path, "is_file", return_value=False):
-            res_missing = service.load_team_table()
-        check(
-            "N7 文件缺失时记录日志并返回空表结构不抛异常",
-            res_missing == {"rows": [], "report": {}},
-            f"res_missing={res_missing}",
-        )
-
-        # N8: 真实磁盘 team_table.json 加载测试（行数 > 0 且格式有效）
-        service.reload_team_table()
-        real_table = service.load_team_table()
-        real_rows = real_table.get("rows", [])
-        check(
-            "N8 真实 team_table.json 成功加载且行数 > 0",
-            len(real_rows) > 0,
-            f"count={len(real_rows)}",
-        )
-
-        # N9: extract_block_by_name 对真实 aqua.json 提取 Nazuna-Donna
-        aqua_path = DATA_DIR / "offline" / "infodocs" / "aqua.json"
-        with aqua_path.open("r", encoding="utf-8") as f:
-            aqua_data = json.load(f)["data"]
-        block = service.extract_block_by_name(aqua_data, "Nazuna-Donna")
-        check(
-            "N9 extract_block_by_name 提取真实区块成功且结构完整",
-            block is not None
-            and block.get("name") == "Nazuna-Donna"
-            and block.get("members") == ["Nazuna", "Donna", "Freesia"]
-            and block.get("roles", {}).get("Nazuna") == "主控位"
-            and block.get("roles", {}).get("Donna") == "支援位"
-            and len(block.get("segments", {})) == 3,
-            f"block={block}",
-        )
-
-        # N10: extract_block_by_name 不存在区块或空输入返回 None
-        none_block = service.extract_block_by_name(aqua_data, "NonExistentBlockXYZ")
-        empty_block = service.extract_block_by_name("", "Nazuna-Donna")
-        check(
-            "N10 extract_block_by_name 不存在区块或空输入返回 None",
-            none_block is None and empty_block is None,
-            f"none_block={none_block}, empty_block={empty_block}",
-        )
-
-        # N13（真实 terra 区块 emblem 翻案后网格真值基线重锁）：
-        # 真实 terra 页 Terra Mark Amplification 区块经 service.query_how_rows 渲染输出——
-        # emblem 行无裸数字行号子条目（297/298/299/300/301 等全部滤除），真实词条保留。
-        # 小禾真值：70级=1条（充能效率（主位） 30%）、80级=3条（充能效率（主位） 30%、主技能等级 +3 等级、终极技等级 +3 等级）、
-        # 90级=4条（自然之触 +3 等级、飚速手推车 +3 等级、古灵精怪 +3 等级、萌萌助威 +3 等级），
-        # 3 成员 × 3 等级 = 9 行 emblem，各成员各等级词条与等级前缀完好。
-        row_tma = {
-            "main_key": "terra::TMA::1",
-            "preset_code": None,
-            "element": "terra",
-            "slots": [
-                {"char_id": 156, "en": "Nazuna", "cn": "小禾", "slot": "主控位"},
-                {"char_id": 149, "en": "Gerie", "cn": "格芮", "slot": "支援位"},
-                {"char_id": 110, "en": "Tilia", "cn": "缇莉娅", "slot": "支援位"},
-            ],
-            "team_name_preset": "Terra Mark Amplification",
-            "team_name_infodoc": "Terra Mark Amplification",
-            "guide_ref": {"element": "terra", "block": "Terra Mark Amplification"},
-            "rotation": "",
-        }
-        rows_tma = [row_tma]
-        out_tma = service.query_how_rows(rows_tma, question="小禾 格芮 缇莉娅攻略")
-        out_lines_tma = out_tma.split("\n")
-        # 收集渲染输出中的全部 emblem 行（"纹章推荐：" 之后至空行前的等级标签行）
-        emblem_rows_tma: list = []
-        for i, ln in enumerate(out_lines_tma):
-            if ln == "纹章推荐：":
-                j = i + 1
-                while j < len(out_lines_tma) and out_lines_tma[j]:
-                    emblem_rows_tma.append(out_lines_tma[j])
-                    j += 1
-        emblem_text_tma = "\n".join(emblem_rows_tma)
-        check(
-            "N13 真实terra区块emblem无裸数字行号且真实词条保留（基线翻转）",
-            len(emblem_rows_tma) == 9
-            and all(ln.startswith(("70级：", "80级：", "90级：")) for ln in emblem_rows_tma)
-            and all(not s.strip().isdigit() for ln in emblem_rows_tma for s in ln.split("、"))
-            and not any(
-                d in emblem_text_tma
-                for d in ("297", "298", "299", "300", "301", "308", "309", "310", "321", "322", "323")
-            )
-            and emblem_rows_tma[0] == "70级：充能效率（主位） 30%"
-            and len(emblem_rows_tma[0].split("、")) == 1  # 70级：1 真实词条
-            and len(emblem_rows_tma[1].split("、")) in (2, 3)  # 80级：真实词条
-            and len(emblem_rows_tma[2].split("、")) in (4, 5)  # 90级：真实词条
-            and "自然之触 +3 等级" in emblem_rows_tma[2]
-            and any("地系穿透 110" in ln for ln in emblem_rows_tma)
-            and any("印记伤害 80%" in ln and "暴击率 15%" in ln for ln in emblem_rows_tma),
-            f"emblem_rows={emblem_rows_tma}",
-        )
-
-        # 新增翡冷翠纹章金标断言（Firenze (Main Skill) 转置真值防线）
-        umbra_path = DATA_DIR / "offline" / "infodocs" / "umbra.json"
-        with umbra_path.open("r", encoding="utf-8") as f:
-            umbra_data = json.load(f)["data"]
-        f_block = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
-        f_emblem_raw = f_block["segments"]["Firenze"]["emblem"] if f_block else []
-        replacer = service._instances[str(DATA_DIR)][3]
-        f_emblem = [replacer.replace(ln) for ln in f_emblem_raw]
-        e70 = next((ln for ln in f_emblem if ln.startswith("70级：")), "")
-        e90 = next((ln for ln in f_emblem if ln.startswith("90级：")), "")
-        check(
-            "N13b 翡冷翠纹章转置金标断言：70级无90级词条且90级包含高危/追猎/买定",
-            f_block is not None
-            and "暗系穿透 110" in e70
-            and "暴击率 15%" in e70
-            and "技能伤害 20%" in e70
-            and "暗系伤害 12%" in e70
-            and "追猎指令" not in e70
-            and "买定离手" not in e70
-            and "高危风险 +3 等级" in e90
-            and "追猎指令 +3 等级" in e90
-            and "买定离手 +3 等级" in e90
-            and "技能伤害 20%" in e90,
-            f"e70={e70!r}, e90={e90!r}",
-        )
-
-        # N11: _filter_emblem_entry 混合串仅滤纯数字子条目 + 三边界（空串/全数字串/无前缀）
-        check(
-            "N11 emblem混合串仅滤纯数字子条目（'310'滤除,'30%'/'110'保留）",
-            service._filter_emblem_entry("70级：充能效率 30%、310、地系穿透 110、30%")
-            == "70级：充能效率 30%、地系穿透 110、30%",
-            f"got={service._filter_emblem_entry('70级：充能效率 30%、310、地系穿透 110、30%')!r}",
-        )
-        check(
-            "N11b emblem三边界：空串恒等/全数字串滤空/无前缀档标签保留在首非数字子条目",
-            service._filter_emblem_entry("") == ""
-            and service._filter_emblem_entry("297、298") == ""
-            and service._filter_emblem_entry("第4档：充能效率 30%、297") == "第4档：充能效率 30%"
-            and service._filter_emblem_entry("70级：无需升级") == "70级：无需升级",
-            f"空串={service._filter_emblem_entry('')!r}, "
-            f"全数字={service._filter_emblem_entry('297、298')!r}, "
-            f"第4档={service._filter_emblem_entry('第4档：充能效率 30%、297')!r}",
-        )
-
-        # N14: 渲染端到端——fixture infodoc 含 description/discs 行号噪声行，
-        # 经 query_how_rows 真实路径后滤除且真实行保留
-        fold_infodoc = (
-            "Fold Test Block | ⏏ Back to Top ⏏\n"
-            "Description | Skill Upgrade Priority\n"
-            "Nazuna (5★) | 1/10/1/10 (Main Skill only)\n"
-            "888\n"
-            "ZZFOLDDESC 段落一\n"
-            "Priority Potentials | Recommended Main Discs\n"
-            "777\n"
-            "ZZFOLDDISC (C1)\n"
-            "Optional Potentials | Emblem\n"
-            "Affix Priority | Terra PEN | 110\n"
-        )
-        fold_row = {
-            "main_key": "terra::FoldTest::X",
-            "preset_code": None,
-            "element": "terra",
-            "slots": [
-                {"char_id": 156, "en": "Nazuna", "cn": "小禾"},
-                {"char_id": 130, "en": "Donna", "cn": "多娜"},
-                {"char_id": 125, "en": "Canglan", "cn": "苍兰"},
-            ],
-            "team_name_preset": "",
-            "team_name_infodoc": "Fold Test Block",
-            "guide_ref": {"element": "terra", "block": "Fold Test Block"},
-            "rotation": "",
-        }
-        with tempfile.TemporaryDirectory(prefix="stellasora_n14_") as tmp_fold:
-            fold_dir = Path(tmp_fold)
-            (fold_dir / "terra.json").write_text(
-                json.dumps({"data": fold_infodoc}, ensure_ascii=False), encoding="utf-8"
-            )
-            with unittest.mock.patch.object(service, "_INFODOCS_DIR", fold_dir):
-                out_fold = service.query_how_rows([fold_row], question="小禾攻略")
-        check(
-            "N14 渲染端到端：description/discs 纯数字行滤除,真实行与skill保留",
-            "888" not in out_fold
-            and "777" not in out_fold
-            and "ZZFOLDDESC 段落一" in out_fold
-            and "ZZFOLDDISC (共鸣1阶)" in out_fold
-            and "技能升级优先度：1/10/1/10 (主技能 only)" in out_fold
-            and "70级：地系穿透 110" in out_fold
-            # fold 区块只有 Nazuna 段——多娜/苍兰缺段成员由队友并集 rescue（不丢弃任何成员）
-            and "队友：多娜（支援位）、苍兰（支援位）" in out_fold,
-            f"out_fold={out_fold!r}",
-        )
-
-        # N15: 详略策略（真实表，mock 问句）——1-2 角色仅问句第一个详述、
-        # ≥3 全员详述、触发词全员详述、空角色集回退全详述、保序提取
-        service.reload_team_table()
-        rows_156_149 = service.find_team_rows([156, 149])
-
-        # N15a 2 角色（问句第一个=小禾）：仅小禾详述，格芮/缇莉娅等进队友并集行
-        # （真实数据中共 3 支队伍同时包含小禾与格芮：2 支地系印记 + 1 支格芮普攻）
-        mat_a = service.query_how_rows(rows_156_149, False, "小禾 格芮攻略")
-        check(
-            "N15a 详略策略2角色：多组头+仅首问询角色详述+未详述成员进并集行",
-            len(re.findall(r"^\d+\. ", mat_a, flags=re.M)) >= 2
-            and "队友：格芮（支援位）、缇莉娅（支援位）" in mat_a
-            and "队友：格芮（支援位）、科洛妮丝（新春）（支援位）" in mat_a
-            and "小禾（主控位）" in mat_a,
-            f"mat_a={mat_a!r}",
-        )
-
-        # N15b 反序（问句第一个=格芮）：格芮详述、小禾进并集行（保序决胜）
-        mat_b = service.query_how_rows(rows_156_149, False, "格芮 小禾攻略")
-        check(
-            "N15b 详略策略反序：格芮详述+小禾进并集行",
-            "格芮（支援位）" in mat_b
-            and "队友：小禾（主控位）、缇莉娅（支援位）" in mat_b
-            and "队友：小禾（主控位）、科洛妮丝（新春）（支援位）" in mat_b,
-            f"mat_b={mat_b!r}",
-        )
-
-        # N15c 3 角色全详述：TMA 组 3 成员 × 3 等级 = 9 行纹章（同 N13）
-        rows_tma15 = [row_tma]
-        mat_c = service.query_how_rows(rows_tma15, False, "小禾 格芮 缇莉娅攻略")
-        check(
-            "N15c 详略策略3角色全员详述：emblem 行数==9",
-            sum(1 for ln in mat_c.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
-            f"mat_c={mat_c!r}",
-        )
-
-        # N15d 触发词（2 角色 + "完整"）→ 全员详述：emblem 行数==9
-        mat_d15 = service.query_how_rows(rows_tma15, False, "小禾 格芮完整攻略")
-        check(
-            "N15d 详略策略触发词全员详述：emblem 行数==9",
-            sum(1 for ln in mat_d15.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
-            f"mat_d={mat_d15!r}",
-        )
-
-        # N15e 空角色集回退：不设限全详述，不崩且 emblem 行数==9
-        mat_e = service.query_how_rows(rows_tma15, False, "攻略")
-        check(
-            "N15e 详略策略空角色集回退全详述：emblem 行数==9",
-            sum(1 for ln in mat_e.split("\n") if ln.startswith(("70级：", "80级：", "90级："))) == 9,
-            f"mat_e={mat_e!r}",
-        )
-
-        # N15f 保序提取单测：等长名先后由文本位置唯一决定
-        check(
-            "N15f find_character_names_ordered 保序（等长名文本位决定）",
-            service.find_character_names_ordered("格芮 小禾攻略") == ["格芮", "小禾"]
-            and service.find_character_names_ordered("小禾 格芮攻略") == ["小禾", "格芮"],
-            f"a={service.find_character_names_ordered('格芮 小禾攻略')!r}, "
-            f"b={service.find_character_names_ordered('小禾 格芮攻略')!r}",
-        )
-
-        # N15g 字段筛选触发词（详略词表扩展锁定）：字段问法（纹章）命中触发词表
-        # →detail_ens=None→各成员字段齐全（prompt 4b-4e 的"各成员"语义）——
-        # 双问询角色（小禾/格芮）的纹章行都进 material，不丢第二角色字段
-        mat_g15 = service.query_how_rows(rows_tma15, False, "小禾 格芮 纹章")
-        seg_by_member: dict = {}
-        cur_member: str | None = None
-        for ln in mat_g15.split("\n"):
-            mh = re.match(r"^([^（]+)（(?:主控位|支援位)）$", ln)
-            if mh:
-                cur_member = mh.group(1)
-                seg_by_member.setdefault(cur_member, [])
-                continue
-            if cur_member is not None:
-                if ln.startswith("队友：") or re.match(r"^\d+\. ", ln):
-                    cur_member = None
-                else:
-                    seg_by_member[cur_member].append(ln)
-        check(
-            "N15g 字段问法（纹章）双角色字段齐全：纹章行≥2组且两人各含 70级 行",
-            mat_g15.count("纹章推荐：") >= 2
-            and any(l.startswith("70级：") for l in seg_by_member.get("小禾", []))
-            and any(l.startswith("70级：") for l in seg_by_member.get("格芮", [])),
-            f"emblem_cnt={mat_g15.count('纹章推荐：')}, "
-            f"members={ {k: len(v) for k, v in seg_by_member.items()} }",
-        )
-
-        # N16 上游误标补丁：fetch_infodoc 落盘前把 Freesia 主技能队首个 Teresa (4★)
-        # 主技能段修正为 Freesia (5★)；旧串未命中（上游自改/回退）恒等不破坏。
-        # 上游曾自改又回退（反复横跳），补丁与单测长期保留
-        from fetcher_stelladb import _apply_infodoc_fixes
-        mislabeled = "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)"
-        fixed_line = "| Freesia (5★) |  |  |  |  |  |  |  |  | 1/10/1/1 (Main Skill only)"
-        patched = _apply_infodoc_fixes(
-            "aqua",
-            mislabeled + "\n| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)",
-        )
-        check(
-            "N16 补丁层：Teresa 主技能段→Freesia (5★) 且不误伤其他 Teresa 段",
-            mislabeled not in patched
-            and fixed_line in patched
-            and "| Teresa (4★) |  |  |  |  |  |  |  |  | 1/1/1+/1 (Support Skill, otherwise not needed)" in patched,
-            f"patched={patched!r}",
-        )
-        check(
-            "N16b 补丁层：未知元素/无命中恒等不修改",
-            _apply_infodoc_fixes("umbra", mislabeled) == mislabeled
-            and _apply_infodoc_fixes("aqua", "no match here") == "no match here",
-        )
-        # 存量 aqua.json 断言：无论上游处于误标态还是自改态，落盘数据恒无主技能段误标
-        aqua_data = json.loads((DATA_DIR / "offline" / "infodocs" / "aqua.json").read_text(encoding="utf-8"))["data"]
-        check(
-            "N16c 存量 aqua.json：Teresa 主技能误标消除且 Freesia (5★) 在位",
-            mislabeled not in aqua_data and fixed_line in aqua_data,
-        )
-
-        # N17 同名 build first-wins：Karin boss shark→乙叶 Laser、翡冷翠主技能→乙叶 Weeping Sky
-        umbra_data = json.loads((DATA_DIR / "offline" / "infodocs" / "umbra.json").read_text(encoding="utf-8"))["data"]
-        karin_blk = service.extract_block_by_name(umbra_data, "Karin (Boss Shark) WIP")
-        firenze_blk = service.extract_block_by_name(umbra_data, "Firenze (Main Skill)")
-        if karin_blk is None or firenze_blk is None:
-            check("N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）", False,
-                  f"区块缺失（上游可能改名锚点）: karin={karin_blk is not None}, firenze={firenze_blk is not None}")
-        else:
-            karin_seg = karin_blk.get("segments", {}).get("Otoha", {})
-            firenze_seg = firenze_blk.get("segments", {}).get("Otoha", {})
-            karin_desc0 = (karin_seg.get("description") or [""])[0]
-            firenze_desc0 = (firenze_seg.get("description") or [""])[0]
-            karin_emblem0 = (karin_seg.get("emblem") or [""])[0]
-            firenze_emblem0 = (firenze_seg.get("emblem") or [""])[0]
-            check(
-                "N17 first-wins：Karin→Laser / Firenze→Weeping Sky（desc+emblem 双证）",
-                karin_desc0.startswith("Otoha's laser build")
-                and "Ultimate DMG" in karin_emblem0
-                and firenze_desc0.startswith("Otoha's skill build")
-                and "Skill DMG" in firenze_emblem0,
-                f"karin_desc0={karin_desc0[:50]!r}, firenze_desc0={firenze_desc0[:50]!r}",
-            )
-
-        # N18 段头误判修复：描述行以角色名开头+★ Key Notes 不再被当新段头——
-        # Nazuna-Donna 的 Nazuna skill 应为真实段头值，且描述完整保留
-        nd_blk = service.extract_block_by_name(aqua_data, "Nazuna-Donna") or {}
-        nazuna_seg = nd_blk.get("segments", {}).get("Nazuna", {})
-        check(
-            "N18 段头误判修复：Nazuna skill 为真实值且描述完整",
-            nazuna_seg.get("skill") == "1/1/1/1 (Not needed)"
-            and len(nazuna_seg.get("description") or []) == 1
-            and "Main slot" in (nazuna_seg.get("description") or [""])[0],
-            f"skill={nazuna_seg.get('skill')!r}, desc_len={len(nazuna_seg.get('description') or [])}",
-        )
-
-        # N19 Freesia 主技能队区块：成员定位正确（Freesia 主控）。
-        # 锚点名按前缀解析——上游会以 WIP 后缀标注队伍成熟度，改名不换队；
-        # 取块失败报 FAIL 而非下标崩溃（上游锚点漂移时后续节仍可执行）
-        def _anchor_names(text: str) -> list:
-            names = []
-            for line in text.split("\n"):
-                if "⏏" in line or "Back to Top" in line:
-                    cleaned = service._TOP_ANCHOR_RE.sub("", line).strip(" |").strip()
-                    cells = [c.strip() for c in cleaned.split("|") if c.strip()]
-                    if cells:
-                        names.append(cells[0])
-            return names
-
-        fs_name = next((n for n in _anchor_names(aqua_data) if n.startswith("Freesia (Main Skill")), None)
-        fs_blk = service.extract_block_by_name(aqua_data, fs_name) if fs_name else None
-        if fs_blk is None:
-            check("N19 Freesia 主技能队结构：members 含 Freesia 主控 + 真 Teresa 支援", False,
-                  f"未找到 Freesia (Main Skill) 前缀锚点，现有锚点={_anchor_names(aqua_data)}")
-        else:
-            check(
-                "N19 Freesia 主技能队结构：members 含 Freesia 主控 + 真 Teresa 支援",
-                fs_blk["members"] == ["Freesia", "Flora", "Iris", "Teresa"]
-                and fs_blk["roles"]["Freesia"] == "主控位"
-                and fs_blk["segments"]["Freesia"]["skill"] == "1/10/1/1 (Main Skill only)"
-                and fs_blk["segments"]["Teresa"]["skill"] == "1/1/1+/1 (Support Skill, otherwise not needed)",
-                f"members={fs_blk['members']}, roles={fs_blk['roles']}",
-            )
-    finally:
-        service.reload_team_table()
-
-    # —— 数据目录重定向（原 Q 节，与表加载同属数据目录主题）——
-    run_data_dir_redirect()
-
-
-async def run_section_p() -> None:
-    """测试热门优先级过滤与纯属性泛查：元素检测、组级补齐、全量豁免、build priority 固化。"""
-
-    # ---- P1 组：detect_element_query 单测 ----
-    check("P1a 风队→ventus", service.detect_element_query("风队") == "ventus")
-    check("P1b 小桃火队（乱说角色+真实属性）→ignis", service.detect_element_query("小桃火队") == "ignis")
-    check("P1c 土队别名→terra", service.detect_element_query("土队") == "terra")
-    check("P1d 多元素同现按词表序取首个（风水队→aqua）", service.detect_element_query("风水队") == "aqua")
-    check("P1e 无后缀不触发（小火攻略→None）", service.detect_element_query("小火攻略") is None)
-    check("P1f 纯角色问法不触发（夏花攻略→None）", service.detect_element_query("夏花攻略") is None)
-
-    # ---- P2 组：apply_priority_filter 组级补齐（fixture 隔离） ----
-    def _row(key: str, elem: str, block: str | None, priority: bool) -> dict:
-        ref = {"element": elem, "block": block} if block else None
-        return {"main_key": key, "element": elem, "guide_ref": ref, "priority": priority}
-
-    fixture = [
-        _row("hot-a-1", "aqua", "HotA", True),
-        _row("hot-a-2", "aqua", "HotA", True),   # 同区块第二行（组级完整性用）
-        _row("cold-a-1", "aqua", "ColdA", False),
-        _row("cold-a-2", "aqua", "ColdA", False),
-        _row("cold-b-1", "aqua", "ColdB", False),
-        _row("cold-c-1", "aqua", "ColdC", False),
-        _row("orphan-1", "aqua", None, False),   # 孤码行（无 guide_ref）
-    ]
-    kept = service.apply_priority_filter(fixture, "风队")
-    kept_keys = [r["main_key"] for r in kept]
-    check("P2a 热门1区块<3 补冷门至3（HotA+ColdA+ColdB）",
-          kept_keys == ["hot-a-1", "hot-a-2", "cold-a-1", "cold-a-2", "cold-b-1"],
-          f"kept={kept_keys}")
-
-    three_hot = [
-        _row("h1", "aqua", "HotA", True),
-        _row("h2", "aqua", "HotB", True),
-        _row("h3", "aqua", "HotC", True),
-        _row("c1", "aqua", "ColdA", False),
-    ]
-    kept3 = service.apply_priority_filter(three_hot, "风队")
-    check("P2b 热门已满3区块不补冷门", [r["main_key"] for r in kept3] == ["h1", "h2", "h3"],
-          f"kept={[r['main_key'] for r in kept3]}")
-
-    kept_all = service.apply_priority_filter(fixture, "展示全部队伍")
-    check("P2c 全量触发词（全部）豁免过滤", [r["main_key"] for r in kept_all] == [r["main_key"] for r in fixture])
-
-    no_hot = [_row("o1", "aqua", None, False), _row("c1", "aqua", "ColdA", False)]
-    kept_fallback = service.apply_priority_filter(no_hot, "风队")
-    check("P2d 0热门行回退全量", [r["main_key"] for r in kept_fallback] == ["o1", "c1"])
-
-    # ---- P3 组：build_team_table 写入 priority 字段 ----
-    lookup = DictLookup(DATA_DIR)
-    lookup._load()
-    artifact_doc = """Aqua
-Teresa's Team
-\tMain Trekker
-\tPreset Code
-\tAAAAnAAAAIIAAAB9MYDIIYDNgCBsAKyAIACA
-\tAAAAfwAAAIIAAAB9VbYjEADNkCBsAKyAOACA
-"""
-    infodoc = """Teresa's Team | ⏏ Back to Top ⏏
-Nazuna (5★) | 1/1/1/1
-Donna (5★) | 1/1/1/1
-Freesia (5★) | 1/1/1/1
-⏏ BACK TO TOP ⏏
-"""
-    table_hot = team_table.build_team_table(
-        artifact_doc, {"aqua": infodoc}, lookup, "",
-        team_priorities={"aqua": ["Teresa's Team"]},
-    )
-    table_cold = team_table.build_team_table(
-        artifact_doc, {"aqua": infodoc}, lookup, "",
-        team_priorities={"umbra": ["Nope"]},
-    )
-    check("P3a 命中 team_priorities 的行 priority=True",
-          len(table_hot["rows"]) == 2
-          and table_hot["rows"][0].get("priority") is True
-          and table_hot["rows"][0]["guide_ref"]["block"] == "Teresa's Team"
-          and table_hot["rows"][1].get("priority") is False,
-          f"rows={[ (r['main_key'][:12], r.get('priority')) for r in table_hot['rows'] ]}")
-    check("P3b 未命中 team_priorities 的行 priority=False",
-          all(r.get("priority") is False for r in table_cold["rows"]))
-
-    # ---- P4 组：handle_how 集成（真实表 + 真实离线 infodoc） ----
-    p1, ctx1 = make_plugin()
-    await p1.on_load()
-    ctx1.llm = MockLLM()
-    ctx1.send = MockSend()
-    r_elem = await p1.handle_how(query="风队", question="风队有哪些", group_id="g1", stream_id="stream_p4a")
-    mat_elem = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
-    groups_elem = re.findall(r"(?m)^\d+\. ", mat_elem)
-    check("P4a 纯属性泛查（风队）直发成功且出3队（2热门+1补冷门）",
-          "已直接发送" in r_elem.get("content", "")
-          and len(groups_elem) == 3,
-          f"content={r_elem.get('content', '')!r}, groups={len(groups_elem)}")
-
-    ctx1.llm, ctx1.send = MockLLM(), MockSend()
-    r_char = await p1.handle_how(query="夏花", question="夏花攻略", group_id="g1", stream_id="stream_p4b")
-    mat_char = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
-    groups_char = re.findall(r"(?m)^\d+\. ", mat_char)
-    check("P4b 单角色查询热门<3 补齐至3队",
-          "已直接发送" in r_char.get("content", "") and len(groups_char) == 3,
-          f"groups={len(groups_char)}")
-
-    ctx1.llm, ctx1.send = MockLLM(), MockSend()
-    r_all = await p1.handle_how(query="夏花", question="夏花全部队伍", group_id="g1", stream_id="stream_p4c")
-    mat_all = ctx1.llm.calls[0]["prompt"].split("【攻略资料】")[-1]
-    groups_all = re.findall(r"(?m)^\d+\. ", mat_all)
-    check("P4c 问句含'全部'豁免过滤（组数>3）",
-          "已直接发送" in r_all.get("content", "") and len(groups_all) > 3,
-          f"groups={len(groups_all)}")
-
-    ctx1.llm, ctx1.send = MockLLM(), MockSend()
-    r_none = await p1.handle_how(query="小火攻略", question="小火攻略", group_id="g1", stream_id="stream_p4d")
-    check("P4d 无角色且无元素后缀→直发提示不回传planner（不走LLM）",
-          len(ctx1.send.sent) == 1
-          and "没有查到相关内容" in ctx1.send.sent[0][1]
-          and "stop 工具" in r_none.get("content", "")
-          and ctx1.llm.calls == [],
-          f"content={r_none.get('content', '')!r}")
-
-    # ---- P5 组：答案缓存过期驱逐与内存上界 ----
-    from cache import CacheManager  # noqa: E402
-
-    cm = CacheManager(Path(tempfile.mkdtemp(prefix="stellasora_p5_")), ttl_seconds=1)
-    cm.set("k1", "v1")
-    check("P5a 未过期命中", cm.get("k1") == "v1")
-    time.sleep(1.1)
-    check("P5b 过期即驱逐：内存条目删除+磁盘过期文件清理",
-          cm.get("k1") is None
-          and "k1" not in cm._memory_cache
-          and not list(cm.cache_dir.glob("*.json")))
-    for i in range(200):
-        cm.set(f"k{i}", "v")
-    check("P5c 内存条目硬上界（溢出整体清空）", len(cm._memory_cache) <= 128,
-          f"len={len(cm._memory_cache)}")
-
-    # ---- P6 组：表缓存 mtime 自愈（外部进程重建表 → 内存缓存自动失效） ----
-    import unittest.mock  # noqa: E402
-
-    fixture_tbl = {"rows": [{"main_key": "a", "priority": False}], "report": {"stats": {}}}
-    fixture_tbl_v2 = {"rows": [{"main_key": "a", "priority": True}], "report": {"stats": {}}}
-    with tempfile.TemporaryDirectory(prefix="stellasora_p6_") as td:
-        presets_dir = Path(td) / "offline" / "presets"
-        presets_dir.mkdir(parents=True)
-        tpath = presets_dir / "team_table.json"
-        tpath.write_text(json.dumps(fixture_tbl), encoding="utf-8")
-        with unittest.mock.patch.object(service, "_DATA_DIR", Path(td)):
-            service.reload_team_table()
-            t1 = service.load_team_table()
-            check("P6a 首次加载磁盘表", t1["rows"][0].get("priority") is False)
-            # 模拟旧缓存：直接改内存缓存值 + 保持 mtime 不变 → 仍命中缓存
-            service._team_table_cache = fixture_tbl_v2
-            check("P6b mtime 未变时信任内存缓存", service.load_team_table()["rows"][0].get("priority") is True)
-            # 外部进程重建：mtime 变化 → 自动重读磁盘（无需 reload_team_table）
-            time.sleep(0.02)
-            tpath.write_text(json.dumps(fixture_tbl), encoding="utf-8")
-            t2 = service.load_team_table()
-            check("P6c mtime 变化自动重读（外部重建自愈）",
-                  t2["rows"][0].get("priority") is False
-                  and service._team_table_cache_mtime is not None)
-    service.reload_team_table()
-
-
-# ===== 节 O：ss-data 数据源与 what 五类扩展 =====
-
-
-def test_ssdata_dataset_offline_read() -> None:
-    """O1: 手工写入 offline ssdata，断言 fetch_ssdata_dataset 读取包含该 data。"""
-    with tempfile.TemporaryDirectory(prefix="stellasora_o1_") as td:
-        tdp = Path(td)
-        ssdata_dir = tdp / "ssdata"
-        ssdata_dir.mkdir(parents=True, exist_ok=True)
-        gacha_file = ssdata_dir / "gacha.json"
-        payload = {
-            "url": "https://raw.githubusercontent.com/AutumnVN/ss-data/main/gacha.json",
-            "name": "gacha",
-            "timestamp": 12345678,
-            "data": {"banners": [{"id": 1, "name": "Standard"}]},
-        }
-        gacha_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        st_temp = StelladbFetcher(cache_dir=tdp, offline_dir=tdp, proxy="")
-        data = st_temp.fetch_ssdata_dataset("gacha")
-        check("O1 手工写入 offline ssdata 读取", data is not None and "banners" in data)
-
-
-def test_ssdata_dataset_missing_offline_and_netdown() -> None:
-    """O2: URL 指向 127.0.0.1:1/x.json，无离线 → 返回 None 不抛异常。"""
-    import fetcher_stelladb  # noqa: E402
-
-    with tempfile.TemporaryDirectory(prefix="stellasora_o2_") as td:
-        tdp = Path(td)
-        st_temp = StelladbFetcher(cache_dir=tdp, offline_dir=tdp, proxy="")
-        with unittest.mock.patch.object(fetcher_stelladb, "_SS_DATA_BASE", "http://127.0.0.1:1"):
-            res = st_temp.fetch_ssdata_dataset("x")
-            check("O2 无离线且网络断开返回 None 不抛异常", res is None)
-
-
-def test_element_cn_map() -> None:
-    """O3: 6元素及None映射完整性。"""
-    from service import _ELEMENT_CN  # noqa: E402
-
-    expected = {
-        "Ignis": "火",
-        "Aqua": "水",
-        "Terra": "地",
-        "Ventus": "风",
-        "Lux": "光",
-        "Umbra": "暗",
-        "None": "无",
-    }
-    ok = all(_ELEMENT_CN.get(k) == v for k, v in expected.items())
-    check("O3 元素全量映射（6元素+None）", ok)
-
-
-def test_character_material_uses_descCN() -> None:
-    """O4: fixture character.json (Amber 103) → 渲染含 二重奏，不含 <color 与 &Param。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mat, ok = service._build_character_material(st_fix, "103", lookup)
-    check("O4 角色资料使用 descCN 且无 markup",
-          ok and "二重奏" in mat and "<color" not in mat and "&Param" not in mat)
-
-
-def test_disc_material() -> None:
-    """O5: fixture disc.json (211001) → 渲染含 强音·主调。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mat, ok = service._build_disc_material(st_fix, "211001", lookup)
-    check("O5 秘纹资料渲染含强音·主调且无 markup",
-          ok and "强音·主调" in mat and "<color" not in mat and "&Param" not in mat)
-
-
-def test_keyword_routes() -> None:
-    """O6: 关键词路由测试（排行榜走 /st_bb・/st_fe 命令，不占 what 关键词路由）。"""
-    r_banner = service._route_what_keywords("当前卡池") == "banner"
-    r_lb_none = service._route_what_keywords("赛季排行榜") is None
-    r_none = service._route_what_keywords("夏花") is None
-    check("O6 what 关键词路由", r_banner and r_lb_none and r_none)
-
-
-def test_banner_material() -> None:
-    """O7: fixture gacha.json (3期) → 断言输出含 2 期、日期格式化，且 as_of 回看历史期。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mat, ok = service._build_banner_material(st_fix, lookup)
-    # 3 期时间戳均经格式化呈现（2026-09-08 与 2026-09-01），且含角色/秘纹卡池，无残余 markup
-    has_period_1 = "2026-09-08" in mat
-    has_period_2 = "2026-09-01" in mat
-    has_types = "【角色卡池】" in mat and "【秘纹卡池】" in mat
-    # as_of 回看：2026-09-05 时刻进行中的是 09-01~09-08 的 Bloom to the Bright Sun
-    mat_hist, ok_hist = service._build_banner_material(st_fix, lookup, as_of="2026-09-05")
-    has_hist = ok_hist and "Bloom to the Bright Sun" in mat_hist and "2026-09-01" in mat_hist
-    check("O7 卡池资讯渲染含2期且日期格式化",
-          ok and has_period_1 and has_period_2 and has_types and "<color" not in mat and has_hist)
-
-
-def test_monster_match_and_material() -> None:
-    """O8: fixture raid.json → 覆盖子串路径、MonsterManual路径及降级路径。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    # 1. 子串/分词路径
-    m_id = service._match_monster("Opera Ghost", lookup, st_fix)
-    mat, ok = service._build_monster_material(st_fix, m_id, lookup)
-    p1_ok = (m_id == "51002" and ok and ("弱" in mat or "弱点" in mat) and "机制" in mat)
-
-    # 2. MonsterManual dict 路径（防死分支回归）：question="机制" 命中
-    #    模块化选段的 mechanic 区块，断言内容保持既有语义不变
-    with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.51002.1", "cat": "MonsterManual", "cn": "歌剧魅影", "en": "Opera Ghost"}):
-        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, None)):
-            q_res = service.query_what("某怪名", cache_dir=fixtures_dir, question="某怪名的机制")
-            p2_ok = ("弱" in q_res or "弱点" in q_res) and "机制" in q_res and "没有专属攻略页" not in q_res
-
-    # 3. 降级路径：lookup_term 命中 absent id，_match_monster 降级命中真实键
-    with unittest.mock.patch.object(lookup, "lookup_term", return_value={"id": "MonsterManual.999999.1", "cat": "MonsterManual", "cn": "未知怪", "en": "Unknown"}):
-        fallback_id = service._match_monster("Opera Ghost", lookup, st_fix)
-        p3_ok = (fallback_id == "51002" and fallback_id != "999999")
-
-    check("O8 首领怪物匹配与资料（子串路径+MonsterManual路径+降级路径）",
-          p1_ok and p2_ok and p3_ok)
-
-
-def test_query_what_fallback() -> None:
-    """O9: 角色 ss-data 渲染失败 → 不回退 trekker 抓取（冗余路径已删除），
-    直接返回统一的「没有专属攻略页」文案。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch.object(service, "_build_character_material", return_value=("", False)):
-        with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
-            res = service.query_what("琥珀", cache_dir=fixtures_dir)
-            check("O9 角色资料失败不回退 trekker（返回无专属攻略页文案）",
-                  "没有专属攻略页" in res
-                  and "字典匹配" in res
-                  and "trekker" not in res
-                  and "未在字典中找到" not in res)
-
-
-def test_query_what_disc_route() -> None:
-    """O10: 端到端 disc 路由——query_what('朝霭', question='朝霭的旋律') 含 强音·主调。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
-        res = service.query_what("朝霭", cache_dir=fixtures_dir, question="朝霭的旋律")
-        check("O10 端到端 disc 路由渲染含强音·主调",
-              "强音·主调" in res and "<color" not in res)
-
-
-def test_disc_list_concept_route() -> None:
-    """O12: 秘纹概念路由排他性与秘纹列表概要渲染。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    r_disc = (service._route_what_keywords("秘纹") == "disc")
-    r_crest = (service._route_what_keywords("纹章") is None)
-    mat, ok = service._build_disc_list_material(st_fix, lookup)
-    check("O12 秘纹概念路由排他性与秘纹列表渲染",
-          r_disc and r_crest and ok and "【秘纹列表" in mat and "朝霭" in mat)
-
-
-def test_luming_alias_routes_to_disc() -> None:
-    """O13: 鹿鸣别名（overrides.json 底层修正）经真实单例路由到秘纹 214015。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    # M5：先归一化别名状态（清空 config 侧别名），消除对 B/D/F 节
-    # 前序状态的隐式依赖——即便前序配置过 custom_aliases，merged 也只剩
-    # overrides.json 底层别名，保证后续断言只验证 todo1 修复本身
-    service.configure_overrides(aliases={})
-    # 走真实 _get_services 构建的模块级单例 lookup（key=_DATA_DIR，构建时
-    # 注入 _merged_alias_map）：鹿鸣应路由到 Item.214015.1 而非同名主技能
-    res = service.lookup_term("鹿鸣")
-    check("O13 lookup_term('鹿鸣') 走真实单例路由到 Item.214015.1",
-          res.get("id") == "Item.214015.1")
-
-    # 复用含 merged 别名的真实单例 lookup，fixture 驱动端到端 disc 路由：
-    # query_what('鹿鸣') 应渲染秘纹资料，而非 MainSkill 类词条的兜底文案
-    lookup, _last, _st, _replacer = service._get_services(DATA_DIR / ".cache")
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
-        q_res = service.query_what("鹿鸣", cache_dir=fixtures_dir)
-    check("O13 query_what('鹿鸣') 渲染秘纹鹿鸣且无兜底残渣",
-          "【秘纹】" in q_res and "鹿鸣" in q_res
-          and "没有专属攻略页" not in q_res and "MainSkill" not in q_res)
-
-
-def test_blitz_current_bosses() -> None:
-    """O14: 当期联合讨伐路由、两 boss 材质渲染与端到端查询。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    # 1. 路由断言：讨伐意图统一落到 blitz，秘纹排他，终焉（raid）意图被排除
-    r_join = (service._route_what_keywords("当期联合讨伐boss") == "blitz")
-    r_en = (service._route_what_keywords("blitz") == "blitz")
-    r_slash = (service._route_what_keywords("讨伐boss") == "blitz")
-    r_disc = (service._route_what_keywords("秘纹") == "disc")
-    r_raid_excl = (service._route_what_keywords("终焉boss") != "blitz")
-    check("O14 blitz 路由（含 raid 排他）",
-          r_join and r_en and r_slash and r_disc and r_raid_excl)
-
-    # 2. 材质渲染：两 boss 名 + 弱点 + 机制，无 markup 残渣
-    mat, ok = service._build_blitz_material(st_fix, lookup)
-    check("O14 当期讨伐渲染含两 boss 与弱点机制且无 markup",
-          ok and "Furious Stomper Crab" in mat and "Forbidden Beauty" in mat
-          and "弱点" in mat and "机制" in mat
-          and "<color" not in mat and "&Param" not in mat)
-    # 2b. 渲染伪影回归：整条 descCN 全量输出、markup 先清理后渲染，
-    # 不得残留未闭合颜色标签断片（fixture floor24 Bounty: Nimble Dodge 的
-    # descCN 含 <color> 标签；截断已删除，标签随 strip_game_markup 完整清除）
-    check("O14 descCN 全量渲染无 <color/</color 断片残留",
-          "<color" not in mat and "</color" not in mat and "</colo" not in mat)
-
-    # 3. 端到端：mock _get_services 后 query_what 走 blitz 路由
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
-        q_res = service.query_what("当期讨伐boss", cache_dir=fixtures_dir)
-    check("O14 query_what('当期讨伐boss') 含两 boss 名",
-          "Furious Stomper Crab" in q_res and "Forbidden Beauty" in q_res)
-
-
-def test_term_cn_map() -> None:
-    """O15: 讨伐术语中文常量全量 11 项及代表性映射。"""
-    from service import _TERM_CN, _term_cn  # noqa: E402
-
-    n_ok = len(_TERM_CN) == 11
-    dps_ok = _term_cn("Damage Per Score") == "单分伤害"
-    raid_ok = _term_cn("Raid") == "终焉绝响"
-    check("O15 术语映射（11 项 + Damage Per Score + Raid）", n_ok and dps_ok and raid_ok)
-
-
-def test_what_module_detection() -> None:
-    """O16: _detect_what_modules 模块检测——命座→talents、培养材料→details、
-    空→overview、monster「机制」→mechanic、跨类型「技能」隔离。"""
-    from service import _detect_what_modules  # noqa: E402
-
-    ok_talents = _detect_what_modules("琥珀的命座", "character") == {"overview", "talents"}
-    ok_details = _detect_what_modules("培养材料", "character") == {"overview", "details"}
-    ok_empty = _detect_what_modules("", "character") == {"overview"}
-    ok_mechanic = _detect_what_modules("这个boss的机制", "monster") == {"overview", "mechanic"}
-    # 跨类型「技能」隔离：character→skills / disc→melody / monster→mechanic
-    ok_skill_char = _detect_what_modules("技能", "character") == {"overview", "skills"}
-    ok_skill_disc = _detect_what_modules("技能的旋律", "disc") == {"overview", "melody"}
-    ok_skill_mon = _detect_what_modules("技能", "monster") == {"overview", "mechanic"}
-    ok_stats = _detect_what_modules("血量", "monster") == {"overview", "stats"}
-    check("O16 what 模块检测（命座/培养材料/空/机制/技能隔离/stats）",
-          ok_talents and ok_details and ok_empty and ok_mechanic
-          and ok_skill_char and ok_skill_disc and ok_skill_mon and ok_stats)
-
-    # 防误桥：裸「猫眼」不得命中 duel boss「1」——同名???变体识别必须带长度阈值
-    # 拒绝裸名（「猫眼？？？」归一化后与「猫眼」同形，只能靠原串级长度判定区分）
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    dl_st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    dl_bare = service._match_monster("猫眼", DictLookup(DATA_DIR), dl_st_fix)
-    check("O16 防误桥 裸名「猫眼」不得劫持 duel boss", dl_bare != "1")
-
-
-def test_character_module_material() -> None:
-    """O17: _build_character_material 模块定向——skills 含【普攻】无【约会分支】、
-    talents 含【天赋】+天赋轶闻（mock lookup_term 保证确定性）、details 含面板数值/
-    升级材料、modules=None 全量含【约会分支】。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    # 1. 技能模块：含【普攻】，不含【约会分支】；
-    #    CV 字典反译回归（hotfix）：cnCv 存罗马音 Si Bai，须渲染为字典中文「四白」
-    mat_s, ok_s = service._build_character_material(st_fix, "103", lookup, modules={"overview", "skills"})
-    p1_ok = (
-        ok_s and "【普攻】" in mat_s and "二重奏" in mat_s and "约会分支" not in mat_s
-        and "CV：四白" in mat_s and "Si Bai" not in mat_s
-    )
-
-    # 2. 天赋模块：含【天赋】与天赋轶闻；lookup_term("Item.103.3") 走 mock，
-    #    不依赖真实字典内容保证确定性
-    def _fake_lookup(t: str, **_kw) -> dict:
-        if t == "Item.103.3":
-            return {"id": "Item.103.3", "cat": "Item", "cn": "测试用天赋轶闻"}
-        return lookup.lookup_term(t, **_kw)
-
-    with unittest.mock.patch.object(lookup, "lookup_term", side_effect=_fake_lookup):
-        mat_t, ok_t = service._build_character_material(st_fix, "103", lookup, modules={"overview", "talents"})
-    p2_ok = ok_t and "【天赋】" in mat_t and "天赋轶闻：测试用天赋轶闻" in mat_t and "约会分支" not in mat_t
-
-    # 3. details 模块：面板数值（首尾等级）+ 升级材料
-    mat_d, ok_d = service._build_character_material(st_fix, "103", lookup, modules={"overview", "details"})
-    p3_ok = ok_d and "【面板数值】" in mat_d and "1级" in mat_d and "40级" in mat_d and "【升级材料】" in mat_d
-
-    # 4. modules=None 全量路径：保留既有逐字节输出，含【约会分支】
-    mat_full, ok_full = service._build_character_material(st_fix, "103", lookup)
-    p4_ok = ok_full and "【约会分支】" in mat_full and "【普攻】" in mat_full and "【天赋】" in mat_full
-
-    # 5. 约会分支整句中文化（hotfix 回归）：name/clue/secondChoice 为整句英文，
-    #    须经 replacer 全文映射译为中文，不得经 _cn_by_en（只查 .1 名字条目，整句查不到）
-    p5_ok = (
-        "事件：偶遇猫咪" in mat_full
-        and "解锁线索：在港口的话，或许会发现些什么" in mat_full
-        and "分支选择：要不要现在来一场夜钓" in mat_full
-        and "The Kitten Encounter" not in mat_full
-        and "Visit the Port to unlock" not in mat_full
-        and "night fishing" not in mat_full
-    )
-
-    check("O17 角色资料模块定向（skills/talents+轶闻/details/全量约会分支）",
-          p1_ok and p2_ok and p3_ok and p4_ok and p5_ok)
-
-
-def test_disc_module_material() -> None:
-    """O18: _build_disc_material 模块定向——melody 含强音·主调不含升级消耗；
-    details 含升级消耗不含强音·主调。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    # 1. melody 模块：主技能 + 支援旋律，不含升级消耗/潜能加成
-    mat_m, ok_m = service._build_disc_material(st_fix, "211001", lookup, modules={"overview", "melody"})
-    p1_ok = ok_m and "【主技能】" in mat_m and "强音·主调" in mat_m and "【支援旋律】" in mat_m \
-        and "升级消耗" not in mat_m and "潜能加成" not in mat_m
-
-    # 2. details 模块：面板数值 + 潜能加成 + 升级消耗，不含主技能
-    mat_d, ok_d = service._build_disc_material(st_fix, "211001", lookup, modules={"overview", "details"})
-    p2_ok = ok_d and "【面板数值】" in mat_d and "【潜能加成】" in mat_d and "【升级消耗】" in mat_d \
-        and "强音·主调" not in mat_d
-
-    check("O18 秘纹资料模块定向（melody 无升级消耗/details 有升级消耗）", p1_ok and p2_ok)
-
-
-def test_monster_module_material() -> None:
-    """O19: _build_monster_material 模块定向——raid {'overview'} 无机制/难度区块、
-    {'stats','mechanic'} 齐全；duel 源（id "1"）含 霸主/弱点/分组 affix 机制
-    （裸 list 分组与 {"affix": [...]} 包装两种 schema 均须渲染）。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    # 1. raid 51002 仅 overview：无【首领机制】/【难度与属性】
-    mat_ov, ok_ov = service._build_monster_material(st_fix, "51002", lookup, modules={"overview"})
-    p1_ok = ok_ov and "【首领】" in mat_ov and "弱点" in mat_ov \
-        and "【首领机制】" not in mat_ov and "【难度与属性】" not in mat_ov
-
-    # 2. raid 51002 stats+mechanic 定向：两个区块齐全
-    mat_sm, ok_sm = service._build_monster_material(st_fix, "51002", lookup, modules={"stats", "mechanic"})
-    p2_ok = ok_sm and "【首领机制】" in mat_sm and "【难度与属性】" in mat_sm and "弱点" in mat_sm
-
-    # 3. duel 源（Overlord 类型/平铺 stat/分组 affix/抗性"无"）：affix 名走
-    #    mock lookup_term 保证确定性，不依赖真实字典翻译。fixture 同时覆盖
-    #    duel 两种分组 schema：裸 list 分组（真实 ss-data 形态，含
-    #    "Furious Kitty"）与 {"affix": [...]} 包装分组（兼容形态）；
-    #    "Furious Kitty" 专属译名用于断言裸 list 分组确实被渲染
-    def _fake_lookup(t: str, **_kw) -> dict:
-        if t in ("Full-auto Fire", "Volley Formation", "Dark Ray"):
-            return {"id": "X", "cat": "MonsterManual", "cn": "固定机制词条"}
-        if t == "Furious Kitty":
-            return {"id": "X", "cat": "MonsterManual", "cn": "裸分组机制词条"}
-        return lookup.lookup_term(t, **_kw)
-
-    with unittest.mock.patch.object(lookup, "lookup_term", side_effect=_fake_lookup):
-        mat_duel, ok_duel = service._build_monster_material(st_fix, "1", lookup, modules={"stats", "mechanic"})
-    p3_ok = ok_duel and "类型：霸主" in mat_duel and "弱点：水" in mat_duel and "抗性：无" in mat_duel \
-        and "【首领机制】" in mat_duel and "固定机制词条" in mat_duel and "裸分组机制词条" in mat_duel \
-        and "【面板数值】" in mat_duel
-
-    # 4. duel 同名???变体识别（真实字典 lookup，不走 mock）：fixture boss「1」名字镜像
-    #    真实 schema "[Cat-stle Siege] Chaton ???"，剥赛季前缀后内层名 "Chaton ???" 在
-    #    data/dict.json 反查得官方中文「猫眼？？？」——全角问号查询须命中 duel 资料；
-    #    裸「猫眼」不得劫持（归一套吃全角？，原串级长度阈值 >=4 拒绝）
-    m_mao = service._match_monster("猫眼？？？", lookup, st_fix)
-    m_scene = service._match_monster("巅峰秀场猫眼？？？", lookup, st_fix)
-    p4_ok = (m_mao == "1") and (m_scene == "1")
-
-    # 5. duel 头部显示官方中文名：剥赛季前缀反查命中 → 「猫眼？？？(EN)」形态
-    mat_duel_ov, ok_duel_ov = service._build_monster_material(st_fix, "1", lookup, modules={"overview"})
-    p5_ok = ok_duel_ov and "猫眼？？？" in mat_duel_ov
-
-    check("O19 首领怪物模块定向（raid overview/stats+mechanic 与 duel 分区渲染）",
-          p1_ok and p2_ok and p3_ok)
-    check("O19 duel 同名???变体识别（猫眼？？？/场景词命中 + 头部官方中文名）",
-          p4_ok and p5_ok)
-
-
-def test_what_end_to_end_modules() -> None:
-    """O20: 端到端模块化——query_what('琥珀', question='琥珀的命座') 含【天赋】无
-    【约会分支】；question='' 仅 overview 基底；概念页（当期讨伐）不受模块影响。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    with unittest.mock.patch("service._get_services", return_value=(lookup, fixtures_dir, st_fix, TermReplacer(DATA_DIR))):
-        # 1. 问题定向到天赋模块：含【天赋】+天赋轶闻，无【约会分支】/【普攻】
-        r_tal = service.query_what("琥珀", cache_dir=fixtures_dir, question="琥珀的命座")
-        p1_ok = "【天赋】" in r_tal and "约会分支" not in r_tal and "【普攻】" not in r_tal
-
-        # 2. 空问题仅 overview 基底：三个区块均不输出
-        r_ov = service.query_what("琥珀", cache_dir=fixtures_dir, question="")
-        p2_ok = "【天赋】" not in r_ov and "约会分支" not in r_ov and "【普攻】" not in r_ov
-
-        # 3. 概念页（当期讨伐）不经过模块检测，整页输出含两 boss 名
-        r_blitz = service.query_what("当期讨伐boss", cache_dir=fixtures_dir, question="当期讨伐boss的机制")
-        p3_ok = "Furious Stomper Crab" in r_blitz and "Forbidden Beauty" in r_blitz
-
-    check("O20 端到端模块化（命座定向/空问题概述/概念页不受影响）", p1_ok and p2_ok and p3_ok)
-
-
-def test_no_truncation() -> None:
-    """O21: 超长 descCN 整条输出——blitz fixture floor24 Bounty: Nimble Dodge 的
-    descCN（199 字符含 <color> 标签）全量渲染：含完整「共计5400分」句尾、无
-    <color/</colo 断片、无「资料因长度限制被截断」标记。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-    mat, ok = service._build_blitz_material(st_fix, lookup)
-    check("O21 超长 descCN 整条输出无截断无断片",
-          ok
-          and "成功完成躲避即获得675技巧得分，最多触发8次，共计5400分" in mat
-          and "资料因长度限制被截断" not in mat
-          and "<color" not in mat and "</colo" not in mat and "</color" not in mat)
-    # O21b 机制名整段中文化（hotfix 回归）：_"Bounty: Nimble Dodge" 等由
-    # _term_cn（11 个固定术语）译不出、replacer 全文映射可译（悬赏·游隙闪身）
-    check("O21b blitz 机制名整段中文化（replacer 全文映射）",
-          ok
-          and "悬赏·游隙闪身" in mat
-          and "Bounty: Nimble Dodge" not in mat
-          and "悬赏·吹风机克星" in mat)
-
-
-def test_stat_level_cap() -> None:
-    """O22: 面板等级上限——旅人 stat 尾部 Level 91 为内部溢出条目（数值与 90 级
-    相同），不得渲染为「91 级」；秘纹 stat 无 Level 字段，须按突破规则由下标反推
-    等级（末行实为 90 级，而非 idx+1 得出的 98 级）。合成数据镜像真实 ss-data 结构：
-    旅人 99 行（91 唯一等级 + 8 突破重复）、秘纹 98 行（90 唯一等级 + 8 突破重复）。"""
-    char_stat: list = []
-    level = 1
-    while len(char_stat) < 99:
-        char_stat.append({"Level": level, "HP": level * 100, "ATK": level, "DEF": 10})
-        if level in (10, 20, 30, 40, 50, 60, 70, 80):
-            char_stat.append({"Level": level, "HP": level * 100, "ATK": level, "DEF": 10})
-        level += 1
-    disc_stat = [{"HP": i, "ATK": i} for i in range(98)]
-
-    char_levels = service._stat_levels(char_stat)
-    char_rows = service._render_stat_rows(char_stat, None, service._STAT_LABELS)
-    disc_levels = service._stat_levels(disc_stat)
-    disc_rows = service._render_stat_rows(disc_stat, None, service._STAT_LABELS_HP_ATK)
-
-    check("O22 面板等级上限（旅人 90 非 91 / 秘纹按下标反推 90 非 98）",
-          len(char_levels) == 99 and char_levels[-1] == 91            # 溢出条目仍在序列末尾
-          and char_levels[10] == 10 and char_levels[21] == 20         # 突破重复对齐
-          and char_rows[0].startswith("  1级") and char_rows[-1].startswith("  90级")
-          and len(disc_levels) == 98 and disc_levels[-1] == 90
-          and disc_levels[10] == 10 and disc_levels[21] == 20
-          and disc_rows[0].startswith("  1级") and disc_rows[-1].startswith("  90级")
-          and "91级" not in char_rows and "98级" not in disc_rows)
-
-
-def test_param_fill() -> None:
-    """O23: 参数占位符回填（对齐 stelladb 站点默认滑块档位）。
-
-    - 角色 13 档 → 技能等级默认 10（索引 9）；
-    - 角色 9 档 → 技能类取突破档默认 8（索引 8）、潜能类取潜能等级默认 6（索引 5）；
-    - 无斜杠静态名/数值原样；
-    - 秘纹 params 为 'a/b/c' 字符串、占位符 {N} → dupe 默认 1（索引 0）；
-    - ss-data 追加式参数审计尾注（\\x0bParamN: 值 (内部类型枚举)）须剥除。
-    lookup 传 None 以保证确定性（_cn_by_en 原样返回，仅走属性名补充表）。
-    """
-    p13 = "/".join(f"{i}%" for i in range(1, 14))   # 13 档：索引 9 -> "10%"
-    p9 = "/".join(f"{i}%" for i in range(1, 10))    # 9 档：索引 8 -> "9%"
-    desc = "造成&Param1&伤害，持续&Param3&秒。\x0bParam5: 审计 (Effect,EffectTypeFirstSubtype)"
-    sk = {"nameCN": "测试技能", "descCN": desc, "params": [p13, "静态名", p9, 7, "3%"]}
-    skill_desc = service._render_skill_block(sk, "主控技能", None, "skill")[1]
-
-    pot_desc = service._fill_params(
-        "攻击力提升&Param1&", [p9], "potential", None
-    )
-    disc_main = service._fill_params(
-        "主控角色攻击力提升{1}", "7%/8%/9%", "disc_main", None
-    )
-    disc_sec = service._fill_params(
-        "全队风系伤害提升{1}", "5%/6%/7%", "disc_secondary", None
-    )
-
-    check("O23 参数占位符回填（站点默认档位 + 审计尾注剥离）",
-          skill_desc == "描述：造成10%伤害，持续9%秒。"
-          and "&Param" not in skill_desc and "审计" not in skill_desc
-          and "EffectTypeFirstSubtype" not in skill_desc
-          and pot_desc == "攻击力提升6%"                    # 9 档 + potential → 索引 5
-          and disc_main == "主控角色攻击力提升7%"            # dupe 默认 1 → 索引 0
-          and disc_sec == "全队风系伤害提升5%")              # harmony 默认 1 → 索引 0
-
-
-def test_entity_priority_route() -> None:
-    """O24: 概念词实体优先——「实体+概念词」混合查询须提取实体走实体路由，
-    纯概念词仍走概念页。修复原缺陷：问某角色的秘纹会返回与角色无关的秘纹列表。"""
-    from dict_lookup import DictLookup
-
-    lookup = DictLookup(DATA_DIR)
-    # 混合形态 → 提取实体
-    check("O24 实体+概念词混合提取实体",
-          service._extract_entity_term("猫眼的秘纹", lookup) == "猫眼"
-          and service._extract_entity_term("鹿鸣秘纹", lookup) == "鹿鸣")
-    # 纯概念词 / 无概念词 → 不提取
-    check("O24b 纯概念词不提取实体（仍走概念页）",
-          service._extract_entity_term("秘纹", lookup) is None
-          and service._extract_entity_term("卡池", lookup) is None
-          and service._extract_entity_term("联合讨伐", lookup) is None
-          and service._extract_entity_term("猫眼", lookup) is None)
-
-
-def test_blitz_module_select() -> None:
-    """O25: 联合讨伐按模块选段——弱点问句（无机制词）只出概览行；
-    命中机制词或 modules=None 时输出【机制】明细。"""
-    fixtures_dir = ROOT / "tests" / "fixtures" / "ssdata"
-    lookup = DictLookup(DATA_DIR)
-    st_fix = StelladbFetcher(cache_dir=fixtures_dir, offline_dir=fixtures_dir, proxy="")
-
-    q = "本期讨伐boss的弱点属性"
-    mods = service._detect_what_modules(q, "blitz")
-    overview_only, ok1 = service._build_blitz_material(st_fix, lookup, modules=mods)
-    full, ok2 = service._build_blitz_material(st_fix, lookup)
-
-    check("O25 讨伐模块选段（弱点问句仅概览 / 机制词带机制 / None 全量）",
-          ok1 and ok2
-          and mods == {"overview"}
-          and "弱点：" in overview_only and "【机制】" not in overview_only
-          and service._detect_what_modules("讨伐boss的机制", "blitz") == {"overview", "mechanic"}
-          and "【机制】" in full)
-
-
-def test_source_cn() -> None:
-    """O26: 获取途径枚举中文化——字典未覆盖/带瑕疵项（Recruit→「招 募」）须修正。"""
-    lookup = DictLookup(DATA_DIR)
-    check("O26 获取途径枚举中文化（含空格瑕疵修正）",
-          service._source_cn(lookup, "Recruit") == "招募"
-          and service._source_cn(lookup, "Limited") == "限定"
-          and service._source_cn(lookup, "p2w") == "氪金"
-          and service._source_cn(lookup, "BP") == "战令"
-          and service._source_cn(lookup, "AFE") == "终焉绝响"
-          and service._source_cn(lookup, "") == "")
-
-
-def test_signature_disc_dynamic() -> None:
-    """O27: 角色专属秘纹由 disc 数据集动态反查（source 含 Signature 且 char 含角色
-    英文名，规则经 39 角色人工圈定验证与数据源 100% 一致）——随 ss-data 更新自动
-    跟随，无静态表；适配但不 Signature 的秘纹不得误判为专属；无专属角色省略该行。"""
-    lookup = DictLookup(DATA_DIR)
-    datasets = {
-        "character": {
-            "103": {"name": "Amber", "star": "4", "element": "Terra", "class": "Attacker"},
-            "133": {"name": "Nazuka", "star": "5", "element": "Ventus", "class": "Support"},
-        },
-        "disc": {
-            # Amber 适配但非 Signature（孤烟真实为琥珀专属的反例：无 Signature 标记）
-            "211001": {"name": "Crisp Morning", "char": ["Amber"], "source": ["Permanent", "Standard"]},
-            # 琥珀专属：Signature 标记 → 命中
-            "214001": {"name": "Lonely Dunes", "char": ["Amber"], "source": ["Signature", "Limited"]},
-            # 夏花专属：Signature 标记 → 各自命中各自
-            "214015": {"name": "Deer's Song", "char": ["Nazuka"], "source": ["Signature", "Limited"]},
-        },
-    }
-    fake_st = unittest.mock.Mock()
-    fake_st.fetch_ssdata_dataset.side_effect = lambda name: datasets.get(name, {})
-    # 1. 全量路径（modules=None）：专属行随 overview 出现
-    mat_full, ok_full = service._build_character_material(fake_st, "103", lookup)
-    p1 = ok_full and "专属秘纹：孤烟（Lonely Dunes）" in mat_full and "朝霭" not in mat_full
-    # 2. 模块化 overview 路径：专属行仍在，且不得命中他角色专属
-    mat_ov, ok_ov = service._build_character_material(fake_st, "133", lookup, modules={"overview"})
-    p2 = ok_ov and "专属秘纹：鹿鸣（Deer's Song）" in mat_ov and "孤烟" not in mat_ov
-    # 3. 数据集无该角色专属时（删掉标记）省略整行
-    datasets["disc"]["214001"]["source"] = ["Limited"]
-    mat_none, ok_none = service._build_character_material(fake_st, "103", lookup)
-    p3 = ok_none and "专属秘纹" not in mat_none
-    check("O27 专属秘纹动态反查（Signature 命中/适配非专属不误判/无专属省略行）", p1 and p2 and p3)
-
-
-def test_raid_concept_page() -> None:
-    """O28: 终焉绝响当期概念页（路由互斥 / 指针链解析 / 赛季头 / 官方中文名反查 / 类型翻译 / 无兜底）。"""
-    lookup = DictLookup(DATA_DIR)
-
-    # 1. 路由互斥
-    r1 = service._route_what_keywords("终焉绝响boss机制") == "raid"
-    r2 = service._route_what_keywords("联合讨伐") == "blitz"
-    r3 = service._route_what_keywords("raid 弱点") == "raid"
-    r4 = service._route_what_keywords("终焉绝响") == "raid"
-    check("O28 路由互斥（终焉绝响/raid 与联合讨伐互斥）", r1 and r2 and r3 and r4)
-
-    # 2-4. mock fake fetcher 端到端
-    fake_st = unittest.mock.Mock()
-    raid_dataset = {
-        "51007": {
-            "name": "[Exalted Puppets: Coppelius & Olympia] Eye of Ashes",
-            "season": 7,
-            "type": "Raid",
-            "weakTo": ["Ventus", "Umbra"],
-            "resistTo": "Ignis",
-            "mechanic": [{"name": "Cycle of Creation", "desc": "Cycle of Creation"}],
-            "diff": [],
-        }
-    }
-    fake_st.fetch_ssdata_dataset.side_effect = lambda name: raid_dataset if name == "raid" else {}
-    fake_st.fetch_leaderboard_season.return_value = {"FE_SEASON": "fe7", "BB_SEASON": "bb11"}
-    fake_st.fetch_leaderboard_meta.return_value = {"bb11": {}}  # WITHOUT fe7 key -> opened False
-
-    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
-        out_next = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
-
-    # 2. 下期 header + 弱点 + 类型 + 机制 + 无单分伤害
-    p2_hdr = out_next.startswith("【下期 · 终焉绝响 · 第7赛季】")
-    p2_weak = "弱点：风、暗" in out_next
-    p2_type = "类型：终焉绝响" in out_next
-    p2_mech = "【首领机制】" in out_next
-    p2_no_dps = "单分伤害" not in out_next
-    check("O28b 下期终焉绝响机制与类型概览渲染（无单分伤害）",
-          p2_hdr and p2_weak and p2_type and p2_mech and p2_no_dps)
-
-    # 3. 括号首领本体反查官方中文
-    p3_name = "崇高傀儡·科佩里乌斯与奥林匹娅" in out_next
-    check("O28c 括号内首领本体反查官方中文名", p3_name)
-
-    # 4. meta WITH fe7 key -> opened True (当期)
-    fake_st.fetch_leaderboard_meta.return_value = {"fe7": {}, "bb11": {}}
-    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
-        out_cur = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
-    check("O28d meta 命中 fe7 实装键渲染当期 header",
-          out_cur.startswith("【当期 · 终焉绝响 · 第7赛季】"))
-
-    # 5. season mock 缺失 FE_SEASON -> 未在字典中找到 (no fallback)
-    fake_st.fetch_leaderboard_season.return_value = {"BB_SEASON": "bb11"}
-    with unittest.mock.patch("service._get_services", return_value=(lookup, DATA_DIR, fake_st, None)):
-        out_missing = service.query_what("终焉绝响boss机制", DATA_DIR, question="终焉绝响boss机制")
-    check("O28e FE_SEASON 缺失时返回未在字典中找到（零兜底）",
-          "未在字典中找到" in out_missing)
-
-    # 6. duel regression：前缀剥离反查「猫眼？？？」依然正常生效
-    duel_mon = {"name": "[Cat-stle Siege] Chaton ???", "type": "Duel", "weakTo": ["Aqua"]}
-    fake_st.fetch_ssdata_dataset.side_effect = lambda name: {"9999": duel_mon} if name == "duel" else {}
-    mat_duel, ok_duel = service._build_monster_material(fake_st, "9999", lookup)
-    check("O28f duel 前缀剥离反查官方中文名回归保持", ok_duel and "猫眼？？？" in mat_duel)
-
-
-def run_section_o() -> None:
-    """节 O：ss-data 数据源与 what 五类扩展。"""
-    test_ssdata_dataset_offline_read()
-    test_ssdata_dataset_missing_offline_and_netdown()
-    test_element_cn_map()
-    test_character_material_uses_descCN()
-    test_disc_material()
-    test_keyword_routes()
-    test_banner_material()
-    test_monster_match_and_material()
-    test_query_what_fallback()
-    test_query_what_disc_route()
-    test_disc_list_concept_route()
-    test_luming_alias_routes_to_disc()
-    test_blitz_current_bosses()
-    test_term_cn_map()
-    test_what_module_detection()
-    test_character_module_material()
-    test_disc_module_material()
-    test_monster_module_material()
-    test_what_end_to_end_modules()
-    test_no_truncation()
-    test_stat_level_cap()
-    test_param_fill()
-    test_entity_priority_route()
-    test_blitz_module_select()
-    test_source_cn()
-    test_signature_disc_dynamic()
-    test_raid_concept_page()
-
-
-def run_data_dir_redirect() -> None:
-    """数据目录重定向（原 Q 节，现挂 N 节末尾执行）：切换后读取/缓存/实例全部准新目录，不回退源码目录。"""
-    print("--- 数据目录重定向（原 Q） ---")
-    host_dir = DATA_DIR
-    src_data_dir = ROOT / "data"
-    check("Q0 插件源码目录不再有 data/", not src_data_dir.exists(),
-          f"{src_data_dir} 已删除")
-    with tempfile.TemporaryDirectory(prefix="stellasora_redirect_") as td:
-        fake_dir = Path(td)
-        # 切换到空临时目录：infodocs 应指向 fake，且不存在的表返回空而非读宿主数据
-        service.set_data_dir(fake_dir)
-        check("Q1 _DATA_DIR 已重定向到 fake 目录", service._DATA_DIR.resolve() == fake_dir.resolve(),
-              str(service._DATA_DIR))
-        check("Q2 _INFODOCS_DIR 派生自 fake/offline/infodocs",
-              service._INFODOCS_DIR == fake_dir / "offline" / "infodocs",
-              str(service._INFODOCS_DIR))
-        check("Q3 表不存在回空结构（不回退宿主）", service.load_team_table() == {"rows": [], "report": {}})
-        check("Q4 读取缺失不回写任何文件（fake 目录保持为空结构，宿主未被写盘）",
-              not (fake_dir / "offline" / "presets" / "team_table.json").exists()
-              and not (fake_dir / "dict.json").exists()
-              and not (fake_dir / ".cache").exists())
-        # 切回宿主目录：读取应恢复真实数据
-        service.set_data_dir(host_dir)
-        tbl = service.load_team_table()
-        check("Q5 切回宿主目录后表读取恢复", isinstance(tbl, dict) and len(tbl.get("rows", [])) > 0,
-              f"rows={len(tbl.get('rows', []))}")
-        service.reload_team_table()
-
+# ===== 节 R：排行榜数据层（tools/leaderboard.py 迁出模块） =====
 
 def run_section_r() -> None:
-    """R: 排行榜命令渲染——瘦身提取、指针跟随、TTL 缓存、空窗/降级、合并转发节点（零网络）。"""
-    print("--- R 排行榜命令 ---")
-    host_dir = DATA_DIR
-
-    class FakeBoardFetcher:
-        """duck-typed fetcher：season/meta 直返，board 调用记录并可编排状态。"""
-
-        def __init__(self, season, meta, boards):
-            self._season = season
-            self._meta = meta
-            self._boards = boards  # sid -> (slim, status)
-            self.board_calls = []
-
-        def fetch_leaderboard_season(self, force_update=False):
-            return self._season
-
-        def fetch_leaderboard_meta(self, force_update=False):
-            return self._meta
-
-        def fetch_leaderboard_board(self, sid, force_update=False):
-            self.board_calls.append((sid, force_update))
-            return self._boards.get(sid, (None, "error"))
+    """R: 榜单数据层——瘦身提取、指针跟随、TTL、空窗/降级、BoardUnavailable、强刷（零网络）。"""
+    print("--- R 排行榜数据层 ---")
 
     slim = {
         "regions": {
@@ -3206,7 +747,7 @@ def run_section_r() -> None:
         },
         "top_level_noise": 1,
     }
-    slim2 = _extract_board_top(raw)
+    slim2 = lbmod.extract_board_top(raw)
     check("R1a 提取仅保留 rank/id/name/score",
           slim2 and slim2["regions"]["cn"]["top"][0] == {"rank": 1, "id": "101", "name": "阿尔法", "score": 3139255},
           str(slim2 and slim2["regions"]["cn"]["top"][0]))
@@ -3214,89 +755,137 @@ def run_section_r() -> None:
     check("R1c Score 缺省 0、名字 strip",
           slim2["regions"]["cn"]["top"][1]["score"] == 0 and slim2["regions"]["cn"]["top"][1]["name"] == "Beta")
     check("R1d 结构不符返回 None",
-          _extract_board_top({"no": 1}) is None and _extract_board_top(None) is None
-          and _extract_board_top({"region": {}}) is None)
+          lbmod.extract_board_top({"no": 1}) is None and lbmod.extract_board_top(None) is None
+          and lbmod.extract_board_top({"region": {}}) is None)
 
     with tempfile.TemporaryDirectory(prefix="stellasora_lb_") as td:
-        service.set_data_dir(Path(td))
+        lb_dir = Path(td) / "leaderboard"
+        lb_dir.mkdir(parents=True)
+        top_file = lb_dir / "bb12_top.json"
+
+        def write_top(ts: float) -> None:
+            top_file.write_text(
+                json.dumps({"url": "x", "name": "board_bb12", "timestamp": ts, "data": slim},
+                           ensure_ascii=False),
+                encoding="utf-8")
+
+        orig_season = lbmod.fetch_leaderboard_season
+        orig_meta = lbmod.fetch_leaderboard_meta
+        orig_board = lbmod.fetch_leaderboard_board
         try:
-            offline_dir = Path(td) / "offline" / "ssleaderboard"
-            offline_dir.mkdir(parents=True)
-            top_file = offline_dir / "bb12_top.json"
-
-            def write_top(ts: float) -> None:
-                top_file.write_text(
-                    json.dumps({"url": "x", "name": "board_bb12", "timestamp": ts, "data": slim},
-                               ensure_ascii=False),
-                    encoding="utf-8")
-
-            # R2 指针跟随 + 新鲜缓存零网络 + 空窗渲染（双命令独立触发）
+            # R2 指针跟随 + 新鲜缓存零网络 + 未开榜
             write_top(time.time())
-            fake = FakeBoardFetcher(
-                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
-                meta={"bb12": {"floor": {}}},
-                boards={"fe7": (None, "not_found")},
-            )
-            nodes_fe, notice_fe = service.query_lb_board("fe", ttl_minutes=10, st=fake)
-            nodes_bb, notice_bb = service.query_lb_board("bb", ttl_minutes=10, st=fake)
-            check("R2a 指针跟随拉取 fe7（不写死赛季）", fake.board_calls == [("fe7", True)],
-                  str(fake.board_calls))
-            check("R2b fe 空窗文案走 notice（无节点）",
-                  "【终焉绝响 S7】 当期未开榜" in notice_fe and nodes_fe == [])
-            check("R2c bb 新鲜缓存零网络并正确渲染（表头节点+条目节点）",
-                  notice_bb == "" and len(nodes_bb) == 2
-                  and "【联合讨伐 S12】 国服 Top2 · 共 1,234 人 · 更新于 刚刚" in fwd_text(nodes_bb)
-                  and "第 1–2 名" in fwd_text(nodes_bb)
-                  and "1. 阿尔法 — 3,139,255" in fwd_text(nodes_bb))
+            calls = []
 
-            # R3 过期缓存触发重拉
+            def fake_season(d, proxy_url=None, force_update=False):
+                return {"BB_SEASON": "bb12", "FE_SEASON": "fe7"}
+
+            def fake_meta(d, proxy_url=None, force_update=False):
+                return {"bb12": {}}
+
+            def fake_board(d, sid, proxy_url=None, force_update=False):
+                calls.append((sid, force_update))
+                return (None, "not_found")
+
+            lbmod.fetch_leaderboard_season = fake_season
+            lbmod.fetch_leaderboard_meta = fake_meta
+            lbmod.fetch_leaderboard_board = fake_board
+            cn_bb, header_bb, age_bb = lbmod.load_board_for_render("bb", "bb12", 10, lb_dir)
+            check("R2a 新鲜缓存零网络返回国服数据",
+                  cn_bb["top"][0]["name"] == "阿尔法" and header_bb == "【联合讨伐 S12】" and age_bb < 60)
+            try:
+                lbmod.load_board_for_render("fe", "fe7", 10, lb_dir)
+                check("R2b fe 未开榜抛 BoardUnavailable", False)
+            except lbmod.BoardUnavailable as exc:
+                check("R2b fe 未开榜抛 BoardUnavailable", "当期未开榜" in str(exc), str(exc)[:50])
+
+            # R3 过期触发重拉
             write_top(time.time() - 7200)
-            fake2 = FakeBoardFetcher(
-                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
-                meta={},
-                boards={"bb12": (slim, "ok"), "fe7": (None, "not_found")},
-            )
-            out2, notice2 = service.query_lb_board("bb", ttl_minutes=10, st=fake2)
-            check("R3a 过期缓存触发重拉", fake2.board_calls == [("bb12", True)])
-            check("R3b 重拉后表头刷新", "更新于 刚刚" in fwd_text(out2) and "1. 阿尔法 — 3,139,255" in fwd_text(out2))
+            calls.clear()
+
+            def fake_board_ok(d, sid, proxy_url=None, force_update=False):
+                calls.append((sid, force_update))
+                return (slim, "ok")
+
+            lbmod.fetch_leaderboard_board = fake_board_ok
+            cn3, _, age3 = lbmod.load_board_for_render("bb", "bb12", 10, lb_dir)
+            check("R3 过期缓存触发重拉且数据新鲜",
+                  calls == [("bb12", True)] and age3 == 0.0, str(calls))
 
             # R4 拉取失败降级陈旧缓存
-            fake3 = FakeBoardFetcher(
-                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
-                meta={},
-                boards={"bb12": (None, "error")},
-            )
-            out3, notice3 = service.query_lb_board("bb", ttl_minutes=10, st=fake3)
-            check("R4 拉取失败降级陈旧缓存并标注年龄",
-                  "1. 阿尔法 — 3,139,255" in fwd_text(out3) and "2 小时前" in fwd_text(out3))
+            def fake_board_err(d, sid, proxy_url=None, force_update=False):
+                return (None, "error")
 
-            # R5 BB_SEASON 缺失按 meta 最大 bbNN 降级
-            fake4 = FakeBoardFetcher(
-                season={"FE_SEASON": "fe7"},
-                meta={"bb11": {}, "bb12": {}},
-                boards={},
-            )
-            out4, notice4 = service.query_lb_board("bb", ttl_minutes=10, st=fake4)
-            check("R5 BB_SEASON 缺失按 meta 键表降级", "【联合讨伐 S12】" in fwd_text(out4))
+            lbmod.fetch_leaderboard_board = fake_board_err
+            cn4, _, age4 = lbmod.load_board_for_render("bb", "bb12", 10, lb_dir)
+            check("R4 拉取失败降级陈旧缓存（age=2h）", age4 > 7000, f"age={age4}")
 
-            # R6 ttl=0 强制每次重拉
-            fake5 = FakeBoardFetcher(
-                season={"BB_SEASON": "bb12", "FE_SEASON": "fe7"},
-                meta={},
-                boards={"bb12": (slim, "ok")},
-            )
-            service.query_lb_board("bb", ttl_minutes=0, st=fake5)
-            check("R6 ttl=0 强制重拉", fake5.board_calls == [("bb12", True)])
+            # R5 指针缺失按 meta 降级
+            def fake_season_nobb(d, proxy_url=None, force_update=False):
+                return {"FE_SEASON": "fe7"}
+
+            lbmod.fetch_leaderboard_season = fake_season_nobb
+            prefix5, sid5 = lbmod.resolve_current_board("bb", lb_dir)
+            check("R5 BB_SEASON 缺失按 meta 最大 bbNN 降级", (prefix5, sid5) == ("bb", "bb12"), f"{prefix5}/{sid5}")
+
+            # R6 指针缺失且 meta 无 bb → BoardUnavailable
+            def fake_meta_empty(d, proxy_url=None, force_update=False):
+                return {}
+
+            lbmod.fetch_leaderboard_meta = fake_meta_empty
+            def fake_season_nofe(d, proxy_url=None, force_update=False):
+                return {"BB_SEASON": "bb13"}
+
+            lbmod.fetch_leaderboard_season = fake_season_nofe
+            prefix6, sid6 = lbmod.resolve_current_board("fe", lb_dir)
+            check("R6 fe 指针缺失返回空 sid（不猜）", (prefix6, sid6) == ("fe", ""), f"{prefix6}/{sid6}")
+            try:
+                lbmod.load_board_for_render("fe", sid6, 10, lb_dir)
+                check("R6b fe 空 sid 加载数据抛 BoardUnavailable", False)
+            except lbmod.BoardUnavailable as exc:
+                check("R6b fe 空 sid 加载数据抛 BoardUnavailable", "指针缺失" in str(exc), str(exc)[:40])
+
+            # R7 强刷两榜独立（refresh_board_for_update）
+            def fake_season_full(d, proxy_url=None, force_update=False):
+                return {"BB_SEASON": "bb13", "FE_SEASON": "fe8"}
+
+            lbmod.fetch_leaderboard_season = fake_season_full
+            board_map = {"bb13": (slim, "ok"), "fe8": (None, "not_found")}
+
+            def fake_board_map(d, sid, proxy_url=None, force_update=False):
+                return board_map.get(sid, (None, "error"))
+
+            lbmod.fetch_leaderboard_board = fake_board_map
+            results = lbmod.refresh_board_for_update(lb_dir)
+            check("R7 强刷两榜独立报告（bb ok/fe not_found）",
+                  results["bb"]["status"] == "ok" and results["fe"]["status"] == "not_found",
+                  str(results))
         finally:
-            service.set_data_dir(host_dir)
-            service.reload_team_table()
+            lbmod.fetch_leaderboard_season = orig_season
+            lbmod.fetch_leaderboard_meta = orig_meta
+            lbmod.fetch_leaderboard_board = orig_board
+
+    # R8 build_board_pages 纯函数：分页/转义/分数完整
+    cn_big = {"total": 60, "top": [
+        {"rank": i + 1, "id": str(i), "name": f"玩{i}<Script>" if i == 0 else f"玩{i}", "score": 1234567 + i} for i in range(60)
+    ]}
+    pages = lbrender.build_board_pages("bb", "bb13", cn_big, "刚刚")
+    check("R8a 60人分3页（每页25）", len(pages) == 3, f"pages={len(pages)}")
+    check("R8b 昵称 HTML 转义", "&lt;Script&gt;" in pages[0]["html"])
+    check("R8c 分数千分位完整（无万缩写）", "1,234,567" in pages[0]["html"] and "1,234,626" in pages[2]["html"])
+    check("R8d 页标签", pages[0]["label"].startswith("第 1–") and pages[2]["label"].startswith("第 51–"),
+          f"{pages[0]['label']}/{pages[2]['label']}")
+    # R8e 分数右对齐 tabular-nums（渲染纪律在模板里）
+    check("R8e 模板含 tabular-nums 与右对齐", "tabular-nums" in pages[0]["html"] and 'class="score"' in pages[0]["html"])
 
 
 async def run_section_s() -> None:
-    """S: 排行榜命令插件链路——kwargs 透传鉴权、合并转发 self-send 契约（宿主不发送返回文本）。"""
+    """S: 排行榜命令插件链路（1.5.0 图片契约）——鉴权/平台透传、图片节点、
+    渲染失败短提示、notice 文本、拒绝不发送。"""
     print("--- S 排行榜命令插件链路 ---")
     p, ctx = make_plugin()
     await p.on_load()
+    _stop_bg(p)
 
     # 1. 命令注册元数据
     for cmd_name, handler in (("st_bb", "handle_lb_bb"), ("st_fe", "handle_lb_fe")):
@@ -3305,37 +894,90 @@ async def run_section_s() -> None:
         check(f"S1 {handler} Command 元数据存在且指令名 {cmd_name}",
               info is not None and getattr(info, "name", "") == cmd_name)
 
-    lb_nodes_stub = [
-        {"nickname": "星塔旅人", "segments": [{"type": "text", "content": "【联合讨伐 S11】 国服 Top1 · 共 1 人 · 更新于 刚刚"}]},
-        {"nickname": "星塔旅人", "segments": [{"type": "text", "content": "第 1–1 名\n1. 测试 — 1"}]},
-    ]
-    orig_lb = plug.query_lb_board
-    plug.query_lb_board = lambda mode, ttl_minutes=10, cache_dir=None, **kw: (lb_nodes_stub, "")
+    slim = {"regions": {"cn": {"total": 2, "last_refresh": "1", "top": [
+        {"rank": 1, "id": "1", "name": "甲", "score": 1000},
+        {"rank": 2, "id": "2", "name": "乙", "score": 900}]}}}
+    fake_png = "iVBORw0KGgoAAAANSUhEUg=="  # 最小合法 PNG base64 头
+
+    class MockRender:
+        def __init__(self, fail: bool = False):
+            self.fail = fail
+            self.calls: list = []
+
+        async def html2png(self, html, **kwargs):
+            self.calls.append(kwargs)
+            if self.fail:
+                return {"success": False, "error": "browser down"}
+            return {"image_base64": fake_png, "mime_type": "image/png", "width": 100, "height": 40, "render_ms": 5}
+
+    orig_resolve = plug.resolve_current_board
+    orig_load = plug.load_board_for_render
+    orig_build = plug.build_board_pages
+    orig_render = plug.render_board_pages
     try:
-        # 2. kwargs 必须透传：白名单命中群号 → 放行并合并转发
-        #（回归：_handle_lb_board 曾漏收 kwargs，_denied 空身份导致白名单模式全拒）
+        # 2. 正常路径：数据→分页→渲染→合并转发图片节点（平台+名单透传）
+        plug.resolve_current_board = lambda mode, lb_dir=None, proxy_url=None: ("bb", "bb13")
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (slim["regions"]["cn"], "【联合讨伐 S13】", 0.0)
+        render = MockRender()
+        plug.build_board_pages = lambda *a, **kw: __import__("leaderboard_render").build_board_pages(*a, **kw)
+        ctx.render = render
         p.config.access_control.mode = "whitelist"
         p.config.access_control.whitelist = ["id_ok"]
-        res = await p.handle_lb_bb(stream_id="stream_s1", group_id="id_ok", user_id="u1")
-        check("S2 白名单群号命中放行", res[0] is True)
-        check("S3 榜单经 ctx.send.forward 送达命令流（节点即渲染产物）",
+        res = await p.handle_lb_bb(stream_id="stream_s1", group_id="id_ok", user_id="u1", platform="qq")
+        check("S2 白名单+QQ 命中放行", res[0] is True)
+        check("S3 榜单图片经 ctx.send.forward 送达（1页1节点含image段）",
               len(ctx.send.forwarded) == 1 and ctx.send.forwarded[0][0] == "stream_s1"
-              and ctx.send.forwarded[0][1] == lb_nodes_stub)
+              and any(s.get("type") == "image" for s in ctx.send.forwarded[0][1][0]["segments"]),
+              f"fwd={len(ctx.send.forwarded)}")
+        check("S3b 渲染调用带 render_timeout_ms", render.calls and render.calls[0].get("render_timeout_ms") == 30000)
         check("S4 返回值为执行摘要而非全文", res[1] == "星塔旅人排行榜已发送" and res[2] == 2)
 
-        # 3. 白名单未命中拒绝且不发送
-        n_sent, n_fwd = len(ctx.send.sent), len(ctx.send.forwarded)
-        res = await p.handle_lb_fe(stream_id="stream_s2", group_id="other_group")
-        check("S5 白名单未命中拒绝", res[0] is False and res[2] == 1)
-        check("S6 拒绝路径不发送任何消息",
-              len(ctx.send.sent) == n_sent and len(ctx.send.forwarded) == n_fwd)
+        # 3. 渲染失败：短提示不回退文本榜
+        ctx.send.forwarded.clear()
+        render_fail = MockRender(fail=True)
+        ctx.render = render_fail
+        n_sent = len(ctx.send.sent)
+        res_fail = await p.handle_lb_fe(stream_id="stream_s2", group_id="id_ok", platform="qq")
+        check("S5 渲染失败短提示（不回退文本榜）",
+              res_fail[0] is True and len(ctx.send.sent) == n_sent + 1
+              and "渲染失败" in ctx.send.sent[-1][1] and len(ctx.send.forwarded) == 0,
+              str(res_fail[1]))
 
-        # 4. 私聊：group_id 缺失回落 user_id 匹配
-        res = await p.handle_lb_fe(stream_id="stream_s3", user_id="id_ok")
-        check("S7 私聊 user_id 命中放行并发送",
-              res[0] is True and len(ctx.send.forwarded) == 2 and ctx.send.forwarded[1][0] == "stream_s3")
+        # 4. 未开榜走 notice 文本（BoardUnavailable）
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (_ for _ in ()).throw(
+            __import__("leaderboard").BoardUnavailable("【终焉绝响 S8】 当期未开榜（上游尚未发布榜单数据）。"))
+        n_sent = len(ctx.send.sent)
+        res_nf = await p.handle_lb_fe(stream_id="stream_s3", group_id="id_ok", platform="qq")
+        check("S6 未开榜 notice 文本发送",
+              res_nf[0] is True and len(ctx.send.sent) == n_sent + 1
+              and "当期未开榜" in ctx.send.sent[-1][1])
+
+        # 5. 拒绝路径不发送（白名单未命中 + 非QQ）
+        n_sent, n_fwd = len(ctx.send.sent), len(ctx.send.forwarded)
+        res_deny = await p.handle_lb_fe(stream_id="stream_s4", group_id="other_group", platform="qq")
+        check("S7 白名单未命中拒绝", res_deny[0] is False and res_deny[2] == 1)
+        check("S8 拒绝路径不发送任何消息",
+              len(ctx.send.sent) == n_sent and len(ctx.send.forwarded) == n_fwd)
+        res_plat = await p.handle_lb_fe(stream_id="stream_s5", group_id="id_ok", platform="telegram")
+        check("S9 非QQ平台拒绝且不发送",
+              "不支持" in res_plat[1] and len(ctx.send.sent) == n_sent and len(ctx.send.forwarded) == n_fwd)
+
+        # 6. 私聊 user_id 命中放行并发送图片（恢复 S2 的正常数据 mock——S6 抛异常桩未还原）
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (
+            slim["regions"]["cn"], "【联合讨伐 S13】", 0.0)
+        ctx.send.forwarded.clear()
+        ctx.render = MockRender()
+        res = await p.handle_lb_fe(stream_id="stream_s6", user_id="id_ok", platform="qq")
+        check("S10 私聊 user_id 命中放行并发送图片",
+              res[0] is True and len(ctx.send.forwarded) == 1 and ctx.send.forwarded[0][0] == "stream_s6",
+              f"res={res} fwd={len(ctx.send.forwarded)}")
     finally:
-        plug.query_lb_board = orig_lb
+        plug.resolve_current_board = orig_resolve
+        plug.load_board_for_render = orig_load
+        plug.build_board_pages = orig_build
+        plug.render_board_pages = orig_render
+        p.config.access_control.mode = "off"
+
 
 
 # ===== 节 T：Hook 前置过滤（planner 工具暴露治理） =====
@@ -3373,9 +1015,16 @@ async def run_hook_gate() -> None:
     r = await p._filter_planner_tools(**_hook_kwargs([_tool_def("other_tool")], "sess_t1"))
     check("T1 无本插件工具原样放行", r == {"action": "continue"})
 
-    # T2 mode=off：不过滤
+    # T2 mode=off + QQ 平台：不过滤（预填身份+平台缓存，模拟 Hook 链路已反查）
+    p._session_identity_cache["sess_t2"] = ("g_t2", "u_t2")
+    p._session_platform_cache["sess_t2"] = "qq"
     r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_t2"))
-    check("T2 mode=off 工具保留", r == {"action": "continue"})
+    check("T2 mode=off 且 QQ 平台工具保留", r == {"action": "continue"})
+    # T2b 非平台缓存（未知平台）保守剔除
+    r2b = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_t2_noplat"))
+    kept2b = [d.get("function", {}).get("name") for d in r2b.get("modified_kwargs", {}).get("tool_definitions", [])]
+    check("T2b 未知平台保守剔除（P3 两层）", r2b.get("action") == "continue" and kept2b == [],
+          f"kept={kept2b}")
 
     # T3-T5：预填身份缓存（绕过 get_all_streams 路径，独立覆盖在 T6/T7）
     p._session_identity_cache.update({
@@ -3385,8 +1034,15 @@ async def run_hook_gate() -> None:
     })
     p.config.access_control.mode = "whitelist"
     p.config.access_control.whitelist = ["g_ok"]
+    p._session_platform_cache["sess_g_ok"] = "qq"
     r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_g_ok"))
-    check("T3 白名单命中群工具保留", r == {"action": "continue"})
+    check("T3 白名单命中且 QQ 平台工具保留", r == {"action": "continue"})
+    # T3b 非 QQ 平台（过名单）剔除
+    p._session_platform_cache["sess_g_ok_noplat"] = "telegram"
+    r3b = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_g_ok_noplat"))
+    kept3b = [d.get("function", {}).get("name") for d in r3b.get("modified_kwargs", {}).get("tool_definitions", [])]
+    check("T3b 非QQ平台剔除（P3 两层）", r3b.get("action") == "continue" and kept3b == [],
+          f"kept={kept3b}")
 
     # T4 白名单未命中：剔除本插件三工具，foreign 工具与畸形元素保留，modified_kwargs 完整回传
     defs = plugin_defs() + [_tool_def("foreign_tool"), {"broken": True}]
@@ -3409,12 +1065,14 @@ async def run_hook_gate() -> None:
           f"kept={kept_names}")
     p.config.access_control.mode = "off"
 
-    # T6 身份查询失败：fail-open 放行（漏拦由 handler _denied 兜底）
+    # T6 身份/平台查询失败：保守剔除（P3 口径——未知宁可漏不可错；执行层同口径兜底）
     p.config.access_control.mode = "whitelist"
     p.config.access_control.whitelist = ["g_ok"]
     ctx.chat = MockChat(fail=True)
     r = await p._filter_planner_tools(**_hook_kwargs(plugin_defs(), "sess_unknown"))
-    check("T6 get_all_streams 失败 fail-open 放行", r == {"action": "continue"})
+    kept6 = [d.get("function", {}).get("name") for d in r.get("modified_kwargs", {}).get("tool_definitions", [])]
+    check("T6 反查失败保守剔除（未知平台/身份）", r.get("action") == "continue" and kept6 == [],
+          f"kept={kept6}")
 
     # T7 缓存命中零 RPC + 溢出清空：monkeypatch 上界为 3，未缓存会话触发一次查询后写缓存
     mock_chat = MockChat(streams=[{"session_id": "sess_new", "group_id": "g9", "user_id": "u9"}])
@@ -3434,7 +1092,7 @@ async def run_hook_gate() -> None:
         plug.MAX_SESSION_CACHE_ENTRIES = orig_cap
     p.config.access_control.mode = "off"
 
-    # T8 声明契约：三工具 platforms=qq（组件 info 字段，非自由键 metadata），仅 lookup 为 core_tool
+    # T8 声明契约：仅剩 how 工具且 platforms=qq（lookup/what 已随 1.5.0 移除）
     metas = {}
     plats = {}
     for cname in dir(plug.StellaSoraPlugin):
@@ -3443,42 +1101,347 @@ async def run_hook_gate() -> None:
         if info is not None and getattr(info, "name", None):
             metas[info.name] = getattr(info, "metadata", None) or {}
             plats[info.name] = getattr(info, "platforms", None)
-    plat_ok = all(plats.get(n) in ("qq", ["qq"]) for n in plug._TOOL_NAMES)
-    check("T8 platforms=qq 齐全且仅 lookup 为 core_tool",
-          plat_ok
-          and (metas.get("lookup_game_term") or {}).get("core_tool") is True
-          and not (metas.get("stellasora_what") or {}).get("core_tool")
-          and not (metas.get("stellasora_how") or {}).get("core_tool"),
-          f"platforms={plats}")
+    tool_plats = {n: plats[n] for n in plug._TOOL_NAMES if n in plats}
+    check("T8 工具组件仅剩 how 且 platforms=qq（lookup/what 已移除）",
+          set(tool_plats) == {"stellasora_how"} and tool_plats["stellasora_how"] in ("qq", ["qq"]),
+          f"tool_plats={tool_plats}")
+def _u_nodes_single(name: str, note: str, src: str) -> list:
+    """单图小节（不含队伍码区——队伍码边界由 U5 独立小节覆盖）。"""
+    return [
+        {"type": "header1", "children": [{"text": f"{name}属性角色一图流攻略"}]},
+        {"type": "header2", "children": [{"text": f"{name}一图流攻略"}]},
+        {"type": "paragraph", "children": [{"text": note}]},
+        {"type": "paragraph", "children": [
+            {"text": ""},
+            {"type": "image", "src": src, "style": {"width": "1080px", "height": "1440px"}},
+        ]},
+    ]
+
+
+def _u_nodes_album(name: str, srcs: list) -> list:
+    """多图小节：header2 + image-album（末张=完整长图）。"""
+    return [
+        {"type": "header2", "children": [{"text": f"{name}一图流攻略"}]},
+        {"type": "image-album", "data": srcs, "limit": [False] * len(srcs)},
+        {"type": "paragraph", "children": [{"text": "左右滑动可以查看下一张图！！"}]},
+    ]
+
+
+def _u_nodes_parted(name: str, part: str, src: str) -> list:
+    """分篇小节：标题含中文冒号后缀。"""
+    return [
+        {"type": "header2", "children": [{"text": f"{name}攻略一图流：{part}"}]},
+        {"type": "paragraph", "children": [{"text": "备注"}]},
+        {"type": "image-album", "data": [src]},
+    ]
+
+
+def run_section_u() -> None:
+    """U: GameKee 解析与匹配——规范化/末图/队伍码边界/别名/分篇/属性泛查/畸形容错暴露。"""
+    print("--- U GameKee 解析与匹配 ---")
+    nodes = _u_nodes_single("艾蕾", "技伤≈印记。", "//cdnimg-v2.gamekee.com/a/ele.png")
+    entries = gkmod.parse_content_json(nodes, "water")
+    check("U1 单图解析：名称规范化+备注+图链",
+          len(entries) == 1 and entries[0]["name"] == "艾蕾" and entries[0]["note"] == "技伤≈印记。"
+          and entries[0]["image_urls"] == ["//cdnimg-v2.gamekee.com/a/ele.png"]
+          and entries[0]["element"] == "water", str(entries))
+
+    album_srcs = ["//cdnimg-v2.gamekee.com/a/1.png", "//cdnimg-v2.gamekee.com/a/2.png", "//cdnimg-v2.gamekee.com/a/long.png"]
+    entries2 = gkmod.parse_content_json(_u_nodes_album("薇洛（盛夏）", album_srcs), "water")
+    check("U2 album 全链保留且末张可取",
+          len(entries2) == 1 and entries2[0]["image_urls"] == album_srcs
+          and entries2[0]["image_urls"][-1].endswith("long.png"), str(entries2))
+
+    mixed = _u_nodes_single("千都世", "有薇洛很强。", "//cdnimg-v2.gamekee.com/a/q.png")
+    mixed += _u_nodes_album("多娜", ["//cdnimg-v2.gamekee.com/a/m1.png", "//cdnimg-v2.gamekee.com/a/m2.png"])
+    entries3 = gkmod.parse_content_json(mixed, "water")
+    check("U3 多小节互不串图",
+          [e["name"] for e in entries3] == ["千都世", "多娜"]
+          and entries3[0]["image_urls"] == ["//cdnimg-v2.gamekee.com/a/q.png"]
+          and entries3[1]["image_urls"] == ["//cdnimg-v2.gamekee.com/a/m1.png", "//cdnimg-v2.gamekee.com/a/m2.png"],
+          str([e["name"] for e in entries3]))
+
+    check("U4 角色名规范化（括号/分篇）",
+          gkmod.normalize_character_name("尘沙（源初）一图流攻略") == "尘沙（源初）"
+          and gkmod.normalize_character_name("科洛妮丝新春攻略一图流：印记篇") == "科洛妮丝新春·印记篇"
+          and gkmod.normalize_character_name("千都世攻略一图流") == "千都世")
+
+    # 队伍码边界：header1"队伍码"后的 header2（队伍名）不生成小节
+    entries4 = gkmod.parse_content_json(_u_nodes_single("艾蕾", "n", "//x/y.png"), "water")
+    check("U5 队伍码区止步（队伍名不进索引）",
+          len(entries4) == 1 and entries4[0]["name"] == "艾蕾")
+
+    # 属性泛查 + 别名 + 分篇（用 build_index 的测试注入路径，单页即可）
+    index = gkmod.build_index(pages={
+        "water": (0, "水系阵容推荐", _u_nodes_single("艾蕾", "n1", "//a/ele.png") + _u_nodes_album("薇洛（盛夏）", ["//a/v1.png", "//a/v2.png"])),
+        "earth": (0, "地系阵容推荐", _u_nodes_parted("科洛妮丝新春", "印记篇", "//a/k1.png") + _u_nodes_parted("科洛妮丝新春", "直伤篇", "//a/k2.png")),
+    })
+    aliases = {"春科": "科洛妮丝新春", "土": "地"}
+    h1, r1 = gkmod.match_guides(index, "艾蕾攻略", aliases=aliases)
+    check("U6 角色命中单节", len(h1) == 1 and h1[0]["name"] == "艾蕾", f"{len(h1)}/{r1}")
+    h2, r2 = gkmod.match_guides(index, "水系攻略", aliases=aliases)
+    check("U7 属性泛查命中该属性全部小节", len(h2) == 2 and {e["name"] for e in h2} == {"艾蕾", "薇洛（盛夏）"}, f"{len(h2)}")
+    h3, r3 = gkmod.match_guides(index, "春科攻略", aliases=aliases)
+    check("U8 别名命中全部分篇（未点名分篇）",
+          len(h3) == 2 and {e["name"] for e in h3} == {"科洛妮丝新春·印记篇", "科洛妮丝新春·直伤篇"}, f"{len(h3)}/{r3}")
+    h4, r4 = gkmod.match_guides(index, "春科直伤篇", aliases=aliases)
+    check("U9 分篇点名只发该篇", len(h4) == 1 and h4[0]["name"] == "科洛妮丝新春·直伤篇", f"{len(h4)}")
+    h5, r5 = gkmod.match_guides(index, "土印记队", aliases=aliases)
+    check("U10 别名→属性泛查", len(h5) == 2 and all(e["element"] == "earth" for e in h5), f"{len(h5)}/{r5}")
+    h6, r6 = gkmod.match_guides(index, "不存在的角色XYZ", aliases=aliases)
+    check("U11 未收录明确 no_match", h6 == [] and r6 == "no_match", f"{r6}")
+    h7, r7 = gkmod.match_guides(index, "", aliases=aliases)
+    check("U12 空 query 返回 empty_query", h7 == [] and r7 == "empty_query")
+
+    # 图片 URL 规则
+    u1 = gkmod.image_url("//cdnimg-v2.gamekee.com/a/x.png")
+    u2 = gkmod.image_url("//cdnimg-v2.gamekee.com/a/x.png", prefer_webp=False)
+    check("U13 image_url 补协议+webp 参数",
+          u1 == "https://cdnimg-v2.gamekee.com/a/x.png" + gkmod._WEBP_QUERY
+          and u2 == "https://cdnimg-v2.gamekee.com/a/x.png")
+
+    # 畸形 content_json：解析器对空节点/无图小节健壮（返回空列表而非崩溃）
+    broken = [{"type": "header2", "children": [{"text": "无图角色"}]}, {"type": "paragraph"}, None]
+    entries5 = gkmod.parse_content_json(broken, "fire")
+    check("U14 无图小节不进索引（明确空）", entries5 == [], str(entries5))
+
+
+# ===== 节 V：GameKee 探查调度（P2 single-flight/时间戳纪律）与图片下载契约 =====
+
+class _VFakeIndex:
+    """GameKee 探查桩（1.5.0 双层：probe_updates 轻量 + build_index 重建）。
+
+    changed=True 时 probe 报有变化 → 真实走 build；fail 时 probe 直接抛错。
+    calls = probe 调用数；build_calls = 重建调用数。
+    """
+
+    def __init__(self, fail: bool = False, delay: float = 0.0, changed: bool = True):
+        self.fail = fail
+        self.delay = delay
+        self.changed = changed
+        self.calls = 0
+        self.build_calls = 0
+        self._index = {"built_at": int(time.time()), "pages": {}, "characters": [{"name": "艾蕾", "element": "water", "note": "n", "image_urls": ["//x/y.png"]}]}
+
+    def probe(self, proxy_url=None, timeout=20, known_updates=None):
+        self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
+        if self.fail:
+            raise gkmod.GameKeeError("network down")
+        return {"pages": {k: {"updated_at": 1, "published_at": 1} for k in ("water", "fire", "light", "dark", "wind", "earth")}, "changed": self.changed}
+
+    def __call__(self, proxy_url=None):
+        self.build_calls += 1
+        return self._index
+
+    def install(self, module):
+        module.gamekee_probe_updates = self.probe
+        module.gamekee_build_index = self
+
+
+async def run_section_v() -> None:
+    """V: P2 探查调度纪律 + 图片下载契约（域名白名单/魔数校验/缓存）。"""
+    print("--- V GameKee 探查调度与图片 ---")
+    # 先杀掉全部僵尸实例的后台探查任务（前置节实例 60s 后醒来会用本节桩调用，
+    # 污染 V7/V8/V9 的调用计数断言），再创建本节实例并停掉它的后台任务
+    cancel_gamekee_tasks()
+    await asyncio.sleep(0)  # 让 cancel 生效一轮
+    p, ctx = make_plugin()
+    await p.on_load()
+    # 停掉后台探查排程（本节只测手动/懒刷新入口的调度纪律；
+    # 后台任务 due=0 → 60s 后会醒来插入额外构建，污染调用计数断言）
+    if p._gamekee_probe_task and not p._gamekee_probe_task.done():
+        p._gamekee_probe_task.cancel()
+        await asyncio.gather(p._gamekee_probe_task, return_exceptions=True)
+        p._gamekee_probe_task = None
+
+    # V1 首次无状态：due=0（启动延迟探查路径）
+    check("V1 首次无状态 due=0", p._gamekee_due_delay() == 0.0)
+
+    fake = _VFakeIndex()
+    orig_build = plug.gamekee_build_index
+    orig_probe = plug.gamekee_probe_updates
+    fake.install(plug)
+    try:
+        # V2 探查成功：三时间戳 + 索引发布 + state 落盘
+        idx = await p._run_gamekee_probe(trigger="test")
+        st = p._gamekee_state
+        check("V2 探查成功发布索引+落盘",
+              idx.get("characters") and p._gamekee_index is idx
+              and st.get("last_verified", 0) > 0 and st.get("last_probe_attempt", 0) > 0
+              and p._gamekee_state_path().exists()
+              and json.loads(p._gamekee_state_path().read_text(encoding="utf-8")).get("last_verified") == st["last_verified"])
+        check("V2b changed=True 走完整重建（probe1/build1）",
+              fake.calls == 1 and fake.build_calls == 1, f"probe={fake.calls} build={fake.build_calls}")
+        # V3 成功后 24h 正常调度
+        d = p._gamekee_due_delay()
+        check("V3 成功后 due=24h", 86300 < d <= 86400, f"{d:.0f}s")
+
+        # V4 失败：verified 不动、attempt 推进、快照保留
+        verified_before = st["last_verified"]
+        fail_fake = _VFakeIndex(fail=True)
+        fail_fake.install(plug)
+        try:
+            try:
+                await p._run_gamekee_probe(trigger="fail")
+                check("V4 失败必须抛 GameKeeProbeFailure", False)
+            except plug.GameKeeProbeFailure:
+                pass
+            check("V4b 失败纪律（verified不动/attempt推进/快照保留）",
+                  p._gamekee_state["last_verified"] == verified_before
+                  and p._gamekee_state["last_probe_attempt"] > verified_before
+                  and p._gamekee_index is not None)
+            # V5 失败后 30min 重试调度（不连拉不断停摆）
+            d2 = p._gamekee_due_delay()
+            expect = p._gamekee_state["last_probe_attempt"] + p._GAMEKEE_RETRY_INTERVAL - p._now()
+            check("V5 失败重试延迟=30min", abs(d2 - max(0, expect)) < 1.5, f"{d2:.0f}s")
+        finally:
+            fake.install(plug)
+
+        # V6 懒刷新：fresh 零探查；stale+失败带旧快照；无快照上抛
+        fail_fake.install(plug)
+        p._gamekee_state["last_verified"] = p._now()
+        idx_fresh = await p.ensure_gamekee_index()
+        calls_at_fresh = fail_fake.calls
+        check("V6a fresh 不触发探查", idx_fresh is not None and fail_fake.calls == calls_at_fresh)
+        p._gamekee_state["last_verified"] = p._now() - 10 * 3600
+        idx_stale = await p.ensure_gamekee_index()
+        check("V6b stale+失败带旧快照降级", idx_stale is not None)
+        p._gamekee_index = None
+        try:
+            await p.ensure_gamekee_index()
+            check("V6c 无快照失败必须上抛", False)
+        except plug.GameKeeProbeFailure:
+            check("V6c 无快照失败必须上抛", True)
+        finally:
+            fake.install(plug)
+
+        # V7 single-flight 成功合并：并发 3 入口 1 次构建。
+        # 分步启动消除调度竞争：先启动 a 并等它进入在飞批次（batch 已设），
+        # 再放 b/c——否则系统负载下 b 的首轮调度可能晚于 a 完成，误判为独立调用。
+        slow = _VFakeIndex(delay=0.3)
+        slow.install(plug)
+        p._gamekee_index = None
+        p._gamekee_state.clear()
+        task_a = asyncio.create_task(p._run_gamekee_probe("a"))
+        for _ in range(200):
+            if p._gamekee_batch is not None:
+                break
+            await asyncio.sleep(0.005)
+        if p._gamekee_batch is None:
+            check("V7-prep a 已进入在飞批次", False,
+                  f"batch=None calls={slow.calls} state={p._gamekee_state}")
+        else:
+            check("V7-prep a 已进入在飞批次", True)
+        results = await asyncio.gather(task_a, p._run_gamekee_probe("b"), p._run_gamekee_probe("c"), return_exceptions=True)
+        ok = [r for r in results if not isinstance(r, Exception)]
+        check("V7 并发合并请求（1次探查+1次构建服务3入口）",
+              len(ok) == 3 and slow.calls == 1 and slow.build_calls == 1,
+              f"ok={len(ok)} probe={slow.calls} build={slow.build_calls}")
+
+        # V8 single-flight 失败合并：等待者拿失败结果不重拉（分步启动同 V7）
+        slow_fail = _VFakeIndex(fail=True, delay=0.2)
+        slow_fail.install(plug)
+        p._gamekee_index = None
+        p._gamekee_state.clear()
+        task_a2 = asyncio.create_task(p._run_gamekee_probe("a"))
+        for _ in range(200):
+            if p._gamekee_batch is not None:
+                break
+            await asyncio.sleep(0.005)
+        results2 = await asyncio.gather(task_a2, p._run_gamekee_probe("b"), return_exceptions=True)
+        errs = [r for r in results2 if isinstance(r, plug.GameKeeProbeFailure)]
+        check("V8 失败合并（等待者不重拉）",
+              len(errs) == 2 and slow_fail.calls == 1 and slow_fail.build_calls == 0,
+              f"errs={len(errs)} probe={slow_fail.calls} build={slow_fail.build_calls}")
+
+        # V9 顺序两入口：各自真实探查+构建（不复用批次）
+        seq = _VFakeIndex()
+        seq.install(plug)
+        p._gamekee_index = None
+        p._gamekee_state.clear()
+        check("V9-prep 批次已清空且后台任务不在飞",
+              p._gamekee_batch is None
+              and (p._gamekee_probe_task is None or p._gamekee_probe_task.done()),
+              f"batch={p._gamekee_batch} task={p._gamekee_probe_task}")
+        await p._run_gamekee_probe("m1")
+        await p._run_gamekee_probe("m2")
+        check("V9 顺序两入口各真实探查（probe2/build2）",
+              seq.calls == 2 and seq.build_calls == 2,
+              f"probe={seq.calls} build={seq.build_calls}")
+    finally:
+        plug.gamekee_build_index = orig_build
+
+        # V14 六页无变化：只推进 last_verified 不重建（probe 轻量路径）
+        nochg = _VFakeIndex(changed=False)
+        nochg.install(plug)
+        p._gamekee_index = {"built_at": 1, "pages": {}, "characters": [{"name": "旧", "element": "water", "note": "", "image_urls": ["//x/old.png"]}]}
+        p._gamekee_state.clear()
+        idx14 = await p._run_gamekee_probe("nochange")
+        check("V14 无变化仅推进时间戳不重建（索引对象不变+build0）",
+              idx14 is p._gamekee_index and nochg.calls == 1 and nochg.build_calls == 0
+              and p._gamekee_state["last_verified"] > 0,
+              f"probe={nochg.calls} build={nochg.build_calls}")
+
+    # V10 卸载清理探查任务
+    await p.on_unload()
+    check("V10 卸载清空探查任务", p._gamekee_probe_task is None)
+
+    # V11 图片下载契约：域名白名单
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td) / "imgs"
+        try:
+            gkmod.download_image("//evil.example.com/x.png", cache)
+            check("V11 非白名单域名拒绝", False)
+        except gkmod.GameKeeError as exc:
+            check("V11 非白名单域名拒绝", "白名单" in str(exc), str(exc)[:60])
+
+        # V12 魔数校验：HTML 拦截页拒绝（裸 GET 567 的产物形态）
+        html_resp = _FakeHTTPResponse(b"<!doctype html><html>blocked</html>", code=200)
+        fake_opener = _FakeOpener(lambda req, timeout=10: html_resp)
+        orig_opener = gkmod._build_opener
+        gkmod._build_opener = lambda proxy: fake_opener
+        try:
+            try:
+                gkmod.download_image("//cdnimg-v2.gamekee.com/a/x.png", cache)
+                check("V12 HTML 拦截页拒绝", False)
+            except gkmod.GameKeeError as exc:
+                check("V12 HTML 拦截页拒绝", "非图片" in str(exc), str(exc)[:60])
+        finally:
+            gkmod._build_opener = orig_opener
+
+        # V13 缓存写入与命中（mock 网络返回合法 webp）
+        webp_bytes = b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 8
+        webp_resp = _FakeHTTPResponse(webp_bytes, code=200)
+        gkmod._build_opener = lambda proxy: _FakeOpener(lambda req, timeout=10: webp_resp)
+        try:
+            data1 = gkmod.download_image("//cdnimg-v2.gamekee.com/a/ok.png", cache, prefer_webp=True)
+            data2 = gkmod.download_image("//cdnimg-v2.gamekee.com/a/ok.png", cache, prefer_webp=True)
+            check("V13 图片缓存命中（字节一致）",
+                  data1 == webp_bytes and data2 == webp_bytes and len(list(cache.iterdir())) == 1)
+        finally:
+            gkmod._build_opener = orig_opener
 
 
 # ===== 汇总入口 =====
 
 SECTIONS = {
-    "B": ("字典单例与并发", run_singleton),
-    "A": ("字典数据完整性", run_dict_data),
-    "D": ("中文别名与术语替换", run_overrides),
-    "E": ("索引页抓取", run_fetcher_index),
-    "F": ("how 表驱动查询", run_query_how_section),
-    "G": ("直发端到端", run_direct_send),
-    "H": ("输出格式", run_output_format),
+    "G": ("how 一图流端到端", run_direct_send),
     "I": ("非阻塞探针", run_nonblocking),
     "J": ("工具参数描述", run_tool_query_desc),
     "K": ("手动更新指令", run_manual_update),
-    "L": ("定时自动同步", run_daily_sync_schedule),
-    "M": ("统一队伍-槽位表构建器", run_section_m),
-    "N": ("slot 查询服务", run_section_n),
-    "P": ("热门优先级与属性泛查", run_section_p),
-    "O": ("ss-data 数据源与 what 五类扩展", run_section_o),
-    "R": ("排行榜命令", run_section_r),
+    "R": ("排行榜数据层", run_section_r),
     "S": ("排行榜命令插件链路", run_section_s),
     "T": ("Hook 前置过滤", run_hook_gate),
+    "U": ("GameKee 解析与匹配", run_section_u),
+    "V": ("GameKee 探查调度与图片下载", run_section_v),
 }
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
 # （原 C 并入 D、原 Q 挂 N 节末尾）
-ORDER = ["B", "A", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "P", "O", "R", "S", "T"]
-ASYNC_SECTIONS = {"G", "H", "I", "K", "L", "P", "S", "T"}
+ORDER = ["G", "I", "J", "K", "R", "S", "T", "U", "V"]
+ASYNC_SECTIONS = {"G", "I", "K", "S", "T", "V"}
 
 
 async def run_async_sections(keys: list) -> None:
