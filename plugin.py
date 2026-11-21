@@ -66,7 +66,8 @@ from gamekee import (  # noqa: E402
 )
 from leaderboard import (  # noqa: E402
     BoardUnavailable,
-    format_age as format_age_text,
+    board_fingerprint,
+    format_fetch_time,
     load_board_for_render,
     refresh_board_for_update,
     render_text_board_nodes,
@@ -227,6 +228,9 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._gamekee_waiter_phase: str = ""  # waiter 阶段标记（boot=可接管 / normal=保持排程）
         self._gamekee_commit_lock = threading.Lock()  # 提交与卸载互斥（晚写守卫，P2）
         self._gamekee_probe_generation = 0  # 卸载/重载代际标记：旧线程结果不得发布
+        # 榜单渲染复用：key=(sid, 数据指纹) → 分页 PNG base64 列表。精确时间戳让
+        # 同数据渲染出同图，TTL 内重复 /st_bb 直接复用上次结果。只留最近一次。
+        self._lb_render_cache: Optional[tuple[str, list[str]]] = None
 
     # ===== 生命周期 =====
 
@@ -280,6 +284,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._update_task.cancel()
             await asyncio.gather(self._update_task, return_exceptions=True)
         self._update_task = None
+        self._lb_render_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")
 
     async def on_config_update(
@@ -1212,29 +1217,44 @@ class StellaSoraPlugin(MaiBotPlugin):
 
         # 2. 按 render_images 开关组节点：图片榜（HTML 渲染）或文字榜（1.4.x 格式）
         if render_images:
-            try:
-                # 同步 CPU 重活进线程池；渲染本身是宿主 async 能力
-                pages = await asyncio.to_thread(
-                    build_board_pages, prefix, sid, cn_data, format_age_text(age)
-                )
-                images = await render_board_pages(self, pages)
-            except Exception as exc:
-                self.ctx.logger.exception("排行榜渲染失败: %s", exc)
+            # 复用的依据是"渲染输入完全相同"：sid + 精确时间文本 + 数据指纹。
+            # 时间文本必须入键——TTL 过期重拉时抓取时刻会变（即便上游数据没变），
+            # 图上的"更新于"就得跟着更新，否则显示的是上一次的旧时刻。
+            fetched_at = time.time() - age
+            time_text = format_fetch_time(fetched_at)
+            cache_key = f"{prefix}:{sid}:{time_text}:{board_fingerprint(cn_data)}"
+            cached = self._lb_render_cache
+            if cached is not None and cached[0] == cache_key:
+                images = cached[1]
+                self.ctx.logger.info("排行榜渲染复用（渲染输入未变）: %s", cache_key)
+            else:
                 try:
-                    await self.ctx.send.text("排行榜图片渲染失败，请稍后再试。", effective_stream_id)
-                except Exception as send_exc:
-                    self.ctx.logger.exception("排行榜渲染提示发送异常: %s", send_exc)
-                    return False, f"星塔旅人排行榜渲染失败: {exc}", 1
-                return True, "星塔旅人排行榜渲染失败提示已发送", 2
-            nodes = []
-            for page, image_b64 in zip(pages, images):
-                nodes.append({
+                    # 同步 CPU 重活进线程池；渲染本身是宿主 async 能力
+                    pages = await asyncio.to_thread(
+                        build_board_pages, prefix, sid, cn_data, time_text
+                    )
+                    images = await render_board_pages(self, pages)
+                except Exception as exc:
+                    self.ctx.logger.exception("排行榜渲染失败: %s", exc)
+                    try:
+                        await self.ctx.send.text("排行榜图片渲染失败，请稍后再试。", effective_stream_id)
+                    except Exception as send_exc:
+                        self.ctx.logger.exception("排行榜渲染提示发送异常: %s", send_exc)
+                        return False, f"星塔旅人排行榜渲染失败: {exc}", 1
+                    return True, "星塔旅人排行榜渲染失败提示已发送", 2
+                self._lb_render_cache = (cache_key, images)
+            # 节点只含图片段：赛季标题/总人数/更新时间/页码全部渲染进图本身
+            # （leaderboard_render 的 title + meta + footer），再挂一段文字是重复。
+            nodes = [
+                {
                     "nickname": _FORWARD_NICKNAME,
                     "segments": [
-                        {"type": "image", "content": image_b64, "filename": f"{prefix}_{sid}_p{page['start'] // 25 + 1}.png"},
-                        {"type": "text", "content": f"{header} {page['label']} · 更新于 {format_age_text(age)}"},
+                        {"type": "image", "content": image_b64,
+                         "filename": f"{prefix}_{sid}_p{i + 1}.png"},
                     ],
-                })
+                }
+                for i, image_b64 in enumerate(images)
+            ]
         else:
             nodes = await asyncio.to_thread(render_text_board_nodes, cn_data, header, age)
 

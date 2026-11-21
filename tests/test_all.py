@@ -974,6 +974,35 @@ def run_section_r() -> None:
     # R8e 分数右对齐 tabular-nums（渲染纪律在模板里）
     check("R8e 模板含 tabular-nums 与右对齐", "tabular-nums" in pages[0]["html"] and 'class="score"' in pages[0]["html"])
 
+    # R8f 精确抓取时间：当天 HH:MM、跨天 MM-DD HH:MM（24 小时制），无"刚刚/分钟前"
+    today_ts = time.mktime(time.strptime("2026-11-22 09:07", "%Y-%m-%d %H:%M"))
+    same_day_now = time.mktime(time.strptime("2026-11-22 21:30", "%Y-%m-%d %H:%M"))
+    cross_day_now = time.mktime(time.strptime("2026-11-23 00:40", "%Y-%m-%d %H:%M"))
+    check("R8f 当天抓取写 HH:MM",
+          lbmod.format_fetch_time(today_ts, same_day_now) == "09:07",
+          lbmod.format_fetch_time(today_ts, same_day_now))
+    check("R8g 跨天抓取写 MM-DD HH:MM",
+          lbmod.format_fetch_time(today_ts, cross_day_now) == "11-22 09:07",
+          lbmod.format_fetch_time(today_ts, cross_day_now))
+    pages_t = lbrender.build_board_pages("bb", "bb13", cn_big, "09:07")
+    check("R8h 榜单页 meta 用精确时间且不含相对时间词",
+          "更新于 09:07" in pages_t[0]["html"]
+          and "刚刚" not in pages_t[0]["html"] and "分钟前" not in pages_t[0]["html"])
+    # 同数据 + 同时间戳 → HTML 完全一致（渲染复用的前提）
+    pages_t2 = lbrender.build_board_pages("bb", "bb13", cn_big, "09:07")
+    check("R8i 同数据同时间戳 HTML 位级一致（渲染可复用）", pages_t[0]["html"] == pages_t2[0]["html"])
+
+    # R8j 数据指纹：同数据同指纹；分数/人数变化即变
+    fp1 = lbmod.board_fingerprint(cn_big)
+    fp2 = lbmod.board_fingerprint(json.loads(json.dumps(cn_big)))
+    cn_mut = json.loads(json.dumps(cn_big))
+    cn_mut["top"][0]["score"] += 1
+    cn_mut2 = json.loads(json.dumps(cn_big))
+    cn_mut2["total"] += 1
+    check("R8j 数据指纹稳定且对分数/总人数敏感",
+          fp1 == fp2 and fp1 != lbmod.board_fingerprint(cn_mut) and fp1 != lbmod.board_fingerprint(cn_mut2),
+          f"{fp1[:8]} vs {lbmod.board_fingerprint(cn_mut)[:8]}")
+
 
 async def run_section_s() -> None:
     """S: 排行榜命令插件链路（1.5.0 图片契约）——鉴权/平台透传、图片节点、
@@ -1010,6 +1039,11 @@ async def run_section_s() -> None:
     orig_load = plug.load_board_for_render
     orig_build = plug.build_board_pages
     orig_render = plug.render_board_pages
+    orig_fetch_time = plug.format_fetch_time
+    # 时间文本桩：复用键含时间文本，用真实时钟会随整分钟滚动误判。格式本身由
+    # R8f/R8g 覆盖；此处只验证"键是否由时间文本参与"。
+    time_text = ["09:00"]
+    plug.format_fetch_time = lambda fetched_at, now=None: time_text[0]
     try:
         # 2. 正常路径：数据→分页→渲染→合并转发图片节点（平台+名单透传）
         plug.resolve_current_board = lambda mode, lb_dir=None, proxy_url=None: ("bb", "bb13")
@@ -1021,14 +1055,68 @@ async def run_section_s() -> None:
         p.config.access_control.whitelist = ["id_ok"]
         res = await p.handle_lb_bb(stream_id="stream_s1", group_id="id_ok", user_id="u1", platform="qq")
         check("S2 白名单+QQ 命中放行", res[0] is True)
-        check("S3 榜单图片经 ctx.send.forward 送达（1页1节点含image段）",
+        s3_node = ctx.send.forwarded[0][1][0]
+        check("S3 榜单图片经 ctx.send.forward 送达（1页1节点，仅 image 段无 text 段）",
               len(ctx.send.forwarded) == 1 and ctx.send.forwarded[0][0] == "stream_s1"
-              and any(s.get("type") == "image" for s in ctx.send.forwarded[0][1][0]["segments"]),
-              f"fwd={len(ctx.send.forwarded)}")
+              and [s.get("type") for s in s3_node["segments"]] == ["image"],
+              f"fwd={len(ctx.send.forwarded)} segs={[s.get('type') for s in s3_node['segments']]}")
         check("S3b 渲染调用带 render_timeout_ms", render.calls and render.calls[0].get("render_timeout_ms") == 30000)
         check("S4 返回值为执行摘要而非全文", res[1] == "星塔旅人排行榜已发送" and res[2] == 2)
 
-        # 3. 渲染失败：短提示不回退文本榜
+        # 3. 渲染复用：同 sid + 同数据指纹 → 命中上次结果，零渲染调用但图仍送达
+        calls_before = len(render.calls)
+        ctx.send.forwarded.clear()
+        res_reuse = await p.handle_lb_bb(stream_id="stream_s1b", group_id="id_ok", user_id="u1", platform="qq")
+        check("S4b 同数据重复查询复用渲染结果（零渲染+图照发）",
+              res_reuse[0] is True and len(render.calls) == calls_before
+              and len(ctx.send.forwarded) == 1
+              and ctx.send.forwarded[0][1][0]["segments"][0]["content"] == fake_png,
+              f"renders_delta={len(render.calls) - calls_before} fwd={len(ctx.send.forwarded)}")
+
+        # 4. 数据变了（分数变动）→ 指纹变 → 必须重新渲染
+        slim_changed = {"regions": {"cn": {"total": 2, "last_refresh": "1", "top": [
+            {"rank": 1, "id": "1", "name": "甲", "score": 1234},
+            {"rank": 2, "id": "2", "name": "乙", "score": 900}]}}}
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (slim_changed["regions"]["cn"], "【联合讨伐 S13】", 0.0)
+        calls_before = len(render.calls)
+        await p.handle_lb_bb(stream_id="stream_s1c", group_id="id_ok", platform="qq")
+        check("S4c 数据变动未命中（重新渲染）", len(render.calls) == calls_before + 1,
+              f"renders_delta={len(render.calls) - calls_before}")
+
+        # 5. sid 变了（换赛季）→ 即使数据同形也不得复用
+        plug.resolve_current_board = lambda mode, lb_dir=None, proxy_url=None: ("bb", "bb14")
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (slim["regions"]["cn"], "【联合讨伐 S14】", 0.0)
+        calls_before = len(render.calls)
+        await p.handle_lb_bb(stream_id="stream_s1d", group_id="id_ok", platform="qq")
+        check("S4d 换赛季未命中（sid 变即重渲染）", len(render.calls) == calls_before + 1,
+              f"renders_delta={len(render.calls) - calls_before}")
+        plug.resolve_current_board = lambda mode, lb_dir=None, proxy_url=None: ("bb", "bb13")
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (slim["regions"]["cn"], "【联合讨伐 S13】", 0.0)
+
+        # 6. 抓取时刻变了（TTL 过期重拉，上游数据虽同，但"更新于"必须更新）→ 不得复用
+        time_text[0] = "09:10"
+        calls_before = len(render.calls)
+        await p.handle_lb_bb(stream_id="stream_s1e", group_id="id_ok", platform="qq")
+        check("S4f 抓取时刻变即重渲染（更新时间不得滞后）",
+              len(render.calls) == calls_before + 1, f"renders_delta={len(render.calls) - calls_before}")
+        # 回到同一时刻文本 → 又命中（证明键由 time 文本而非其他因素决定）
+        time_text[0] = "09:00"
+        calls_before = len(render.calls)
+        await p.handle_lb_bb(stream_id="stream_s1f", group_id="id_ok", platform="qq")
+        check("S4g 时间文本回退后仍按最新一次渲染复用（只留最近一次）",
+              len(render.calls) == calls_before + 1,
+              f"renders_delta={len(render.calls) - calls_before}")
+
+        # 7. 卸载清理缓存（不留跨生命周期状态；用独立实例避免破坏本节后续用例）
+        p2, _ctx2 = make_plugin()
+        await p2.on_load()
+        _stop_bg(p2)
+        p2._lb_render_cache = ("bb:bb13:09:00:abc", ["stale"])
+        await p2.on_unload()
+        check("S4e 卸载清空渲染复用缓存", p2._lb_render_cache is None)
+
+        # 8. 渲染失败：短提示不回退文本榜（先清复用缓存，确保真实走到渲染）
+        p._lb_render_cache = None
         ctx.send.forwarded.clear()
         render_fail = MockRender(fail=True)
         ctx.render = render_fail
@@ -1038,6 +1126,7 @@ async def run_section_s() -> None:
               res_fail[0] is True and len(ctx.send.sent) == n_sent + 1
               and "渲染失败" in ctx.send.sent[-1][1] and len(ctx.send.forwarded) == 0,
               str(res_fail[1]))
+        check("S5b 渲染失败不写复用缓存（不缓存半成品）", p._lb_render_cache is None)
 
         # 4. 未开榜走 notice 文本（BoardUnavailable）
         plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (_ for _ in ()).throw(
@@ -1099,6 +1188,7 @@ async def run_section_s() -> None:
         plug.load_board_for_render = orig_load
         plug.build_board_pages = orig_build
         plug.render_board_pages = orig_render
+        plug.format_fetch_time = orig_fetch_time
         p.config.access_control.mode = "off"
 
 

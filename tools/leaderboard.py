@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import hashlib
 import json
 import logging
 import re
@@ -36,11 +37,38 @@ LB_MODE_CN = {"bb": "联合讨伐", "fe": "终焉绝响"}
 
 
 def format_age(seconds: float) -> str:
+    """缓存年龄 → 相对时间文本（文字榜表头用，1.4.x 口径）。"""
     if seconds < 90:
         return "刚刚"
     if seconds < 3600:
         return f"{int(seconds // 60)} 分钟前"
     return f"{int(seconds // 3600)} 小时前"
+
+
+def format_fetch_time(fetched_at: float, now: Optional[float] = None) -> str:
+    """抓取时刻 → 精确时间文本（图片榜 meta 用；当天只写 HH:MM，24 小时制）。
+
+    相对时间每分钟都在变：同一份缓存数据在 TTL 内会渲染出逐分钟不同的图，既
+    浪费渲染也让"同数据同图"不成立。精确到分钟的时间戳与展示粒度一致——数据
+    不变则该文本不变，渲染输入随之完全一致。
+    """
+    stamp = time.localtime(fetched_at)
+    current = time.localtime(now if now is not None else time.time())
+    if (stamp.tm_year, stamp.tm_yday) == (current.tm_year, current.tm_yday):
+        return time.strftime("%H:%M", stamp)
+    return time.strftime("%m-%d %H:%M", stamp)
+
+
+def board_fingerprint(cn_data: Dict[str, Any]) -> str:
+    """国服榜单数据指纹（total + 每名 rank/id/score）。
+
+    用于判断"这份数据是否与上次渲染时完全相同"：配合精确时间戳（同数据 →
+    同 HTML → 同图），指纹相同即可直接复用上次的渲染结果。
+    """
+    top = cn_data.get("top") or []
+    parts = [str(int(cn_data.get("total") or 0))]
+    parts.extend(f"{e.get('rank')}/{e.get('id')}/{e.get('score')}" for e in top)
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def load_top(leaderboard_dir: Path, sid: str) -> Tuple[Optional[dict], float]:
