@@ -2,12 +2,21 @@
 
 本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+# 更新日志
+
+本文件记录插件的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+
+## [1.5.0] - 2026-11-22
 
 ### 主要功能
 
-- **榜单文字开关**：`[leaderboard] render_images`（默认 `true`）。开启按 1.5.0 出图（HTML 渲染合并转发）；关闭改发 1.4.x 文字榜（表头节点 + 每 25 名一节点，`render_text_board_nodes` 纯函数复刻旧排版）。开关只切输出形态，数据层与失败短文本路径不变。
-- **how 攻略查询同发队伍码**：查攻略时即发图也同时发队伍码，不作关键词区分——命中角色/属性所在页各附一个页级公共编成码文本节点（页无码则不附、不提示）。GameKee 队伍码区（header1 含"队伍码"之后）不再整段丢弃：编队名 + 下一段 36 位 ASCII 码严格匹配，格式异常或标题缺码直接报错。索引 `schema_version=2`，旧 v1 索引即使 TTL 内 fresh 也自动迁移重建（schema 升级与上游 `updated_at` 无关）。
+- **攻略查询迁移至 GameKee 中文源**：`stellasora_how` 重写为"一图流攻略"查询——从 GameKee 星塔旅人 wiki 的六大属性页（水/火/光/暗/风/地，@星塔攻略组授权转载）解析角色小节，返回攻略原图直发（合并转发）。结构化 API（`/v1/content/detail` + `game-alias` 头）替代 SPA 页面抓取；`content_json` 节点解析（header2 小节 → 角色小节全部图片）；支持中文别名、分篇点名（"直伤篇"）与属性泛查（"风队"）。
+- **攻略查询同发队伍码**：查攻略时即发图也同时发队伍码，不作关键词区分——命中角色/属性所在页各附一个页级公共编成码文本节点（页无码则不附、不提示）。GameKee 队伍码区（header1 含"队伍码"之后）不再整段丢弃：编队名 + 下一段 36 位 ASCII 码严格匹配，格式异常或标题缺码直接报错。索引 `schema_version=2`，旧 v1 索引即使 TTL 内 fresh 也自动迁移重建（schema 升级与上游 `updated_at` 无关）。
+- **榜单文字开关**：`[leaderboard] render_images`（默认 `true`）。开启出图（HTML 渲染合并转发）；关闭改发 1.4.x 文字榜（表头节点 + 每 25 名一节点，`render_text_board_nodes` 纯函数复刻旧排版）。开关只切输出形态，数据层与失败短文本路径不变。
+- **排行榜图片化**：`/st_bb`・`/st_fe` 改为 HTML 表格经宿主浏览器渲染（`render.html2png`）出图、合并转发发送——名次不补零、分数右对齐千分位完整、长昵称截断不挤分数列（文本榜排版已被聊天侧否决）。数据层语义不变（赛季指针/BB meta 降级/FE 不猜赛季/TTL 瘦身缓存/失败降级陈旧缓存）。
+- **`/st_update` 重定义**：强刷当期两榜（绕过内容 TTL、两榜独立报告）+ 探查 GameKee 攻略源更新 + 重置每日探查计时；不再 reload 插件（字典已删，数据落盘即时生效）。
+- **GameKee 更新探查机制**：三时间戳（last_probe_attempt/last_verified/index_built_at）持久化 state.json；后台每 24h 探查（比对 updated_at，无变化不重建索引）；查询懒刷新（索引 TTL 默认 6h）；探查失败 30 分钟重试（不连拉不断停摆）；single-flight 并发合并（并发入口共享同一批结果，失败同样合并）。
+- **攻略图片缓存**：CDN webp 转换（不缩分辨率，原图 2.1MB → 230KB），SHA-256 文件名磁盘缓存（7 天/128MiB 按最旧回收），域名白名单 + 魔数校验（HTML 拦截页明确报错）。
 
 ### 细节（修复与破坏性变更）
 
@@ -18,27 +27,14 @@
 - **修复懒刷新失败重试纪律缺口**：`ensure_gamekee_index` 原先宣称 30 分钟内不重拉，实际缺门——每次查询都会再探查一次失败中的上游。现失败后（`last_failure_at` 晚于 `last_verified` 且距 30min 重试点未到）直接带旧快照返回，成功后纪律自动解除。
 - **榜单图片节点只发图**：`/st_bb`・`/st_fe` 的图片榜转发节点去掉每页的 text 段。赛季标题、总人数、更新时间、页码信息本就渲染在图内（HTML 的 title/meta/footer），再挂一段文字是重复。文字榜（`render_images=false`）节点结构与未开榜 notice 文本不变。
 - **榜单更新时间改精确时间**：图片榜 meta 的"更新于"从相对时间（刚刚 / N 分钟前）改为抓取时刻的精确时间（当天 `HH:MM`、跨天 `MM-DD HH:MM`，24 小时制，由缓存 `timestamp` 反推）。相对时间每分钟都在变，同一份缓存数据在 TTL 内会渲染出逐分钟不同的图；精确到分钟后，数据不变则渲染输入完全一致。
-- **榜单渲染结果复用**：`(sid, 数据指纹)` 命中上次渲染时直接复用分页 PNG base64，TTL 内重复查询零渲染；实例内存只留最近一次，`on_unload` 清理，渲染失败不写缓存。
+- **榜单渲染结果复用**：渲染输入（sid + 抓取时刻 + 数据指纹）命中上次渲染时直接复用分页 PNG base64，TTL 内重复查询零渲染；实例内存只留最近一次，`on_unload` 清理，渲染失败不写缓存。
 - **缺参返回明确失败**：query 缺失/空白时返回 `success=False` + 可引导错误（含字段名与 JSON 示例），宿主执行结果正确记为失败，替代原仅 content 的"成功"态；不做消息原文自动提取（不滥兜底）。
 - query 参数描述前置"必填，非空"。
 - **排行榜图片排版收紧（实机反馈）**：视口 720→480→360px 二轮收紧（昵称列贴住分数列，消除两列间大片空白），行距 5→4px、卡片/页边距收紧、分数列 130→112px——单屏信息密度提升，页高相应变短。
-
-## [1.5.0] - 2026-11-22
-
-### 主要功能
-
-- **攻略查询迁移至 GameKee 中文源**：`stellasora_how` 重写为"一图流攻略"查询——从 GameKee 星塔旅人 wiki 的六大属性页（水/火/光/暗/风/地，@星塔攻略组授权转载）解析角色小节，返回攻略原图直发（合并转发）。结构化 API（`/v1/content/detail` + `game-alias` 头）替代 SPA 页面抓取；`content_json` 节点解析（header2 小节 → 末张完整版长图）；支持中文别名、分篇点名（"直伤篇"）与属性泛查（"风队"）。
-- **排行榜图片化**：`/st_bb`・`/st_fe` 改为 HTML 表格经宿主浏览器渲染（`render.html2png`）出图、合并转发发送——名次不补零、分数右对齐千分位完整、长昵称截断不挤分数列（文本榜排版已被聊天侧否决）。数据层语义不变（赛季指针/BB meta 降级/FE 不猜赛季/TTL 瘦身缓存/失败降级陈旧缓存）。
-- **`/st_update` 重定义**：强刷当期两榜（绕过内容 TTL、两榜独立报告）+ 探查 GameKee 攻略源更新 + 重置每日探查计时；不再 reload 插件（字典已删，数据落盘即时生效）。
-- **GameKee 更新探查机制**：三时间戳（last_probe_attempt/last_verified/index_built_at）持久化 state.json；后台每 24h 探查（比对 updated_at，无变化不重建索引）；查询懒刷新（索引 TTL 默认 6h）；探查失败 30 分钟重试（不连拉不断停摆）；single-flight 并发合并（并发入口共享同一批结果，失败同样合并）。
-- **攻略图片缓存**：CDN webp 转换（不缩分辨率，原图 2.1MB → 230KB），SHA-256 文件名磁盘缓存（7 天/128MiB 按最旧回收），域名白名单 + 魔数校验（HTML 拦截页明确报错）。
-
-### 细节（修复与破坏性变更）
-
 - **破坏性变更：旧数据源全家下线**——移除 `stellasora_what`/`lookup_game_term` 工具、中英字典（dict/names）、stelladb infodoc、预设码表、LLM 加工直发链路、每日 17:00 定时同步及全部相关模块（service/fetcher_*/sync_data/build_dict/update_dict/dict_lookup/team_table/term_replace/text_clean/cache，由 git 历史保存）。旧 offline 数据文件原地保留不再读取。
 - **破坏性变更：QQ 限定收紧**——how 工具与三命令执行层校验平台（Hook 可见性 + 执行层双闸），非 QQ 或平台未知保守拒绝且不发起网络请求。
 - **破坏性变更：manifest**——version 1.5.0；host min **维持 1.3.15**、sdk min **维持 2.16.0**（全部新特性 render.html2png/send.forward/hook spec 在该版本已具备——宿主 git tag 与 SDK 官方 CHANGELOG 逐项核实，无钉死 1.4.8 的必要）；capabilities 收窄为 `send.text/send.forward/render.html2png/chat.get_all_streams`（移除 config.get/llm.generate/component.reload_plugin/send.image）。
-- **配置破坏性变更**：`config_version 1.3.0 → 1.4.0`，移除整个 `[query]`（direct_send/dedup_window/answer_cache_ttl/llm_model/inject_persona），新增 `[gamekee]`（index_ttl_minutes=360、prefer_webp=true）；Runner 自动归一化旧配置。
+- **配置破坏性变更**：`config_version 1.3.0 → 1.4.1`，移除整个 `[query]`（direct_send/dedup_window/answer_cache_ttl/llm_model/inject_persona），新增 `[gamekee]`（index_ttl_minutes=360、prefer_webp=true）与 `[leaderboard] render_images`；Runner 自动归一化旧配置。
 - **榜单缓存路径变更**：`offline/ssleaderboard/` → `<data_dir>/leaderboard/`（满足旧 offline 不读写）；升级后首次 `/st_bb` 需联网重建，属预期。
 - **修复：/st_update 在飞闸门登记时机**——提前到 await 发送进度消息之前（旧实现连发两调用可同时通过闸门双写数据）。
 - **修复：Hook 反查顺带缓存平台**——session→platform 缓存供执行层校验复用（直调工具不经 Hook 时主动反查一次）。
