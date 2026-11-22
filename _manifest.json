@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.5.1",
+  "version": "1.5.2",
   "name": "星塔旅人攻略查询",
   "description": "星塔旅人（Stella Sora）攻略与排行榜插件：QQ 群中文提问返回一图流攻略原图（GameKee wiki / B站猫猫球，均授权转载，可按 [how] source 切换或双源同查，GameKee 附队伍码）；/st_bb・/st_fe 渲染当期联合讨伐/终焉绝响国服 Top100 图片榜单（名次不补零、分数完整对齐）；/st_update 强刷两榜并探查攻略源更新。数据源：GameKee + B站@铃儿的猫猫球 + ssleaderboard。",
   "author": {
@@ -17,11 +17,11 @@
   "changelog": "CHANGELOG.md",
   "host_application": {
     "min_version": "1.3.15",
-    "max_version": "1.99.99"
+    "max_version": "1.4.99"
   },
   "sdk": {
     "min_version": "2.16.0",
-    "max_version": "2.99.99"
+    "max_version": "2.23.99"
   },
   "dependencies": [],
   "plugin_type": "tool",
