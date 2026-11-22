@@ -37,7 +37,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from net_common import atomic_write as _atomic_write, build_opener as _build_opener, resolve_proxy as _resolve_proxy
+from net_common import (
+    HttpBytesError as _HttpBytesError,
+    atomic_write as _atomic_write,
+    build_opener as _build_opener,
+    read_http_bytes as _read_http_bytes,
+    resolve_proxy as _resolve_proxy,
+)
 
 # 供 plugin.py 复用的原子写别名（单一事实源在 net_common.atomic_write）
 atomic_write = _atomic_write
@@ -46,6 +52,8 @@ logger = logging.getLogger("stellasora.gamekee")
 
 _API_BASE = "https://www.gamekee.com"
 _CDN_HOST = "cdnimg-v2.gamekee.com"
+# 图片下载允许的主机（跳转目标也受限，见 net_common.read_http_bytes）
+_IMAGE_HOSTS = (_CDN_HOST,)
 _IMAGE_REFERER = "https://www.gamekee.com/"
 
 # webp 转换参数（CDN 图片处理服务能力；不缩分辨率，仅转格式）
@@ -481,8 +489,9 @@ def download_image(
 ) -> bytes:
     """下载攻略图（带 Referer/校验/磁盘缓存），返回图片字节。
 
-    缓存命中（TTL 内）零网络；下载校验成功后原子写入。CDN 域白名单之外
-    的 src 拒绝下载；响应非图片（HTML 拦截页/超限）抛 GameKeeError 完整暴露。
+    缓存命中（TTL 内）零网络；下载校验成功后原子写入。CDN 域白名单之外的
+    src 拒绝下载（含跳转目标）；响应非图片（HTML 拦截页/超限）抛 GameKeeError
+    完整暴露。
     """
     url = image_url(src, prefer_webp=prefer_webp)
     host = urllib.parse.urlparse(url).hostname or ""
@@ -502,30 +511,22 @@ def download_image(
         except OSError:
             pass
 
-    opener = _build_opener(_resolve_proxy(proxy_url))
     try:
-        req = urllib.request.Request(
+        data = _read_http_bytes(
             url,
+            allowed_hosts=_IMAGE_HOSTS,
             headers={
                 "User-Agent": "Mozilla/5.0",
                 "Referer": _IMAGE_REFERER,
                 "Origin": _IMAGE_REFERER.rstrip("/"),
             },
+            proxy_url=proxy_url,
+            timeout=timeout,
+            max_bytes=_MAX_IMAGE_BYTES,
         )
-        with opener.open(req, timeout=timeout) as response:
-            code = response.getcode()
-            if code != 200:
-                raise GameKeeError(f"图片 HTTP {code}: {url[:120]}")
-            data = response.read(_MAX_IMAGE_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        raise GameKeeError(f"图片 HTTP {exc.code}: {url[:120]}") from exc
-    except GameKeeError:
-        raise
-    except Exception as exc:
-        raise GameKeeError(f"图片下载失败: {exc}: {url[:120]}") from exc
+    except _HttpBytesError as exc:
+        raise GameKeeError(f"图片下载失败: {exc}") from exc
 
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise GameKeeError(f"图片超过大小上限（{_MAX_IMAGE_BYTES}B）: {url[:120]}")
     _validate_image(data, prefer_webp)
 
     # 原子写入缓存（tmp+replace），失败不阻断返回（缓存是优化不是正确性依赖）
