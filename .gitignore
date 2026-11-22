@@ -15,3 +15,6 @@ __pycache__/
 pyrightconfig.json
 # 本地 Agent/会话运行态（非插件源码）
 .omo/
+
+# B 站攻略图调研原始产物（大图 + 临时 manifest，不入库）
+_bili_opus_raw/

@@ -21,8 +21,10 @@ from __future__ import annotations
 
 from datetime import datetime
 import asyncio
+import io
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
@@ -43,6 +45,8 @@ sys.path.insert(0, str(ROOT))
 import leaderboard as lbmod  # noqa: E402
 import leaderboard_render as lbrender  # noqa: E402
 import gamekee as gkmod  # noqa: E402
+import bili_guides as bgmod  # noqa: E402
+import net_common as ncmod  # noqa: E402
 from maibot_sdk.context import PluginContext, PluginPaths  # noqa: E402
 
 import plugin as plug  # noqa: E402
@@ -144,10 +148,11 @@ class _ListLogHandler(logging.Handler):
 
 
 class _FakeHTTPResponse:
-    """模拟 urlopen 返回的文件对象。"""
+    """模拟 urlopen 返回的文件对象（含 headers，跳转校验要读 Location）。"""
 
-    def __init__(self, data: bytes, code: int = 200):
+    def __init__(self, data: bytes, code: int = 200, location: str | None = None):
         self._data, self._code = data, code
+        self.headers = {"Location": location} if location else {}
 
     def getcode(self) -> int:
         return self._code
@@ -173,6 +178,10 @@ class _FakeOpener:
         self.calls.append(req.full_url if hasattr(req, "full_url") else str(req))
         return self._handler(req, timeout=timeout)
 
+    def add_handler(self, handler):
+        """真实 opener 会加 _NoRedirect handler；桩不需要跳转行为，忽略即可。"""
+        return self
+
 
 def make_plugin():
     """创建插件实例 + mock ctx（缓存/去重参数默认关闭以便隔离用例）。
@@ -197,6 +206,547 @@ def make_plugin():
     ctx.send = MockSend()
     ctx.chat = MockChat()
     return p, ctx
+
+
+
+# ===== 节 A：猫猫球维护脚本扫描器（tools/bili_update.py）=====
+
+def run_section_a() -> None:
+    """A: 扫描器分页/锚点/边界推进纪律（全离线桩，不触网）。"""
+    print("--- A 猫猫球扫描器 ---")
+
+    import bili_update as bumod
+
+    pages = {}
+
+    def fake_feed(page=1, offset="", proxy_url=None):
+        if page not in pages:
+            return {"items": [], "offset": "", "has_more": False}
+        return pages[page]
+
+    orig_feed = bumod._fetch_feed_page
+    bumod._fetch_feed_page = fake_feed
+    try:
+        # A1 撞锚点后多扫一页确认重叠区（边界可信）
+        pages.clear()
+        pages[1] = {"items": [{"opus_id": "300"}, {"opus_id": "200"}], "offset": "o1", "has_more": True}
+        pages[2] = {"items": [{"opus_id": "200"}], "offset": "o2", "has_more": True}
+        cands, state, ok = bumod.scan({"200"}, anchor="200", max_pages=3, full=False)
+        check("A1 撞锚点后多扫一页确认重叠（新条目只收锚点之上的）",
+              [c["opus_id"] for c in cands] == ["300"] and ok and state is not None,
+              f"cands={[c['opus_id'] for c in cands]} ok={ok}")
+
+        # A2 锚点被删（页内找不到）→ 边界不可信，不推进
+        pages.clear()
+        pages[1] = {"items": [{"opus_id": "300"}, {"opus_id": "150"}], "offset": "o1", "has_more": True}
+        pages[2] = {"items": [{"opus_id": "140"}], "offset": "o2", "has_more": True}
+        cands, state, ok = bumod.scan({"200"}, anchor="999", max_pages=2, full=False)
+        check("A2 锚点丢失判边界不可信且不推进 checkpoint",
+              not ok and state is None, f"ok={ok} state={state}")
+
+        # A3 has_more=False 翻到头 → 边界自然成立
+        pages.clear()
+        pages[1] = {"items": [{"opus_id": "300"}], "offset": "", "has_more": False}
+        cands, state, ok = bumod.scan({"200"}, anchor="200", max_pages=2, full=False)
+        check("A3 翻到头边界自然成立", ok and [c["opus_id"] for c in cands] == ["300"], f"ok={ok}")
+
+        # A4 候选里已含已知条目 → 跳过不重复报
+        pages.clear()
+        pages[1] = {"items": [{"opus_id": "300"}, {"opus_id": "200"}], "offset": "o1", "has_more": True}
+        pages[2] = {"items": [{"opus_id": "200"}], "offset": "", "has_more": False}
+        cands, state, ok = bumod.scan({"200"}, anchor="200", max_pages=3, full=False)
+        check("A4 已知条目不计入候选", [c["opus_id"] for c in cands] == ["300"], f"{cands}")
+
+        # A5 --full 未扫完（has_more 恒真且页数用尽）→ 不推进
+        pages.clear()
+        for i in range(1, 4):
+            pages[i] = {"items": [{"opus_id": str(900 + i)}], "offset": f"o{i}", "has_more": True}
+        cands, state, ok = bumod.scan({"200"}, anchor="", max_pages=2, full=True)
+        check("A5 --full 未扫完不推进 checkpoint", not ok and state is None,
+              f"ok={ok} cands={len(cands)}")
+
+        # A6 非数字 opus_id 条目被忽略（防脏数据）
+        pages.clear()
+        pages[1] = {"items": [{"opus_id": "abc"}, {"opus_id": "300"}], "offset": "", "has_more": False}
+        cands, _, ok = bumod.scan(set(), anchor="", max_pages=1, full=True)
+        check("A6 非数字 opus_id 忽略", [c["opus_id"] for c in cands] == ["300"], f"{cands}")
+
+        # A7 接口业务码非 0 → 明确报错（不静默当空页）
+        def bad_feed(page=1, offset="", proxy_url=None):
+            raise bumod.BiliGuideError("动态列表业务码非 0: code=-352")
+
+        bumod._fetch_feed_page = bad_feed
+        try:
+            bumod.scan({"200"}, anchor="200", max_pages=1, full=False)
+            check("A7 风控/业务码错误明确抛出", False)
+        except bumod.BiliGuideError as exc:
+            check("A7 风控/业务码错误明确抛出", "-352" in str(exc), str(exc)[:60])
+    finally:
+        bumod._fetch_feed_page = orig_feed
+
+    # A8 疑似其他游戏内容标注（像素深渊类标题）
+    check("A8 疑似其他游戏内容被标注排除",
+          bumod._is_suspicious("像素深渊 角色分位榜&配队组件选择一图流", "")
+          and not bumod._is_suspicious("艾蕾 一图流", "艾蕾"))
+
+
+# ===== 节 B：猫猫球（B 站）攻略源（1.5.1） =====
+
+def run_section_b() -> None:
+    """B: 猫猫球清单/匹配/opus 解析/webp/缓存/single-flight（离线桩，无真实网络）。"""
+    print("--- B 猫猫球攻略源 ---")
+
+    # === B1 清单加载与校验 ===
+    manifest = bgmod.load_manifest(ROOT)
+    check("B1 内置清单加载成功（42 官方角色 + 20 条 guides）",
+          len(manifest["roles"]) == 42 and len(manifest["guides"]) == 20,
+          f"roles={len(manifest['roles'])} guides={len(manifest['guides'])}")
+    check("B1b 官方角色名唯一来源标注（pid=211502）",
+          manifest["official_source"]["tree_pid"] == 211502
+          and "211502" in manifest["official_source"]["url"])
+    check("B1c 规范名用官方半角括号（薇洛(盛夏)/科洛妮丝(新春)/菈露(圣夜)）",
+          {"薇洛(盛夏)", "科洛妮丝(新春)", "菈露(圣夜)", "尘沙(源初)"}
+          <= {r["name"] for r in manifest["roles"]})
+    # 像素深渊绝不入库（其他游戏内容）
+    check("B1d 像素深渊（其他游戏）不在清单内",
+          all(g["opus_id"] != "1214070302656430088" for g in manifest["guides"]))
+    check("B1e 清单无 generic/无 role 的条目（全部绑定官方角色）",
+          all(g.get("role") for g in manifest["guides"]))
+    check("B1f opus_id 全为字符串数字（防 19 位精度丢失）",
+          all(isinstance(g["opus_id"], str) and g["opus_id"].isdigit() for g in manifest["guides"]))
+    check("B1g guides[].role 全部是 roles 快照成员",
+          all(g["role"] in {r["name"] for r in manifest["roles"]} for g in manifest["guides"]))
+
+    # 结构漂移必须报错（不静默降级成空清单）
+    with tempfile.TemporaryDirectory() as td:
+        broken_root = Path(td)
+        (broken_root / "assets" / "bili_guides").mkdir(parents=True)
+        bad = broken_root / "assets" / "bili_guides" / "manifest.json"
+        bad.write_text('{"schema_version": 99, "roles": [], "guides": []}', encoding="utf-8")
+        try:
+            bgmod.load_manifest(broken_root)
+            check("B2 schema_version 不符抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B2 schema_version 不符抛 BiliGuideError", "schema_version" in str(exc), str(exc)[:60])
+        bad.write_text('{"schema_version": 1, "roles": [{"name": "艾蕾"}], "guides": [{"opus_id": "12x", "role": "艾蕾"}]}', encoding="utf-8")
+        try:
+            bgmod.load_manifest(broken_root)
+            check("B2b opus_id 非数字抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B2b opus_id 非数字抛 BiliGuideError", "opus_id" in str(exc), str(exc)[:60])
+        bad.write_text('{"schema_version": 1, "roles": [{"name": "艾蕾"}], "guides": [{"opus_id": "123", "role": "不存在"}]}', encoding="utf-8")
+        try:
+            bgmod.load_manifest(broken_root)
+            check("B2c role 不在 roles 快照抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B2c role 不在 roles 快照抛 BiliGuideError", "roles 快照" in str(exc), str(exc)[:60])
+        bad.write_text('not json', encoding="utf-8")
+        try:
+            bgmod.load_manifest(broken_root)
+            check("B2d 非法 JSON 抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B2d 非法 JSON 抛 BiliGuideError", "JSON" in str(exc), str(exc)[:60])
+
+    # === B3 角色匹配 ===
+    def hits_of(q, aliases=None):
+        return bgmod.match_guides(manifest, q, aliases=aliases or {})
+
+    h, _ = hits_of("艾蕾攻略")
+    check("B3 角色严格命中", len(h) == 1 and h[0]["role"] == "艾蕾", f"{[g['role'] for g in h]}")
+    # 全角/半角括号归一：问句用全角、清单存官方半角
+    h, _ = hits_of("薇洛（盛夏）攻略")
+    check("B3b 全角括号问句命中官方半角名", len(h) == 1 and h[0]["role"] == "薇洛(盛夏)", str(h))
+    h, _ = hits_of("埃利诺攻略")
+    check("B3c 清单别名（B站旧写法→官方名）", len(h) == 1 and h[0]["role"] == "埃莉诺", str(h))
+    h, _ = hits_of("圣夜菈露攻略")
+    check("B3d 词序不同的 B 站叫法经 alias 归一", len(h) == 1 and h[0]["role"] == "菈露(圣夜)", str(h))
+    h, _ = hits_of("春科攻略", aliases={"春科": "科洛妮丝"})
+    check("B3e 用户配置别名（春科）命中", len(h) == 1 and h[0]["role"] == "科洛妮丝(新春)", str(h))
+    h, _ = hits_of("冬香攻略")
+    check("B3f 同角色多条目全命中（冬香 2 条）", len(h) == 2 and {g["role"] for g in h} == {"冬香"}, str(h))
+    check("B3g 同角色多条目 default=true 排前（发送顺序）",
+          h[0].get("default") is True and h[1].get("default") is None,
+          str([g.get("default") for g in h]))
+    h, _ = hits_of("水系攻略")
+    check("B3h 属性泛查命中该属性全部条目（水系 5 条含千都世 2 条）",
+          len(h) == 5 and {g["element"] for g in h} == {"water"}, f"{len(h)} {[g['role'] for g in h]}")
+    h, _ = hits_of("风队怎么玩")
+    check("B3i 属性泛查（风队）命中 3 条", len(h) == 3 and {g["element"] for g in h} == {"wind"}, f"{len(h)}")
+    h, reason = hits_of("不存在的角色XYZ")
+    check("B3j 未收录返回 no_match", h == [] and reason == "no_match", reason)
+    h, reason = hits_of("")
+    check("B3k 空 query 返回 empty_query", h == [] and reason == "empty_query")
+    h, _ = hits_of("队伍码")
+    check("B3l 非角色词不误命中", h == [], f"{[g['role'] for g in h]}")
+    # 像素深渊那条即便混进清单也不参与匹配（generic 语义）
+    fake = json.loads(json.dumps(manifest))
+    fake["guides"].append({"opus_id": "999", "title": "像素深渊 分位榜", "role": None,
+                           "element": None, "generic": True})
+    h, _ = hits_of("像素深渊攻略")
+    check("B3m generic 条目不参与匹配", all(g["opus_id"] != "999" for g in h), str(h))
+
+    # === B4 opus detail 解析 ===
+    def detail_payload(urls, title="艾蕾 一图流", para_text="文案"):
+        paras = [{"para_type": 1, "text": {"nodes": [{"word": {"words": para_text}}]}}]
+        if urls:
+            paras.append({"para_type": 2, "pic": {"pics": [{"url": u} for u in urls]}})
+        return {"code": 0, "message": "0", "data": {"item": {
+            "id_str": "1", "type": "DYNAMIC_TYPE_DRAW",
+            "modules": [
+                {"module_type": "MODULE_TYPE_TITLE", "module_title": {"text": title}},
+                {"module_type": "MODULE_TYPE_CONTENT", "module_content": {"paragraphs": paras}},
+            ]}}}
+
+    parsed = bgmod.parse_opus_detail(detail_payload(["https://x/a.png"]), "1")
+    check("B4 opus 详情解析（标题 + 图片直链，忽略文本段落）",
+          parsed["title"] == "艾蕾 一图流" and parsed["image_urls"] == ["https://x/a.png"], str(parsed))
+    parsed2 = bgmod.parse_opus_detail(detail_payload(["https://x/a.png", "https://x/b.png"]), "1")
+    check("B4b 多图片段落保序", parsed2["image_urls"] == ["https://x/a.png", "https://x/b.png"])
+    try:
+        bgmod.parse_opus_detail({"code": -400, "message": "bad"}, "1")
+        check("B4c 业务码非 0 抛错", False)
+    except bgmod.BiliGuideError as exc:
+        check("B4c 业务码非 0 抛错", "-400" in str(exc), str(exc)[:60])
+    try:
+        bgmod.parse_opus_detail({"code": 0, "data": {"item": {"modules": []}}}, "1")
+        check("B4d 无图片段落抛错", False)
+    except bgmod.BiliGuideError as exc:
+        check("B4d 无图片段落抛错", "无图片" in str(exc), str(exc)[:60])
+    try:
+        bgmod.parse_opus_detail({"code": 0, "data": {}}, "1")
+        check("B4e 缺 data.item 抛错", False)
+    except bgmod.BiliGuideError as exc:
+        check("B4e 缺 data.item 抛错", "data.item" in str(exc), str(exc)[:60])
+
+    # === B5 webp 压缩（真实 Pillow 编码小图）===
+    from PIL import Image as _PILImage
+    png_buf = io.BytesIO()
+    _PILImage.new("RGB", (64, 48), (200, 40, 40)).save(png_buf, format="PNG")
+    webp = bgmod.to_webp(png_buf.getvalue(), "1", 1)
+    with _PILImage.open(io.BytesIO(webp)) as out:
+        check("B5 原图 → webp（真实 Pillow，格式/尺寸不变）",
+              out.format == "WEBP" and out.size == (64, 48), f"{out.format} {out.size}")
+    check("B5b webp 魔数正确", webp[:4] == b"RIFF" and webp[8:12] == b"WEBP", str(webp[:12]))
+    # RGBA 保留透明
+    rgba_buf = io.BytesIO()
+    _PILImage.new("RGBA", (32, 32), (0, 0, 0, 0)).save(rgba_buf, format="PNG")
+    rgba_webp = bgmod.to_webp(rgba_buf.getvalue(), "1", 1)
+    with _PILImage.open(io.BytesIO(rgba_webp)) as out:
+        check("B5c RGBA 透明图转 webp 保透明", out.mode in ("RGBA", "RGB"), out.mode)
+    # 非法字节 → 明确报错（含 opus/阶段/异常）
+    try:
+        bgmod.to_webp(b"not an image", "555", 2)
+        check("B5d 非图片字节编码失败抛错", False)
+    except bgmod.BiliGuideError as exc:
+        msg = str(exc)
+        check("B5d 非图片字节编码失败抛错（含 opus/张次）",
+              "555" in msg and "第2张" in msg and "编码失败" in msg, msg[:80])
+
+    # Pillow 缺失 → 明确报错，绝不静默发原图
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def no_pil(name, *a, **kw):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("No module named 'PIL'")
+        return real_import(name, *a, **kw)
+
+    with unittest.mock.patch("builtins.__import__", side_effect=no_pil):
+        try:
+            bgmod.to_webp(png_buf.getvalue(), "777", 1)
+            check("B6 Pillow 缺失抛错（不降级发原图）", False)
+        except bgmod.BiliGuideError as exc:
+            check("B6 Pillow 缺失抛错（不降级发原图）",
+                  "Pillow" in str(exc) and "777" in str(exc), str(exc)[:80])
+
+    # === B7 磁盘缓存：写入/命中零网络/损坏重建/原子提交 ===
+    cache_root = Path(tempfile.mkdtemp(prefix="bili_b_"))
+    opus_id = "1253428983540744198"
+    calls = {"detail": 0, "image": 0}
+    orig_detail = bgmod.fetch_opus_detail
+    orig_dl = bgmod.download_image
+    try:
+        def fake_detail(oid, proxy_url=None, timeout=20):
+            calls["detail"] += 1
+            return {"title": "艾蕾 一图流", "image_urls": [f"https://x/{oid}_1.png", f"https://x/{oid}_2.png"]}
+
+        def fake_dl(url, proxy_url=None, timeout=30):
+            calls["image"] += 1
+            return png_buf.getvalue()
+
+        bgmod.fetch_opus_detail = fake_detail
+        bgmod.download_image = fake_dl
+
+        files = bgmod.fetch_guide_images(opus_id, cache_root)
+        check("B7 首次抓取写缓存（2 张 webp + meta）",
+              len(files) == 2 and all(f.suffix == ".webp" and f.is_file() for f in files)
+              and (cache_root / opus_id / "meta.json").is_file(),
+              f"files={len(files)}")
+        check("B7b 首次抓取网络调用计数（detail1/image2）",
+              calls == {"detail": 1, "image": 2}, str(calls))
+
+        before = dict(calls)
+        files2 = bgmod.fetch_guide_images(opus_id, cache_root)
+        check("B7c 缓存命中零网络（detail/image 增量均为 0）",
+              files2 == files and calls == before, f"delta={calls}")
+
+        # 缓存文件被删 → 不完整 → 重建
+        files[0].unlink()
+        before = dict(calls)
+        files3 = bgmod.fetch_guide_images(opus_id, cache_root)
+        check("B7d 缓存不完整触发重建（detail+1）",
+              len(files3) == 2 and calls["detail"] == before["detail"] + 1,
+              f"detail_delta={calls['detail'] - before['detail']}")
+
+        # meta 损坏 → 按缺失重建
+        (cache_root / opus_id / "meta.json").write_text("{broken", encoding="utf-8")
+        before = dict(calls)
+        bgmod.fetch_guide_images(opus_id, cache_root)
+        check("B7e meta 损坏触发重建", calls["detail"] == before["detail"] + 1,
+              f"detail_delta={calls['detail'] - before['detail']}")
+
+        # 重建时旧图清理：缓存永久不复验上游（用户裁决），故图数变化只在
+        # 触发重建时才会发生（删 meta/删文件）。重建须清掉孤儿旧图。
+        (cache_root / opus_id / "meta.json").unlink()
+        bgmod.fetch_opus_detail = lambda oid, proxy_url=None, timeout=20: {
+            "title": "艾蕾 一图流", "image_urls": ["https://x/only.png"]}
+        files4 = bgmod.fetch_guide_images(opus_id, cache_root)
+        stray = list((cache_root / opus_id).glob("000*.webp"))
+        check("B7f 重建后旧图清理（图数变少不留孤儿）",
+              len(files4) == 1 and len(stray) == 1, f"files={len(files4)} stray={len(stray)}")
+
+        # 缓存根被同名文件占位 → 明确报错（发请求前就失败，不吃无效流量）
+        bgmod.fetch_opus_detail = fake_detail
+        holder_parent = Path(tempfile.mkdtemp(prefix="bili_bad_"))
+        bad_root = holder_parent / "not_a_dir"
+        bad_root.write_text("blocker", encoding="utf-8")
+        before_calls = dict(calls)
+        try:
+            bgmod.fetch_guide_images(opus_id, bad_root)
+            check("B7g 缓存根不可用抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B7g 缓存根不可用抛 BiliGuideError（错误暴露且不发请求）",
+                  "目录不可用" in str(exc) and calls == before_calls, str(exc)[:90])
+        # 暂存目录被占位 → 同样明确报错（旧缓存不受影响）
+        bad_root2 = Path(tempfile.mkdtemp(prefix="bili_bad2_"))
+        (bad_root2 / f"{opus_id}.staging").write_text("blocker", encoding="utf-8")
+        try:
+            bgmod.fetch_guide_images(opus_id, bad_root2)
+            check("B7h 暂存目录不可用抛 BiliGuideError", False)
+        except bgmod.BiliGuideError as exc:
+            check("B7h 暂存目录不可用抛 BiliGuideError（含 opus/路径）",
+                  "暂存目录不可用" in str(exc) and opus_id in str(exc), str(exc)[:90])
+    finally:
+        bgmod.fetch_opus_detail = orig_detail
+        bgmod.download_image = orig_dl
+
+
+    # === B15 榜单代理不泄漏进猫猫球（B 站 opener 仍走原 resolve_proxy 链）===
+    # 设置一个显式榜单代理，抓取猫猫球时 net_common.build_opener 收到的必须是
+    # None（=环境变量链），不能是 [leaderboard] proxy 的值
+    seen_bili_openers = []
+    orig_build_for_bili = ncmod.build_opener
+
+    def spy_bili_opener(proxy_url):
+        seen_bili_openers.append(proxy_url)
+        return _FakeOpener(lambda req, timeout=10: _FakeHTTPResponse(
+            b'{"code":0,"data":{"item":{"modules":[{"module_type":"MODULE_TYPE_TITLE",'
+            b'"module_title":{"text":"t"}},{"module_type":"MODULE_TYPE_CONTENT",'
+            b'"module_content":{"paragraphs":[{"para_type":2,"pic":{"pics":'
+            b'[{"url":"https://i0.hdslb.com/a.png"}]}}]}}]}}}', code=200))
+
+    ncmod.build_opener = spy_bili_opener
+    try:
+        # 直接验证：fetch_opus_detail 的代理参数独立于榜单配置
+        bgmod.fetch_opus_detail("1253428983540744198")
+        check("B15 猫猫球详情请求不带榜单代理（build_opener 收到 None）",
+              seen_bili_openers == [None], str(seen_bili_openers))
+    except Exception as exc:
+        check("B15 猫猫球详情请求不带榜单代理（build_opener 收到 None）", False, str(exc)[:60])
+    finally:
+        ncmod.build_opener = orig_build_for_bili
+
+    # === B8 single-flight（同 opus 并发只抓一次）===
+    cache_sf = Path(tempfile.mkdtemp(prefix="bili_sf_"))
+    sf_calls = {"detail": 0}
+    orig_detail = bgmod.fetch_opus_detail
+    try:
+        def slow_detail(oid, proxy_url=None, timeout=20):
+            sf_calls["detail"] += 1
+            time.sleep(0.15)
+            return {"title": "t", "image_urls": ["https://x/1.png"]}
+
+        bgmod.fetch_opus_detail = slow_detail
+        bgmod.download_image = lambda url, proxy_url=None, timeout=30: png_buf.getvalue()
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(bgmod.fetch_guide_images(opus_id, cache_sf)))
+            for _ in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check("B8 同 opus 三线程并发只抓一次（single-flight）",
+              sf_calls["detail"] == 1 and len(results) == 3
+              and all(len(r) == 1 for r in results),
+              f"detail={sf_calls['detail']} results={len(results)}")
+    finally:
+        bgmod.fetch_opus_detail = orig_detail
+        bgmod.download_image = orig_dl
+
+
+
+
+    # === B9 出站主机白名单与跳转校验（read_http_bytes 公共体）===
+    try:
+        ncmod.read_http_bytes("https://evil.example.com/x.png",
+                              allowed_hosts=("i0.hdslb.com",), max_bytes=100)
+        check("B9 非白名单主机拒绝", False)
+    except ncmod.HttpBytesError as exc:
+        check("B9 非白名单主机拒绝", "白名单" in str(exc), str(exc)[:60])
+
+    # 跳转目标不在白名单 → 拒绝（Location 指向外部主机）
+    redirect_resp = _FakeHTTPResponse(b"", code=302, location="https://evil.example.com/steal.png")
+    orig_opener = ncmod.build_opener
+    ncmod.build_opener = lambda proxy: _FakeOpener(lambda req, timeout=10: redirect_resp)
+    try:
+        try:
+            ncmod.read_http_bytes("https://i0.hdslb.com/a.png",
+                                  allowed_hosts=("i0.hdslb.com",), max_bytes=100)
+            check("B9b 跳转目标非白名单拒绝", False)
+        except ncmod.HttpBytesError as exc:
+            check("B9b 跳转目标非白名单拒绝", "跳转目标" in str(exc), str(exc)[:60])
+    finally:
+        ncmod.build_opener = orig_opener
+
+    # 跳转目标在白名单内 → 正常跟随
+    ok_resp = _FakeHTTPResponse(b"RIFF0000WEBP" + b"\x00" * 8, code=200)
+    inner_redirect = _FakeHTTPResponse(b"", code=302, location="https://i1.hdslb.com/real.png")
+    seq = {"n": 0}
+
+    def hop(req, timeout=10):
+        seq["n"] += 1
+        return inner_redirect if seq["n"] == 1 else ok_resp
+
+    ncmod.build_opener = lambda proxy: _FakeOpener(hop)
+    try:
+        data = ncmod.read_http_bytes("https://i0.hdslb.com/a.png",
+                                     allowed_hosts=("i0.hdslb.com", "i1.hdslb.com"),
+                                     max_bytes=1000)
+        check("B9c 白名单内跳转正常跟随", data[:4] == b"RIFF" and seq["n"] == 2,
+              f"hops={seq['n']}")
+    except ncmod.HttpBytesError as exc:
+        check("B9c 白名单内跳转正常跟随", False, str(exc)[:60])
+    finally:
+        ncmod.build_opener = orig_opener
+
+    # 图片 URL 主机不在白名单（上游给了外部域名）→ 下载层拒绝
+    try:
+        bgmod.download_image("https://evil.example.com/steal.png")
+        check("B9d 图片下载主机白名单", False)
+    except bgmod.BiliGuideError as exc:
+        check("B9d 图片下载主机白名单", "白名单" in str(exc), str(exc)[:60])
+
+    # === B10 重建失败不留假完整缓存（旧 meta 尚在，第二张写失败）===
+    cache_rb = Path(tempfile.mkdtemp(prefix="bili_rb_"))
+    rb_opus = "1214070302656430088"
+    orig_detail_rb = bgmod.fetch_opus_detail
+    orig_dl_rb = bgmod.download_image
+    try:
+        # 先建一份正常缓存（2 张）
+        bgmod.fetch_opus_detail = lambda oid, proxy_url=None, timeout=20: {
+            "title": "旧", "image_urls": ["https://i0.hdslb.com/a.png", "https://i0.hdslb.com/b.png"]}
+        bgmod.download_image = lambda url, proxy_url=None, timeout=30: png_buf.getvalue()
+        good = bgmod.fetch_guide_images(rb_opus, cache_rb)
+        check("B10 前置：正常缓存 2 张", len(good) == 2, f"{len(good)}")
+        old_meta = (cache_rb / rb_opus / "meta.json").read_text(encoding="utf-8")
+
+        # 迫使重建：删掉一张图让缓存不完整；再让下载在第 2 张失败
+        good[1].unlink()
+        fails = {"n": 0}
+
+        def flaky_dl(url, proxy_url=None, timeout=30):
+            fails["n"] += 1
+            if fails["n"] >= 2:
+                raise bgmod.BiliGuideError("second image down")
+            return png_buf.getvalue()
+
+        bgmod.download_image = flaky_dl
+        try:
+            bgmod.fetch_guide_images(rb_opus, cache_rb)
+            check("B10b 重建失败必须抛错", False)
+        except bgmod.BiliGuideError as exc:
+            check("B10b 重建失败必须抛错", "second image down" in str(exc), str(exc)[:60])
+
+        # 关键：旧缓存（含旧 meta）原封不动，且不会被当成"完整缓存"误用
+        meta_after = (cache_rb / rb_opus / "meta.json").read_text(encoding="utf-8")
+        staging = cache_rb / f"{rb_opus}.staging"
+        check("B10c 重建失败不动旧缓存（meta 与文件均原样）",
+              meta_after == old_meta and not staging.exists(),
+              f"meta_same={meta_after == old_meta} staging={staging.exists()}")
+    finally:
+        bgmod.fetch_opus_detail = orig_detail_rb
+        bgmod.download_image = orig_dl_rb
+
+    # === B11 Pillow 前置检查在发请求之前（冷态不浪费流量）===
+    cache_pre = Path(tempfile.mkdtemp(prefix="bili_pre_"))
+    calls_pre = {"detail": 0}
+    orig_detail_pre = bgmod.fetch_opus_detail
+    bgmod.fetch_opus_detail = lambda oid, proxy_url=None, timeout=20: (
+        calls_pre.__setitem__("detail", calls_pre["detail"] + 1)
+        or {"title": "t", "image_urls": ["https://i0.hdslb.com/a.png"]})
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def no_pil(name, *a, **kw):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("No module named 'PIL'")
+        return real_import(name, *a, **kw)
+
+    try:
+        with unittest.mock.patch("builtins.__import__", side_effect=no_pil):
+            try:
+                bgmod.fetch_guide_images("999999999999999999", cache_pre)
+                check("B11 Pillow 缺失在请求前失败", False)
+            except bgmod.BiliGuideError as exc:
+                check("B11 Pillow 缺失在请求前失败（零网络）",
+                      "Pillow" in str(exc) and calls_pre["detail"] == 0,
+                      f"detail_calls={calls_pre['detail']} {str(exc)[:50]}")
+    finally:
+        bgmod.fetch_opus_detail = orig_detail_pre
+
+    # === B12 单图尺寸上限（按图检查，不改全局 MAX_IMAGE_PIXELS）===
+    from PIL import Image as _PIL2
+    big_buf = io.BytesIO()
+    _PIL2.new("RGB", (10, 10)).save(big_buf, format="PNG")
+    orig_max = getattr(_PIL2, "MAX_IMAGE_PIXELS", None)
+    orig_limit = bgmod._MAX_PIXELS
+    bgmod._MAX_PIXELS = 50  # 10x10=100 > 50
+    try:
+        try:
+            bgmod.to_webp(big_buf.getvalue(), "888", 1)
+            check("B12 单图尺寸超限抛错", False)
+        except bgmod.BiliGuideError as exc:
+            check("B12 单图尺寸超限抛错", "尺寸超限" in str(exc), str(exc)[:60])
+        check("B12b 不改全局 Image.MAX_IMAGE_PIXELS",
+              getattr(_PIL2, "MAX_IMAGE_PIXELS", None) == orig_max)
+    finally:
+        bgmod._MAX_PIXELS = orig_limit
+
+    # === B13 匹配：点名未收录形态不降级到基础形态/属性泛查 ===
+    h, reason = hits_of("科洛妮丝直伤篇")
+    check("B13 点名未收录形态不降级（form_not_found）",
+          h == [] and reason == "form_not_found", f"{len(h)}/{reason}")
+    h, _ = hits_of("科洛妮丝攻略")
+    check("B13b 未点名形态仍命中基础条目", len(h) == 1 and h[0]["role"] == "科洛妮丝(新春)", str(h))
+
+    # === B14 default 排序只在同角色内生效（不打乱跨角色顺序）===
+    h, _ = hits_of("水系攻略")
+    roles_seq = [g["role"] for g in h]
+    check("B14 属性泛查跨角色顺序保持（千都世两条相邻）",
+          roles_seq == ["艾蕾", "薇洛(盛夏)", "千都世", "千都世", "多娜"], str(roles_seq))
+    check("B14b 同角色内 default 排前（千都世 2 条中加强后在前）",
+          h[2].get("default") is True and h[3].get("default") is None,
+          str([g.get("default") for g in h[2:4]]))
 
 
 # ===== 节 G：直发端到端（核心用例精简版） =====
@@ -238,7 +788,12 @@ async def run_direct_send() -> None:
 
     def install_stubs(plugin=None, *, index=None, download=None):
         """patch plug 模块级 gamekee_* 绑定（handle_how 经模块 globals 解析，
-        实例属性无效——Python 名字解析规则）。plugin 参数保留兼容旧调用。"""
+        实例属性无效——Python 名字解析规则）。plugin 参数保留兼容旧调用。
+
+        probe 一并打桩：索引为 None 时 ensure_gamekee_index 会先探查，走真实网络
+        会让用例结果依赖上游状态（实机六页无变化时 changed=False 直接返回空索引，
+        既不重建也不报错）。
+        """
         if index is None:
             plug.gamekee_build_index = lambda proxy_url=None: make_index()
         elif callable(index):
@@ -249,6 +804,11 @@ async def run_direct_send() -> None:
             plug.gamekee_download_image = lambda src, cache, prefer_webp=True: WEBP
         else:
             plug.gamekee_download_image = download
+        plug.gamekee_probe_updates = lambda proxy_url=None, timeout=20, known_updates=None: {
+            "pages": {k: {"updated_at": 1, "published_at": 1}
+                      for k in ("water", "fire", "light", "dark", "wind", "earth")},
+            "changed": True,
+        }
 
     p, ctx = make_plugin()
     await p.on_load()
@@ -300,7 +860,7 @@ async def run_direct_send() -> None:
     r3 = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g3", **qq_kwargs)
     nodes3 = send.forwarded[n_before][1]
     check("G3 属性泛查每角色一图节点+页码节点（2图节点+1码节点，返回张数=3）",
-          len(nodes3) == 3 and "（3 张）及 1 页队伍码" in str(r3.get("content", "")),
+          len(nodes3) == 3 and "3 张及 1 页队伍码" in str(r3.get("content", "")),
           f"nodes={len(nodes3)} content={str(r3.get('content', ''))[:40]}")
     # 图节点均含 image 段（薇洛节点 2 张）；码节点为纯文本且带本页两码
     check("G3b 图节点均含图片段（薇洛节点 2 张）、码节点纯文本含本页码",
@@ -363,7 +923,7 @@ async def run_direct_send() -> None:
     g7_v = g7_nodes[1]
     g7_v_imgs = [s for s in g7_v.get("segments", []) if s.get("type") == "image"]
     check("G7 部分下载失败跳过该图保节点（3-1=2张+缺图说明）",
-          "已直接发送" in str(r7.get("content", "")) and "（2 张）" in str(r7.get("content", ""))
+          "已直接发送" in str(r7.get("content", "")) and "2 张" in str(r7.get("content", ""))
           and len(g7_nodes) == 3 and len(g7_v_imgs) == 1
           and "1 张下载失败" in _node_text_of(g7_nodes),
           f"content={str(r7.get('content', ''))[:40]} nodes={len(g7_nodes)} v_imgs={len(g7_v_imgs)}")
@@ -379,7 +939,7 @@ async def run_direct_send() -> None:
     r7b = await p.handle_how(query="水系攻略", group_id="g1", stream_id="stream_g7b", **qq_kwargs)
     g7b_nodes = send.forwarded[n_before][1]
     check("G7b 单节全图失败省略节点（1图节点=仅艾蕾+1码节点）",
-          "已直接发送" in str(r7b.get("content", "")) and "（1 张）" in str(r7b.get("content", ""))
+          "已直接发送" in str(r7b.get("content", "")) and "1 张" in str(r7b.get("content", ""))
           and len(g7b_nodes) == 2
           and [s.get("filename") for s in g7b_nodes[0].get("segments", []) if s.get("type") == "image"] == ["艾蕾_guide.webp"]
           and all(s.get("type") != "image" for s in g7b_nodes[1].get("segments", [])),
@@ -405,7 +965,7 @@ async def run_direct_send() -> None:
     g8b_codes = _node_text_of([g8b_nodes[-1]])
     check("G8b 水系队伍码=属性泛查同款（2图节点+1码节点）",
           "攻略图已直接发送" in str(r8b.get("content", ""))
-          and "（3 张）及 1 页队伍码" in str(r8b.get("content", ""))
+          and "3 张及 1 页队伍码" in str(r8b.get("content", ""))
           and len(send.sent) == n_sent
           and len(g8b_nodes) == 3
           and "技伤（艾蕾多娜薇洛）" in g8b_codes
@@ -418,7 +978,7 @@ async def run_direct_send() -> None:
     r8c = await p.handle_how(query="艾蕾队伍码", group_id="g1", stream_id="stream_g8c", **qq_kwargs)
     g8c_nodes = send.forwarded[n_before][1]
     check("G8c 艾蕾队伍码（图节点+水页码节点）",
-          "（1 张）及 1 页队伍码" in str(r8c.get("content", ""))
+          "1 张及 1 页队伍码" in str(r8c.get("content", ""))
           and len(g8c_nodes) == 2
           and [s.get("filename") for s in g8c_nodes[0].get("segments", []) if s.get("type") == "image"] == ["艾蕾_guide.webp"]
           and "AAAAiwAAAIIAAACgzbADAAbNgAAMADAGweYG" in _node_text_of([g8c_nodes[1]]),
@@ -442,7 +1002,7 @@ async def run_direct_send() -> None:
     r8e = await p.handle_how(query="地系队伍码", group_id="g1", stream_id="stream_g8e", **qq_kwargs)
     g8e_nodes = send.forwarded[n_before][1]
     check("G8e 无码页不出码节点也不加提示（合成 fixture：地页 2 图节点）",
-          "（2 张）" in str(r8e.get("content", "")) and "队伍码" not in str(r8e.get("content", ""))
+          "2 张" in str(r8e.get("content", "")) and "队伍码" not in str(r8e.get("content", ""))
           and len(send.sent) == n_sent
           and len(g8e_nodes) == 2
           and all(any(s.get("type") == "image" for s in n.get("segments", [])) for n in g8e_nodes),
@@ -531,6 +1091,190 @@ async def run_direct_send() -> None:
           and len(send.sent) == n_sent and len(send.forwarded) == n_fwd,
           f"errs={[str(r.get('error', '')) for r in (r12a, r12b, r12c)]}")
 
+    # ===== G13+ 三模式分流（1.5.1 猫猫球源）=====
+    # 桩：B 站清单走真实内置清单，抓图走假 webp 文件；GameKee 走本节 make_index 桩
+    bili_calls: list = []
+    bili_ok = [True]
+
+    def fake_bili_fetch(opus_id, cache_root, proxy_url=None):
+        bili_calls.append(str(opus_id))
+        if not bili_ok[0]:
+            raise bgmod.BiliGuideError(f"fake bili down: opus={opus_id}")
+        cache_root = Path(cache_root) / str(opus_id)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        out = cache_root / "0001.webp"
+        out.write_bytes(WEBP)
+        return [out]
+
+    orig_bili_fetch = plug.bili_fetch_guide_images
+    plug.bili_fetch_guide_images = fake_bili_fetch
+
+    # G13 bili 单源命中：只发猫猫球图 + 来源署名，零 GameKee 探查
+    p.config.how.source = "bili"
+    gk_builds = {"n": 0}
+
+    def counting_gk(proxy_url=None):
+        gk_builds["n"] += 1
+        return make_index()
+
+    plug.gamekee_build_index = counting_gk
+    p._gamekee_index = make_index()
+    p._gamekee_state["last_verified"] = 0  # 若走 GameKee 懒刷新必触发探查
+    bili_calls.clear()
+    n_before = len(send.forwarded)
+    r13 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g13", **qq_kwargs)
+    g13_nodes = send.forwarded[n_before][1]
+    g13_text = _node_text_of(g13_nodes)
+    check("G13 bili 单源命中（只发猫猫球图 + 来源署名）",
+          "已直接发送到聊天" in str(r13.get("content", ""))
+          and len(g13_nodes) == 1
+          and any(s.get("type") == "image" for s in g13_nodes[0]["segments"])
+          and "B站@铃儿的猫猫球" in g13_text,
+          f"nodes={len(g13_nodes)} content={str(r13.get('content', ''))[:40]}")
+    check("G13b bili 模式零 GameKee 探查（懒刷新未触发）",
+          gk_builds["n"] == 0, f"gk_builds={gk_builds['n']}")
+    check("G13c bili 模式抓的是清单里该角色的 opus_id",
+          bili_calls == ["1253428983540744198"], str(bili_calls))
+
+    # G14 bili 未收录：明确提示"猫猫球暂未收录"，不回退 GameKee
+    n_sent, n_fwd = len(send.sent), len(send.forwarded)
+    bili_calls.clear()
+    r14 = await p.handle_how(query="不存在的角色XYZ", group_id="g1", stream_id="stream_g14", **qq_kwargs)
+    check("G14 bili 未收录明确提示（不隐式回退 GameKee）",
+          len(send.sent) == n_sent + 1 and "猫猫球暂未收录" in send.sent[-1][1]
+          and len(send.forwarded) == n_fwd
+          and gk_builds["n"] == 0 and bili_calls == [],
+          send.sent[-1][1][:50] if send.sent else "no send")
+
+    # G15 bili 抓取失败：与"未收录"区分（提示加载失败，不冒充没收录）
+    bili_ok[0] = False
+    n_sent = len(send.sent)
+    r15 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g15", **qq_kwargs)
+    check("G15 bili 抓取失败区分于未收录（明确加载失败，不冒充没收录）",
+          len(send.sent) == n_sent + 1 and "加载失败" in send.sent[-1][1]
+          and "暂未收录" not in send.sent[-1][1],
+          send.sent[-1][1][:60] if send.sent else "no send")
+    bili_ok[0] = True
+
+    # G16 all 双源：GameKee 图 + 猫猫球图都发（GameKee 在前），摘要分列
+    p.config.how.source = "all"
+    install_stubs(p)
+    p._gamekee_index = make_index()
+    p._gamekee_state["last_verified"] = p._now()
+    n_before = len(send.forwarded)
+    r16 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g16", **qq_kwargs)
+    g16_nodes = send.forwarded[n_before][1]
+    g16_text = _node_text_of(g16_nodes)
+    check("G16 all 双源都发（GameKee + 猫猫球，来源各自署名）",
+          "共 " in str(r16.get("content", "")) and "GameKee" in str(r16.get("content", ""))
+          and "猫猫球" in str(r16.get("content", ""))
+          and "GameKee" in g16_text and "铃儿的猫猫球" in g16_text,
+          f"nodes={len(g16_nodes)} content={str(r16.get('content', ''))[:60]}")
+
+    # G17 all 单源失败：另一源照发并简短标注失败侧
+    bili_ok[0] = False
+    n_before = len(send.forwarded)
+    r17 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g17", **qq_kwargs)
+    g17_nodes = send.forwarded[n_before][1]
+    g17_text = _node_text_of(g17_nodes)
+    check("G17 all 猫猫球失败仍发 GameKee 并标注失败侧",
+          len(g17_nodes) >= 1 and "GameKee" in g17_text
+          and "猫猫球源不可用" in g17_text,
+          f"nodes={len(g17_nodes)}")
+    bili_ok[0] = True
+
+    # G18 all GameKee 失败（索引不可用）不终止猫猫球分支
+    def boom_index(proxy_url=None):
+        raise plug.GameKeeError("gk down")
+
+    def boom_probe(proxy_url=None, timeout=20, known_updates=None):
+        raise plug.GameKeeError("gk probe down")
+
+    orig_probe = plug.gamekee_probe_updates
+    plug.gamekee_build_index = boom_index
+    plug.gamekee_probe_updates = boom_probe
+    # "完全无索引可用"：内存/状态/磁盘快照全清——任一残留都会让
+    # ensure_gamekee_index 走"失败降级服务旧索引"（那是正确行为，但不是本用例）
+    p._gamekee_index = None
+    p._gamekee_state.clear()
+    p._gamekee_index_path().unlink(missing_ok=True)
+    p._gamekee_state_path().unlink(missing_ok=True)
+    n_before = len(send.forwarded)
+    r18 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g18", **qq_kwargs)
+    g18_nodes = send.forwarded[n_before][1] if len(send.forwarded) > n_before else []
+    g18_text = _node_text_of(g18_nodes)
+    check("G18 all GameKee 失败仍发猫猫球并标注 GameKee 侧",
+          "铃儿的猫猫球" in g18_text and "GameKee源不可用" in g18_text,
+          f"nodes={len(g18_nodes)} text={g18_text[:60]}")
+
+    # G19 all 双源都无：只发一次汇总提示
+    bili_ok[0] = False
+    n_sent, n_fwd = len(send.sent), len(send.forwarded)
+    r19 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g19", **qq_kwargs)
+    check("G19 all 双源皆不可用只发一次汇总提示",
+          len(send.sent) == n_sent + 1 and len(send.forwarded) == n_fwd
+          and "攻略库里暂时没有" in send.sent[-1][1],
+          send.sent[-1][1][:70] if send.sent else "no send")
+    bili_ok[0] = True
+
+    # 复位：回 gamekee 源 + 恢复 GameKee 桩
+    p.config.how.source = "gamekee"
+    plug.bili_fetch_guide_images = orig_bili_fetch
+    plug.gamekee_probe_updates = orig_probe
+    p._gamekee_index = make_index()
+    p._gamekee_state["last_verified"] = p._now()
+    install_stubs(p)
+
+    # G20 forward 抛异常 → success=False + error（真实失败不冒充成功），且不崩
+    class BoomForwardSend(MockSend):
+        async def forward(self, messages, stream_id, **kwargs):
+            raise RuntimeError("adapter exploded")
+
+    p.config.how.source = "bili"
+    saved_send = ctx.send
+    ctx.send = BoomForwardSend()
+    try:
+        r20 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g20", **qq_kwargs)
+        check("G20 forward 异常明确失败（success=False + error，不冒充成功）",
+              r20.get("success") is False and "adapter exploded" in str(r20.get("error", "")),
+              f"success={r20.get('success')} err={str(r20.get('error'))[:50]}")
+    finally:
+        ctx.send = saved_send
+
+    # G21 权限拒绝 → 零猫猫球 I/O（连清单都不读、不发任何抓取）
+    bili_calls.clear()
+    p.config.access_control.mode = "whitelist"
+    p.config.access_control.whitelist = ["g_allowed"]
+    try:
+        r21 = await p.handle_how(query="艾蕾攻略", group_id="g_denied", stream_id="stream_g21", **qq_kwargs)
+        check("G21 权限拒绝零猫猫球 I/O",
+              "允许范围" in str(r21.get("content", "")) and bili_calls == [],
+              f"calls={bili_calls}")
+    finally:
+        p.config.access_control.mode = "off"
+
+    # G22 all 模式下 GameKee 结果不因猫猫球异常而丢（两源独立收集）
+    p.config.how.source = "all"
+    saved_fetch = plug.bili_fetch_guide_images
+
+    def boom_bili(opus_id, cache_root, proxy_url=None):
+        raise bgmod.BiliGuideError("bili hard down")
+
+    plug.bili_fetch_guide_images = boom_bili
+    try:
+        n_before = len(send.forwarded)
+        r22 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g22", **qq_kwargs)
+        g22_text = _node_text_of(send.forwarded[n_before][1])
+        check("G22 猫猫球异常时 GameKee 结果照发并标注失败侧",
+              "GameKee" in g22_text and "猫猫球源不可用" in g22_text,
+              g22_text[:70])
+    finally:
+        plug.bili_fetch_guide_images = saved_fetch
+    p.config.how.source = "gamekee"
+
+    # 复位：恢复 gamekee 源
+    p.config.how.source = "gamekee"
+
 
 
 def _node_text_of(nodes) -> str:
@@ -593,9 +1337,12 @@ async def run_nonblocking() -> None:
             raise plug.GameKeeError("download hard down")
 
         plug.gamekee_download_image = raise_download
+        n_sent = len(ctx.send.sent)
         r2 = await asyncio.wait_for(
             p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_i2", session_id="sess_i"), 15)
-        check("I2 下载异常干净传播（提示+不挂起）", "下载失败" in str(r2.get("content", "")))
+        check("I2 下载异常干净传播（用户可见提示+不挂起）",
+              len(ctx.send.sent) == n_sent + 1 and "图片" in ctx.send.sent[-1][1],
+              str(r2.get("content", ""))[:60])
     finally:
         await p.on_unload()
 
@@ -648,6 +1395,20 @@ def run_tool_query_desc() -> None:
         plug.StellaSoraPlugin.handle_how, attr, None)) is not None else {}
     check("J4 how.visibility=visible 元数据声明",
           str(how_meta.get("visibility", "")).lower() == "visible", f"metadata={how_meta}")
+
+    # J5 描述覆盖攻略来源（不再只署名 GameKee）
+    check("J5 how.description 覆盖两源（GameKee + 猫猫球）",
+          "GameKee" in how_desc and "猫猫球" in how_desc, how_desc[:80])
+
+    # J6 返回协议：成功发送 → success=True + stop_after_execution=True；
+    # 真实失败 → success=False + error（宿主据此把本轮记为失败）
+    import inspect
+
+    src_text = inspect.getsource(plug.StellaSoraPlugin._send_guides)
+    check("J6 发送层返回协议（成功带 stop_after_execution，失败带 success=False+error）",
+          '"success": True' in src_text and '"stop_after_execution": True' in src_text
+          and '"success": False' in src_text and '"error"' in src_text,
+          "协议字段缺失")
     check("J5 how.query 描述必填前置（可引导非空调用）",
           "必填" in desc and "非空" in desc, desc)
 
@@ -805,6 +1566,140 @@ async def run_manual_update() -> None:
         plug.refresh_board_for_update = orig_refresh
         plug.gamekee_build_index = orig_build
 
+    # ===== K26+ 攻略来源门控（1.5.1：bili 单源不产生 GameKee 自动流量）=====
+    # K26 bili 模式下 on_load 不创建 P2 任务
+    p.config.how.source = "bili"
+    await p.on_unload()
+    p2, ctx2 = make_plugin()
+    p2.config.how.source = "bili"
+    await p2.on_load()
+    check("K26 bili 模式 on_load 不创建 P2 后台任务",
+          p2._gamekee_probe_task is None, f"task={p2._gamekee_probe_task}")
+
+    # K27 bili 模式下 /st_update 仍显式探查（不扫 B 站、不清 B 站缓存），结束后无 P2 任务
+    plug.gamekee_build_index = fake_index2
+    plug.refresh_board_for_update = fake_refresh
+    try:
+        n_sent = len(ctx2.send.sent)
+        ok27, _msg27, _code27 = await p2.handle_update(
+            stream_id="stream_k27", group_id="g1", platform="qq")
+        await asyncio.wait_for(p2._update_task, 30)
+        msgs27 = [t[1] for t in ctx2.send.sent[n_sent:] if "数据更新完成" in t[1]]
+        check("K27 bili 模式 /st_update 仍探查 GameKee 并报告",
+              ok27 is True and len(msgs27) == 1 and "攻略源：" in msgs27[0],
+              msgs27[0][:80] if msgs27 else "no msg")
+        check("K27b bili 模式 /st_update 结束后不重建 P2 任务（无悄悄恢复后台流量）",
+              p2._gamekee_probe_task is None, f"task={p2._gamekee_probe_task}")
+    finally:
+        plug.gamekee_build_index = orig_build
+        plug.refresh_board_for_update = orig_refresh
+
+    # K28 热切换 bili → gamekee：on_config_update 重建 P2 任务
+    # 宿主顺序（runner_main._handle_config_updated）：先 _apply_plugin_config 更新
+    # 实例配置，再调 on_config_update——测试须复现这一步，否则插件读到的还是旧配置。
+    p2.config.how.source = "gamekee"
+    await p2.on_config_update(scope="self", config_data={}, version="1.4.2")
+    check("K28 配置切回 gamekee 时重建 P2 任务",
+          p2._gamekee_probe_task is not None and not p2._gamekee_probe_task.done(),
+          f"task={p2._gamekee_probe_task}")
+    # K29 热切换 gamekee → bili：取消 P2 任务
+    p2.config.how.source = "bili"
+    await p2.on_config_update(scope="self", config_data={}, version="1.4.2")
+    check("K29 配置切入 bili 时取消 P2 任务", p2._gamekee_probe_task is None,
+          f"task={p2._gamekee_probe_task}")
+    # K30 source 未变化时不重建（幂等：重复同 source 通知不动任务）
+    p2._gamekee_probe_task = None
+    await p2.on_config_update(scope="self", config_data={}, version="1.4.2")
+    check("K30 source 未变化时不重建 P2 任务", p2._gamekee_probe_task is None)
+    await p2.on_unload()
+
+
+    # K31 来源切换不打断在飞共享批次：调度任务是发起者时切到 bili，
+    # 已加入该批次的手动等待者仍拿到同一成功结果（不被取消误伤）
+    p3, ctx3 = make_plugin()
+    await p3.on_load()
+    _stop_bg(p3)
+    release = threading.Event()
+    probe_calls = []
+    # K31 段需要临时替换 probe/build 桩，先存本节原值
+    k31_orig_probe = plug.gamekee_probe_updates
+    k31_orig_build = plug.gamekee_build_index
+
+    def slow_probe(proxy_url=None, timeout=20, known_updates=None):
+        probe_calls.append(1)
+        release.wait(10)  # 卡住批次，模拟在飞
+        return {"pages": {k: {"updated_at": 1, "published_at": 1}
+                          for k in ("water", "fire", "light", "dark", "wind", "earth")},
+                "changed": True}
+
+    plug.gamekee_probe_updates = slow_probe
+    plug.gamekee_build_index = lambda proxy_url=None: {
+        "schema_version": plug.gamekee_index_schema_version(), "built_at": 1,
+        "pages": {}, "characters": [{"name": "艾蕾", "element": "water", "note": "", "image_urls": ["//x/y.png"]}],
+    }
+    p3._gamekee_index = None
+    p3._gamekee_state.clear()
+    try:
+        # 调度任务发起探查（与后台任务同路径）
+        sched = asyncio.create_task(p3._run_gamekee_probe("scheduled"))
+        for _ in range(200):
+            if p3._gamekee_batch is not None:
+                break
+            await asyncio.sleep(0.005)
+        # 第二个等待者加入同一批次
+        waiter = asyncio.create_task(p3._run_gamekee_probe("manual"))
+        for _ in range(200):
+            if waiter is not None and p3._gamekee_batch is not None:
+                break
+            await asyncio.sleep(0.002)
+        # 此刻切换到 bili（取消调度任务）——批次必须继续
+        p3.config.how.source = "bili"
+        await p3.on_config_update(scope="self", config_data={}, version="1.4.2")
+        check("K31 切换后调度任务已取消但批次仍在跑",
+              p3._gamekee_probe_task is None and not p3._gamekee_batch.done(),
+              f"batch_done={p3._gamekee_batch.done() if p3._gamekee_batch else None}")
+        release.set()
+        r_waiter = await asyncio.wait_for(waiter, 20)
+        check("K31b 在飞等待者在切换后仍拿到成功结果（未被取消误伤）",
+              isinstance(r_waiter, dict) and bool(r_waiter.get("characters")),
+              f"result_keys={list(r_waiter)[:4] if isinstance(r_waiter, dict) else r_waiter}")
+        # 调度任务被取消是预期（不报错）
+        try:
+            await asyncio.wait_for(sched, 20)
+        except (asyncio.CancelledError, plug.GameKeeProbeFailure):
+            pass
+        check("K31c 切换后无新探查被发起（bili 单源不排程）",
+              len(probe_calls) == 1, f"probe_calls={len(probe_calls)}")
+    finally:
+        release.set()
+        plug.gamekee_probe_updates = k31_orig_probe
+        plug.gamekee_build_index = k31_orig_build
+        await p3.on_unload()
+    p.config.how.source = "gamekee"
+
+
+    # K32 手动强刷只给榜单传代理（GameKee 探查不受 [leaderboard] proxy 影响）
+    seen_board_proxy = []
+    k32_orig_refresh = plug.refresh_board_for_update
+
+    def rec_refresh(leaderboard_dir, proxy_url=None):
+        seen_board_proxy.append(proxy_url)
+        return {"bb": {"status": "ok", "detail": "x"}, "fe": {"status": "ok", "detail": "y"}}
+
+    plug.refresh_board_for_update = rec_refresh
+    plug.gamekee_build_index = fake_index2
+    try:
+        p.config.leaderboard.proxy = "http://lb-only:8080"
+        n_sent = len(ctx.send.sent)
+        await p.handle_update(stream_id="stream_k32", group_id="g1", platform="qq")
+        await asyncio.wait_for(p._update_task, 30)
+        check("K32 手动强刷把榜单代理传下去",
+              seen_board_proxy and seen_board_proxy[0] == "http://lb-only:8080",
+              str(seen_board_proxy[:1]))
+    finally:
+        plug.refresh_board_for_update = k32_orig_refresh
+        plug.gamekee_build_index = orig_build
+        p.config.leaderboard.proxy = ""
     await p.on_unload()
 
 
@@ -974,22 +1869,22 @@ def run_section_r() -> None:
     # R8e 分数右对齐 tabular-nums（渲染纪律在模板里）
     check("R8e 模板含 tabular-nums 与右对齐", "tabular-nums" in pages[0]["html"] and 'class="score"' in pages[0]["html"])
 
-    # R8f 精确抓取时间：当天 HH:MM、跨天 MM-DD HH:MM（24 小时制），无"刚刚/分钟前"
-    today_ts = time.mktime(time.strptime("2026-11-22 09:07", "%Y-%m-%d %H:%M"))
-    same_day_now = time.mktime(time.strptime("2026-11-22 21:30", "%Y-%m-%d %H:%M"))
-    cross_day_now = time.mktime(time.strptime("2026-11-23 00:40", "%Y-%m-%d %H:%M"))
-    check("R8f 当天抓取写 HH:MM",
-          lbmod.format_fetch_time(today_ts, same_day_now) == "09:07",
-          lbmod.format_fetch_time(today_ts, same_day_now))
-    check("R8g 跨天抓取写 MM-DD HH:MM",
-          lbmod.format_fetch_time(today_ts, cross_day_now) == "11-22 09:07",
-          lbmod.format_fetch_time(today_ts, cross_day_now))
-    pages_t = lbrender.build_board_pages("bb", "bb13", cn_big, "09:07")
-    check("R8h 榜单页 meta 用精确时间且不含相对时间词",
-          "更新于 09:07" in pages_t[0]["html"]
+    # R8f 抓取时间始终带日期（MM-DD HH:MM，24 小时制），无"刚刚/分钟前"。
+    # 两个固定时刻：同日/跨午夜都写全，日期是常显信息而非"跨天才出现"。
+    ts_a = time.mktime(time.strptime("2026-11-22 09:07", "%Y-%m-%d %H:%M"))
+    ts_b = time.mktime(time.strptime("2026-11-21 23:59", "%Y-%m-%d %H:%M"))
+    check("R8f 抓取时刻写 MM-DD HH:MM（09:07）",
+          lbmod.format_fetch_time(ts_a) == "11-22 09:07",
+          lbmod.format_fetch_time(ts_a))
+    check("R8g 跨午夜抓取同样带日期（23:59）",
+          lbmod.format_fetch_time(ts_b) == "11-21 23:59",
+          lbmod.format_fetch_time(ts_b))
+    pages_t = lbrender.build_board_pages("bb", "bb13", cn_big, "11-22 09:07")
+    check("R8h 榜单页 meta 用带日期时间且不含相对时间词",
+          "更新于 11-22 09:07" in pages_t[0]["html"]
           and "刚刚" not in pages_t[0]["html"] and "分钟前" not in pages_t[0]["html"])
     # 同数据 + 同时间戳 → HTML 完全一致（渲染复用的前提）
-    pages_t2 = lbrender.build_board_pages("bb", "bb13", cn_big, "09:07")
+    pages_t2 = lbrender.build_board_pages("bb", "bb13", cn_big, "11-22 09:07")
     check("R8i 同数据同时间戳 HTML 位级一致（渲染可复用）", pages_t[0]["html"] == pages_t2[0]["html"])
 
     # R8j 数据指纹：同数据同指纹；分数/人数变化即变
@@ -1002,6 +1897,92 @@ def run_section_r() -> None:
     check("R8j 数据指纹稳定且对分数/总人数敏感",
           fp1 == fp2 and fp1 != lbmod.board_fingerprint(cn_mut) and fp1 != lbmod.board_fingerprint(cn_mut2),
           f"{fp1[:8]} vs {lbmod.board_fingerprint(cn_mut)[:8]}")
+
+    # R9 榜单代理：空串强制直连（即使环境变量有代理），显式值贯通到三个 fetch
+    orig_build_opener = ncmod.build_opener
+    seen_openers = []
+
+    def spy_opener(proxy_url):
+        seen_openers.append(proxy_url)
+        return orig_build_opener(None)  # 真实 opener，但代理参数只记录不生效
+
+    proxy_calls = {"season": [], "meta": [], "board": []}
+    orig_season_p, orig_meta_p, orig_board_p = (
+        lbmod.fetch_leaderboard_season, lbmod.fetch_leaderboard_meta, lbmod.fetch_leaderboard_board)
+
+    def rec_season(d, proxy_url=None, force_update=False):
+        proxy_calls["season"].append(proxy_url)
+        return {"BB_SEASON": "bb13", "FE_SEASON": "fe8"}
+
+    def rec_meta(d, proxy_url=None, force_update=False):
+        proxy_calls["meta"].append(proxy_url)
+        return {"bb13": {}}
+
+    def rec_board(d, sid, proxy_url=None, force_update=False):
+        proxy_calls["board"].append(proxy_url)
+        return ({"regions": {"cn": {"total": 1, "top": [{"rank": 1, "id": "1", "name": "x", "score": 1}]}}}, "ok")
+
+    try:
+        lbmod.fetch_leaderboard_season = rec_season
+        lbmod.fetch_leaderboard_meta = rec_meta
+        lbmod.fetch_leaderboard_board = rec_board
+        ncmod.build_opener = spy_opener
+
+        # 环境变量有代理时，空串仍直连（build_opener 收到空串，内部不读环境）
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9999"
+        try:
+            seen_openers.clear()
+            # 这里测 build_opener 自身的代理语义，必须用真实实现（ncmod.build_opener
+            # 已被上面的 spy 换掉，spy 会把 None 转给真实函数走环境链）
+            op = orig_build_opener("")
+            ph = next((h for h in op.handlers if type(h).__name__ == "ProxyHandler"), None)
+            check("R9 空串代理不读环境变量（无 http/https 代理=真直连）",
+                  ph is not None and not ph.proxies.get("http") and not ph.proxies.get("https"),
+                  f"proxies={ph.proxies if ph else 'NO HANDLER'}")
+            # None 仍走环境变量链（GameKee/B 站语义不变）
+            op_none = orig_build_opener(None)
+            ph_none = next(h for h in op_none.handlers if type(h).__name__ == "ProxyHandler")
+            check("R9b None 仍走环境变量链（GameKee/B 站行为不变）",
+                  ph_none.proxies.get("https") == "http://127.0.0.1:9999",
+                  f"proxies={ph_none.proxies}")
+        finally:
+            os.environ.pop("HTTPS_PROXY", None)
+
+        # 显式代理贯通 season/meta/board
+        proxy_calls = {"season": [], "meta": [], "board": []}
+        lbmod.refresh_board_for_update(lb_dir, proxy_url="http://explicit:8080")
+        check("R9c 显式代理贯通 season+board",
+              proxy_calls["season"] == ["http://explicit:8080"]
+              and proxy_calls["board"] == ["http://explicit:8080", "http://explicit:8080"],
+              str(proxy_calls))
+
+        # season 缺 BB 指针时会降级查 meta——两条路径都要贯通显式代理
+        proxy_calls = {"season": [], "meta": [], "board": []}
+
+        def rec_season_nobb(d, proxy_url=None, force_update=False):
+            proxy_calls["season"].append(proxy_url)
+            return {"FE_SEASON": "fe8"}
+
+        lbmod.fetch_leaderboard_season = rec_season_nobb
+        lbmod.resolve_current_board("bb", lb_dir, proxy_url="http://explicit:8080")
+        check("R9d 显式代理贯通 season/meta（指针缺失降级路径）",
+              proxy_calls["season"] == ["http://explicit:8080"]
+              and proxy_calls["meta"] == ["http://explicit:8080"],
+              str(proxy_calls))
+        lbmod.fetch_leaderboard_season = rec_season
+
+        # 空串同样贯通（不被预解析成 None）
+        proxy_calls = {"season": [], "meta": [], "board": []}
+        lbmod.refresh_board_for_update(lb_dir, proxy_url="")
+        check("R9e 空串贯通不预解析（原样传下去）",
+              proxy_calls["season"] == [""] and proxy_calls["board"] == ["", ""],
+              str(proxy_calls))
+    finally:
+        lbmod.fetch_leaderboard_season = orig_season_p
+        lbmod.fetch_leaderboard_meta = orig_meta_p
+        lbmod.fetch_leaderboard_board = orig_board_p
+        ncmod.build_opener = orig_build_opener
+
 
 
 async def run_section_s() -> None:
@@ -1182,6 +2163,50 @@ async def run_section_s() -> None:
         res_nf2 = await p.handle_lb_fe(stream_id="stream_s8", group_id="id_ok", platform="qq")
         check("S12 关闭开关时未开榜 notice 不变",
               res_nf2[0] is True and len(ctx.send.sent) == n_sent + 1 and "当期未开榜" in ctx.send.sent[-1][1])
+
+        # S13 配置里的榜单代理每次调用现读（保存后下一次拉取即生效）
+        # 先恢复图片榜 + 可用渲染桩（S5 的失败桩、S11 的 render_images=False 都好还挂着）
+        p.config.leaderboard.render_images = True
+        ctx.render = render
+        seen_proxy = []
+        orig_resolve2 = plug.resolve_current_board
+
+        def rec_resolve(mode, lb_dir=None, proxy_url=None):
+            seen_proxy.append(proxy_url)
+            return ("bb", "bb13")
+
+        plug.resolve_current_board = rec_resolve
+        try:
+            p.config.leaderboard.proxy = "http://cfg-a:8080"
+            await p.handle_lb_bb(stream_id="stream_s13a", group_id="id_ok", user_id="u1", platform="qq")
+            p.config.leaderboard.proxy = "http://cfg-b:9090"
+            await p.handle_lb_bb(stream_id="stream_s13b", group_id="id_ok", user_id="u1", platform="qq")
+            check("S13 榜单代理每次调用现读（配置变更后下一次生效）",
+                  seen_proxy[:2] == ["http://cfg-a:8080", "http://cfg-b:9090"], str(seen_proxy[:2]))
+            # 留空 → 空串传下去（不是 None，避免落回环境变量链）
+            p.config.leaderboard.proxy = ""
+            await p.handle_lb_bb(stream_id="stream_s13c", group_id="id_ok", user_id="u1", platform="qq")
+            check("S13b 留空时传空串（强制直连语义）", seen_proxy[2] == "", repr(seen_proxy[2]))
+        finally:
+            plug.resolve_current_board = orig_resolve2
+            p.config.leaderboard.proxy = ""
+
+        # S14 跨午夜仍复用：同一份缓存（age 不变 → 时间文本不变）不因日期翻转而重渲染
+        # 用一个此前的用例没用过的时间文本，确保首轮是"未命中"而非撞上旧缓存
+        p._lb_render_cache = None
+        plug.resolve_current_board = orig_resolve
+        plug.load_board_for_render = lambda prefix, sid, ttl, lb_dir, proxy_url=None: (
+            slim["regions"]["cn"], "【联合讨伐 S13】", 0.0)
+        calls_before = len(render.calls)
+        time_text[0] = "11-21 23:59"
+        await p.handle_lb_bb(stream_id="stream_s14a", group_id="id_ok", user_id="u1", platform="qq")
+        calls_after_first = len(render.calls)
+        # 抓取时刻未变（缓存未失效）→ 时间文本照旧 → 命中复用
+        await p.handle_lb_bb(stream_id="stream_s14b", group_id="id_ok", user_id="u1", platform="qq")
+        check("S14 跨午夜仍复用（抓取时刻未变则不重渲染）",
+              calls_after_first == calls_before + 1 and len(render.calls) == calls_after_first,
+              f"first={calls_after_first - calls_before} second={len(render.calls) - calls_after_first}")
+        time_text[0] = "09:00"  # 复原给后续用例
         p.config.leaderboard.render_images = True
     finally:
         plug.resolve_current_board = orig_resolve
@@ -1735,10 +2760,11 @@ async def run_section_v() -> None:
             check("V11 非白名单域名拒绝", "白名单" in str(exc), str(exc)[:60])
 
         # V12 魔数校验：HTML 拦截页拒绝（裸 GET 567 的产物形态）
+        # 桩打在 net_common.build_opener 上（公共 HTTP 体内部用它建 opener）
         html_resp = _FakeHTTPResponse(b"<!doctype html><html>blocked</html>", code=200)
         fake_opener = _FakeOpener(lambda req, timeout=10: html_resp)
-        orig_opener = gkmod._build_opener
-        gkmod._build_opener = lambda proxy: fake_opener
+        orig_opener = ncmod.build_opener
+        ncmod.build_opener = lambda proxy: fake_opener
         try:
             try:
                 gkmod.download_image("//cdnimg-v2.gamekee.com/a/x.png", cache)
@@ -1746,24 +2772,26 @@ async def run_section_v() -> None:
             except gkmod.GameKeeError as exc:
                 check("V12 HTML 拦截页拒绝", "非图片" in str(exc), str(exc)[:60])
         finally:
-            gkmod._build_opener = orig_opener
+            ncmod.build_opener = orig_opener
 
         # V13 缓存写入与命中（mock 网络返回合法 webp）
         webp_bytes = b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 8
         webp_resp = _FakeHTTPResponse(webp_bytes, code=200)
-        gkmod._build_opener = lambda proxy: _FakeOpener(lambda req, timeout=10: webp_resp)
+        ncmod.build_opener = lambda proxy: _FakeOpener(lambda req, timeout=10: webp_resp)
         try:
             data1 = gkmod.download_image("//cdnimg-v2.gamekee.com/a/ok.png", cache, prefer_webp=True)
             data2 = gkmod.download_image("//cdnimg-v2.gamekee.com/a/ok.png", cache, prefer_webp=True)
             check("V13 图片缓存命中（字节一致）",
                   data1 == webp_bytes and data2 == webp_bytes and len(list(cache.iterdir())) == 1)
         finally:
-            gkmod._build_opener = orig_opener
+            ncmod.build_opener = orig_opener
 
 
 # ===== 汇总入口 =====
 
 SECTIONS = {
+    "A": ("猫猫球扫描器", run_section_a),
+    "B": ("猫猫球攻略源", run_section_b),
     "G": ("how 一图流端到端", run_direct_send),
     "I": ("非阻塞探针", run_nonblocking),
     "J": ("工具参数描述", run_tool_query_desc),
@@ -1777,7 +2805,7 @@ SECTIONS = {
 
 # 执行顺序：B 最先（json.load 计数依赖首次触达），异步节统一在事件循环中跑
 # （原 C 并入 D、原 Q 挂 N 节末尾）
-ORDER = ["G", "I", "J", "K", "R", "S", "T", "U", "V"]
+ORDER = ["A", "B", "G", "I", "J", "K", "R", "S", "T", "U", "V"]
 ASYNC_SECTIONS = {"G", "I", "K", "S", "T", "V"}
 
 

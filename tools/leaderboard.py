@@ -45,18 +45,15 @@ def format_age(seconds: float) -> str:
     return f"{int(seconds // 3600)} 小时前"
 
 
-def format_fetch_time(fetched_at: float, now: Optional[float] = None) -> str:
-    """抓取时刻 → 精确时间文本（图片榜 meta 用；当天只写 HH:MM，24 小时制）。
+def format_fetch_time(fetched_at: float) -> str:
+    """抓取时刻 → 时间文本（图片榜 meta 用，`MM-DD HH:MM`，24 小时制）。
 
     相对时间每分钟都在变：同一份缓存数据在 TTL 内会渲染出逐分钟不同的图，既
-    浪费渲染也让"同数据同图"不成立。精确到分钟的时间戳与展示粒度一致——数据
-    不变则该文本不变，渲染输入随之完全一致。
+    浪费渲染也让"同数据同图"不成立。只显示到分钟则数据不变文本不变，渲染输入
+    随之完全一致。始终带日期：跨午夜后仍能看出数据是哪天抓的（当天折叠成
+    HH:MM 会让昨天的榜单看起来像刚抓的）。
     """
-    stamp = time.localtime(fetched_at)
-    current = time.localtime(now if now is not None else time.time())
-    if (stamp.tm_year, stamp.tm_yday) == (current.tm_year, current.tm_yday):
-        return time.strftime("%H:%M", stamp)
-    return time.strftime("%m-%d %H:%M", stamp)
+    return time.strftime("%m-%d %H:%M", time.localtime(fetched_at))
 
 
 def board_fingerprint(cn_data: Dict[str, Any]) -> str:
@@ -132,14 +129,15 @@ def extract_board_top(raw: Any) -> Optional[dict]:
 
 
 def fetch_json_from_url(url: str, proxy_url: Optional[str] = None, retries: int = 1) -> Optional[dict]:
-    """抓取 JSON 数据并解析为 dict（带 1 次重试；语义同旧 fetcher）。
+    """抓取 JSON 数据并解析为 dict（带 1 次重试）。
 
-    proxy_url 语义与 net_common.resolve_proxy 一致：None=按环境/默认代理，
-    ""=强制直连。
+    proxy_url 直接透传给 `build_opener`（唯一解析点）：""=强制直连且不读环境变量，
+    非空=用该代理，None=环境变量链。这里**不做预解析**——空串先被 resolve 成 None
+    再交给 build_opener 会被解释成"读环境变量"，"留空强制直连"就失效了。
     """
     from net_common import build_opener as _build_opener
 
-    opener = _build_opener(_resolve_proxy_arg(proxy_url))
+    opener = _build_opener(proxy_url)
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -153,13 +151,6 @@ def fetch_json_from_url(url: str, proxy_url: Optional[str] = None, retries: int 
             if attempt < retries:
                 time.sleep(1.5)
     return None
-
-
-def _resolve_proxy_arg(proxy_url: Optional[str]):
-    """代理参数归一：显式代理串直用；None 走 net_common 默认解析链。"""
-    from net_common import resolve_proxy as _resolve_proxy
-
-    return _resolve_proxy(proxy_url)
 
 
 def read_persisted_dataset(file_path: Path, name: str) -> Optional[dict]:
@@ -292,7 +283,7 @@ def fetch_leaderboard_board(
     try:
         from net_common import build_opener as _build_opener
 
-        opener = _build_opener(_resolve_proxy_arg(proxy_url))
+        opener = _build_opener(proxy_url)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with opener.open(req, timeout=60) as response:
             if response.getcode() != 200:

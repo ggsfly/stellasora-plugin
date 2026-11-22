@@ -12,6 +12,7 @@ GameKee 中文源（一图流攻略原图直发）+ ssleaderboard 排行榜图�
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 import asyncio
@@ -74,12 +75,40 @@ from leaderboard import (  # noqa: E402
     resolve_current_board,
 )
 from leaderboard_render import build_board_pages, render_board_pages
+from bili_guides import (
+    BiliGuideError,
+    fetch_guide_images as bili_fetch_guide_images,
+    load_manifest as bili_load_manifest,
+    match_guides as bili_match_guides,
+)
 from access import check_permission  # noqa: E402
 
 logger = logging.getLogger("stellasora.plugin")
 
 class GameKeeProbeFailure(Exception):
     """GameKee 探查/重建失败（网络/结构漂移/代际过期），由调用方区分旧快照降级或向上暴露。"""
+
+
+@dataclass
+class GuideResult:
+    """攻略源收集结果（两源对称；收集不发送，发送由公共体统一做）。
+
+    - nodes：待发送的合并转发节点（已含图段/文本段）；
+    - image_count：实际图片张数（摘要用）；
+    - code_pages：附带的队伍码页数（仅 GameKee 源）；
+    - miss：该源确认未收录（区别于失败）；
+    - failure：该源出错（文案含原因，用于 all 模式标注与单源提示）。
+    """
+
+    nodes: list[dict] = field(default_factory=list)
+    image_count: int = 0
+    code_pages: int = 0
+    miss: bool = False
+    failure: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.nodes)
 
 
 
@@ -95,7 +124,11 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.4.1", description="配置版本（1.4.1=新增 [leaderboard] render_images 开关）")
+    config_version: str = Field(
+        default="1.4.2",
+        description="配置版本（1.4.2=新增 [how] 攻略来源开关与 [leaderboard] proxy；"
+        "1.4.1=新增 [leaderboard] render_images 开关）",
+    )
 
 
 class AccessControlConfig(PluginConfigBase):
@@ -136,6 +169,10 @@ class LeaderboardConfig(PluginConfigBase):
         description="/st_bb・/st_fe 发送形态：开启=渲染图片榜单（合并转发）；"
         "关闭=纯文字榜单（1.4.x 旧版合并转发格式：每 25 名一节点）",
     )
+    proxy: str = Field(
+        default="",
+        description="仅用于 ssleaderboard 上游拉取；留空强制直连。GameKee 和 B 站不受此设置影响。",
+    )
 
 
 class GameKeeConfig(PluginConfigBase):
@@ -154,6 +191,20 @@ class GameKeeConfig(PluginConfigBase):
     prefer_webp: bool = Field(
         default=True,
         description="攻略图片使用 CDN webp 转换（同尺寸约 1/9 体积）；关闭发原图 PNG（约 2MB/张，发送慢）",
+    )
+
+
+class HowConfig(PluginConfigBase):
+    """攻略查询（stellasora_how）配置：攻略来源选择。"""
+
+    __ui_label__ = "攻略查询"
+    __ui_icon__ = "search"
+    __ui_order__ = 5
+
+    source: Literal["gamekee", "bili", "all"] = Field(
+        default="gamekee",
+        description="攻略来源：gamekee=GameKee 中文 wiki（含队伍码）；"
+        "bili=猫猫球 B 站一图流（铃儿的猫猫球）；all=两边都查，发可用源",
     )
 
 
@@ -195,6 +246,7 @@ class StellaSoraConfig(PluginConfigBase):
     leaderboard: LeaderboardConfig = Field(default_factory=LeaderboardConfig)
     gamekee: GameKeeConfig = Field(default_factory=GameKeeConfig)
     overrides: OverridesConfig = Field(default_factory=OverridesConfig)
+    how: HowConfig = Field(default_factory=HowConfig)
 
 
 class StellaSoraPlugin(MaiBotPlugin):
@@ -223,6 +275,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._gamekee_state: Dict[str, Any] = {}  # state.json 的内存镜像
         self._gamekee_index: Optional[Dict[str, Any]] = None  # 已发布索引（整批成功才更新）
         self._gamekee_batch: Optional[asyncio.Future] = None  # single-flight 在飞批次（并发入口共享）
+        self._gamekee_executor_task: Optional[asyncio.Task] = None  # 批次执行体（独立于入口，取消入口不中断它）
         self._gamekee_probe_task: asyncio.Task[None] | None = None  # 后台到期探查任务
         self._gamekee_probe_waiter: asyncio.Future | None = None  # 启动延迟可被手动更新取消
         self._gamekee_waiter_phase: str = ""  # waiter 阶段标记（boot=可接管 / normal=保持排程）
@@ -231,6 +284,9 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 榜单渲染复用：key=(sid, 数据指纹) → 分页 PNG base64 列表。精确时间戳让
         # 同数据渲染出同图，TTL 内重复 /st_bb 直接复用上次结果。只留最近一次。
         self._lb_render_cache: Optional[tuple[str, list[str]]] = None
+        # 上一次生效的攻略来源：宿主先更新配置再调 on_config_update，
+        # 旧值只能靠实例自己记，用于判断"是否需要启停 P2 任务"。
+        self._last_how_source: str = ""
 
     # ===== 生命周期 =====
 
@@ -251,7 +307,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("应用 overrides 别名配置失败: %s", exc)
 
     async def on_load(self) -> None:
-        """插件加载：配置数据/缓存目录，启动 GameKee 探查后台任务。
+        """插件加载：配置数据/缓存目录，按攻略来源决定是否启动 GameKee 后台探查。
 
         持久数据（GameKee state/index、榜单缓存）写宿主分配的 ctx.paths.data_dir，
         网络缓存与图片缓存写 ctx.paths.runtime_dir（非持久，可随时重建）。
@@ -263,8 +319,26 @@ class StellaSoraPlugin(MaiBotPlugin):
         #（延迟避开宿主 reload 等待窗口；延迟期间收到手动 /st_update 即取消）
         self._load_gamekee_state()
         self._load_gamekee_index_snapshot()
-        self._gamekee_probe_task = asyncio.create_task(self._schedule_gamekee_probe())
+        self._last_how_source = self.config.how.source
+        self._ensure_probe_task_if_enabled()
         self.ctx.logger.info("星塔旅人插件已加载，数据目录: %s", self._data_dir)
+
+    def _gamekee_enabled(self) -> bool:
+        """当前攻略来源是否需要 GameKee（bili 单源时后台流量应当为零）。"""
+        return self.config.how.source != "bili"
+
+    def _ensure_probe_task_if_enabled(self) -> None:
+        """按当前来源启用 P2 后台探查任务（唯一的"创建点"入口）。
+
+        只有 bili 单源才跳过：GameKee 自动流量（24h 探查 + 60s 启动探查）在
+        纯猫猫球模式下没有意义。/st_update 手动探查不受此门控（用户显式操作）。
+        """
+        if not self._gamekee_enabled():
+            self.ctx.logger.info("攻略来源为猫猫球（bili），不启动 GameKee 后台探查")
+            return
+        if self._gamekee_probe_task is not None and not self._gamekee_probe_task.done():
+            return  # 已有在飞任务，不重复创建
+        self._gamekee_probe_task = asyncio.create_task(self._schedule_gamekee_probe())
 
     async def on_unload(self) -> None:
         """插件卸载：取消全部后台任务并清空运行时缓存引用（文件留给磁盘回收）。
@@ -280,6 +354,12 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._gamekee_probe_task.cancel()
             await asyncio.gather(self._gamekee_probe_task, return_exceptions=True)
         self._gamekee_probe_task = None
+        # 批次执行体独立于入口任务：卸载时等它收敛（代际已自增，其结果不会发布）
+        executor = self._gamekee_executor_task
+        if executor is not None and not executor.done():
+            await asyncio.gather(executor, return_exceptions=True)
+        self._gamekee_executor_task = None
+        self._gamekee_batch = None
         if self._update_task and not self._update_task.done():
             self._update_task.cancel()
             await asyncio.gather(self._update_task, return_exceptions=True)
@@ -290,11 +370,38 @@ class StellaSoraPlugin(MaiBotPlugin):
     async def on_config_update(
         self, scope: str, config_data: dict, version: str
     ) -> None:
-        """配置热重载：黑白名单与 GameKee 参数即时生效，无需重启。"""
+        """配置热重载：黑白名单/GameKee 参数即时生效；攻略来源变化时管理调度任务。
+
+        宿主保存配置 → `plugin.config_updated` → 本方法被调；runner 侧
+        `_apply_plugin_config` **先于**本方法更新实例配置，故进来时
+        `self.config.how.source` 已是新值，"旧值"取自 `_last_how_source`。
+        插件各处 `self.config.x` 都是调用时现读，唯后台调度任务需要显式管理。
+
+        切换只动**调度任务**，不打断已发出的探查请求：调度任务里的探查调用经
+        `_run_probe_detached` shield 包裹，取消调度不会取消共享批次，已加入批次
+        的等待者（如并发的手动更新）照常拿到同一结果。to_thread 里已发出的同步
+        请求无法真正中止，这一点由单飞终态纪律自愈。
+        """
         self.ctx.logger.info(
             "配置已更新: scope=%s version=%s（黑白名单与自定义覆盖即时生效）", scope, version
         )
         self._apply_overrides_config()
+
+        source = self.config.how.source
+        previous_source = self._last_how_source
+        if source == previous_source:
+            return
+        self._last_how_source = source
+        self.ctx.logger.info("攻略来源已切换为 %s（原 %s）", source, previous_source)
+        if source == "bili":
+            # 切入猫猫球单源：停调度不再排新的探查；在飞批次继续跑完（见方法注释）
+            task = self._gamekee_probe_task
+            if task is not None and not task.done():
+                task.cancel()
+            self._gamekee_probe_task = None
+        else:
+            # 切回 gamekee/all：重建调度任务
+            self._ensure_probe_task_if_enabled()
 
 
     def _lb_data_dir_ready(self) -> Path:
@@ -587,19 +694,20 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("GameKee 状态写入失败: %s", exc)
 
     async def _run_gamekee_probe(self, trigger: str) -> Dict[str, Any]:
-        """执行一次 GameKee 探查/重建（三入口统一体，P2 全纪律，single-flight）。
+        """执行一次 GameKee 探查/重建（三入口统一体，single-flight）。
 
         - 合并请求（single-flight）：并发入口共享同一 asyncio.Future——首个入口
           创建批次并真实探查，其余入口 await 同一 future 拿同一结果（成功复用索引、
           失败复用异常），不重复发起网络请求；
-        - batch 终态统一由本方法负责：成功 set_result、异常 set_exception、
-          创建后未及执行被取消时兜底 set_exception——等待者永不挂起。
+        - **批次执行体独立成 task**：任何入口（含后台调度任务）被取消时，批次
+          继续跑到终态，其他等待者照常拿到同一结果——取消一个入口不等于取消
+          已发出的网络请求（to_thread 里的同步请求本来也停不下来）；
+        - batch 终态统一负责：成功 set_result、异常 set_exception——等待者永不挂起。
         """
         while True:
             batch = self._gamekee_batch
             if batch is not None:
-                # 已有在飞批次：shield 包裹——等待者被取消不影响共享批次
-                #（batch 继续由首批 executor 驱动到终态），其他等待者不受波及。
+                # 已有在飞批次：shield 包裹——本入口被取消不影响共享批次。
                 # shield 内层异常被本协程接收时同步消费，防悬挂告警。
                 try:
                     return await asyncio.shield(batch)
@@ -614,27 +722,41 @@ class StellaSoraPlugin(MaiBotPlugin):
             loop = asyncio.get_running_loop()
             batch: asyncio.Future = loop.create_future()
             self._gamekee_batch = batch
+            # 执行体独立 task：入口协程被取消（卸载/来源切换）时它继续跑完，
+            # 等待者不会拿到"被取消"而丢失已完成的抓取结果
+            executor = asyncio.create_task(self._gamekee_probe_executor(trigger, batch))
+            self._gamekee_executor_task = executor
             try:
-                result = await self._probe_batch_execute(trigger)
-                if not batch.done():
-                    batch.set_result(result)
-                return result
+                return await asyncio.shield(batch)
             except asyncio.CancelledError:
-                if not batch.done():
-                    batch.set_exception(GameKeeProbeFailure("探查被取消"))
-                    batch.exception()  # 创建者消费，防悬挂告警
-                raise
-            except BaseException as exc:
-                if not batch.done():
-                    failure = exc if isinstance(exc, GameKeeProbeFailure) else GameKeeProbeFailure(str(exc))
-                    batch.set_exception(failure)
-                    # 无并发等待者时 batch 异常无人取回会触发 asyncio 告警——
-                    # 创建者自己消费一次（异常本体已从 executor 抛出并被捕获传播）
-                    batch.exception()
+                # 本入口取消：批次仍在跑，保持 _gamekee_batch 供其他等待者加入
                 raise
             finally:
-                if self._gamekee_batch is batch:
+                if self._gamekee_batch is batch and batch.done():
                     self._gamekee_batch = None
+                if executor.done():
+                    if self._gamekee_executor_task is executor:
+                        self._gamekee_executor_task = None
+
+    async def _gamekee_probe_executor(self, trigger: str, batch: asyncio.Future) -> None:
+        """批次执行体：跑真实探查并把终态写进 batch（独立 task，不被入口取消波及）。"""
+        try:
+            result = await self._probe_batch_execute(trigger)
+        except asyncio.CancelledError:
+            if not batch.done():
+                batch.set_exception(GameKeeProbeFailure("探查被取消"))
+                batch.exception()  # 创建者消费，防悬挂告警
+            raise
+        except BaseException as exc:
+            if not batch.done():
+                failure = exc if isinstance(exc, GameKeeProbeFailure) else GameKeeProbeFailure(str(exc))
+                batch.set_exception(failure)
+                batch.exception()  # 无等待者时自行消费，防 asyncio 告警
+            return
+        if not batch.done():
+            batch.set_result(result)
+        if self._gamekee_batch is batch:
+            self._gamekee_batch = None
 
     async def _probe_batch_execute(self, trigger: str) -> Dict[str, Any]:
         """single-flight 批次主体：轻量探查 → 无变化且 schema 最新仅推进时间戳，
@@ -894,7 +1016,8 @@ class StellaSoraPlugin(MaiBotPlugin):
     @Tool(
         "stellasora_how",
         description="查询星塔旅人一图流攻略：返回角色或属性的开局/配队/纹章/秘纹攻略图"
-                    "（GameKee 攻略组授权转载）。'XX攻略/XX怎么玩/风队怎么玩'调用本工具。"
+                    "（GameKee 攻略组或 B站@铃儿的猫猫球，按配置的攻略来源选取，均授权转载）。"
+                    "'XX攻略/XX怎么玩/风队怎么玩'调用本工具。"
                     "角色客观资料（属性/技能/素材）不在本工具范围。",
         parameters=[
             ToolParameterInfo(
@@ -913,11 +1036,14 @@ class StellaSoraPlugin(MaiBotPlugin):
         timeout_ms=_TOOL_RPC_TIMEOUT_MS,
     )
     async def handle_how(self, query: str = "", **kwargs):
-        """一图流攻略查询（1.5.0 GameKee 源）：匹配 → 下载 → 合并转发图片。
+        """一图流攻略查询：按 [how] source 分流到 GameKee / 猫猫球 / 双源。
 
         P3 两层鉴权：执行层在 _denied（黑白名单）之外先核平台——非 QQ 或
         平台反查失败（未知）保守拒绝且不发起任何抓取（新链路每次调用有
         真实网络成本，宁可漏不可错）。
+
+        分流位置在 ensure_gamekee_index **之前**：bili 模式天然零 GameKee
+        流量（连懒刷新都不触发），无需给 P2 懒刷新加闸。
         """
         if not await self._platform_allowed(**kwargs):
             return {"name": "stellasora_how", "content": "该平台暂不支持星塔旅人攻略查询。"}
@@ -932,29 +1058,38 @@ class StellaSoraPlugin(MaiBotPlugin):
                 "仅在参数已补齐时重试，请勿再次发送空参数。"
             )
             return {"name": "stellasora_how", "success": False, "error": error, "content": error}
-        self.ctx.logger.info("how 查询: %s (group=%s user=%s)", query, kwargs.get("group_id", ""), kwargs.get("user_id", ""))
+        self.ctx.logger.info(
+            "how 查询: %s (source=%s group=%s user=%s)",
+            query, self.config.how.source, kwargs.get("group_id", ""), kwargs.get("user_id", ""),
+        )
 
         stream_id = self._resolve_stream_id(kwargs)
         if not stream_id:
             return {"name": "stellasora_how", "content": "缺少发送目标（stream_id）。"}
 
-        # 懒刷新拿索引（P2 入口③：fresh 零探查；stale 先刷新；失败带旧快照/上抛）
+        source = self.config.how.source
+        if source == "bili":
+            return await self._how_bili(query, stream_id)
+        if source == "all":
+            return await self._how_all(query, stream_id)
+        return await self._send_guides(
+            stream_id,
+            [("GameKee", await self._collect_gamekee(query))],
+            miss_text="攻略库里暂时没有该角色/属性的图流攻略",
+        )
+
+    async def _collect_gamekee(self, query: str) -> GuideResult:
+        """GameKee 源收集：匹配 → 下载 → 组节点（含队伍码节点）。不发送。"""
         try:
             index = await self.ensure_gamekee_index()
         except GameKeeProbeFailure as exc:
             self.ctx.logger.error("GameKee 索引不可用: %s", exc)
-            await self.ctx.send.text("攻略源暂时不可用，请稍后再试。", stream_id)
-            return {"name": "stellasora_how", "content": "已向聊天发送'攻略源暂时不可用'提示，请调用 stop 结束本轮。"}
+            return GuideResult(failure=f"GameKee 索引不可用: {str(exc)[:80]}")
 
-        # 匹配（同步轻活，直接执行）
         hits, miss_reason = gamekee_match_guides(index, query, aliases=self._resolve_guide_aliases())
         if not hits:
-            self.ctx.logger.info("how 未命中: query=%s reason=%s", query, miss_reason)
-            await self.ctx.send.text("攻略库里暂时没有该角色/属性的图流攻略，换个说法或换个角色试试～", stream_id)
-            return {
-                "name": "stellasora_how",
-                "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
-            }
+            self.ctx.logger.info("how 未命中(GameKee): query=%s reason=%s", query, miss_reason)
+            return GuideResult(miss=True)
 
         # 下载图片（同步重活进线程池；webp 可配）。多图小节按相册原顺序全发
         # （GameKee 相册 data 数组即展示顺序；旧"末张=完整版长图"假设实测只对
@@ -985,13 +1120,11 @@ class StellaSoraPlugin(MaiBotPlugin):
                 })
         if not images:
             self.ctx.logger.error("how 图片全部下载失败: %s", "; ".join(download_errors))
-            await self.ctx.send.text("攻略图片下载失败，请稍后再试。", stream_id)
-            return {"name": "stellasora_how", "content": "已向聊天发送'图片下载失败'提示，请调用 stop 结束本轮。"}
+            return GuideResult(failure="GameKee 攻略图片全部下载失败")
         if download_errors:
             self.ctx.logger.warning("how 部分图片下载失败（跳过该图）: %s", "; ".join(download_errors))
 
-        # 统一合并转发（用户裁决：单角色/属性泛查都走 forward；单角色=单节点图文混排，
-        # 多角色=每角色一节点；多图小节=节点内多 image 段+1 text 段，备注与来源仅一次）
+        # 单角色=单节点图文混排，多角色=每角色一节点；多图小节=节点内多 image 段
         nodes = []
         sent_total = 0
         for img in images:
@@ -1015,31 +1148,202 @@ class StellaSoraPlugin(MaiBotPlugin):
             note_parts.append("来源：GameKee 星塔旅人 wiki（星塔攻略组）")
             segments.append({"type": "text", "content": "\n".join(note_parts)})
             nodes.append({"nickname": _FORWARD_NICKNAME, "segments": segments})
-        # 队伍码随攻略同发（用户裁决：查攻略即发图+码，不作区分）。码是页级公共
-        # 段，命中角色/属性所在页各附一个文本节点（无码页不附）。
+        # 队伍码是页级公共段：命中角色/属性所在页各附一个文本节点（无码页不附）
         for element in dict.fromkeys(h["element"] for h in hits):
             node = self._team_code_node(index, element)
             if node is not None:
                 nodes.append(node)
+        code_pages = len({h["element"] for h in hits if self._team_code_node(index, h["element"]) is not None})
+        return GuideResult(nodes=nodes, image_count=sent_total, code_pages=code_pages)
+
+    def _bili_manifest(self) -> Dict[str, Any]:
+        """加载内置猫猫球清单（每次调用现读，清单随包发放不会运行时变化）。
+
+        加载失败直接抛 BiliGuideError，由 how 分支转用户可见提示——清单损坏
+        属于分发包问题，静默降级成"未收录"会掩盖故障。
+        """
+        return bili_load_manifest(Path(__file__).resolve().parent)
+
+    def _bili_cache_root(self) -> Path:
+        """猫猫球缓存根目录（runtime_dir/cache/bili_guides，永久缓存）。"""
+        return Path(self.ctx.paths.runtime_dir) / "cache" / "bili_guides"
+
+    async def _collect_bili(self, query: str) -> GuideResult:
+        """猫猫球源收集：匹配 → 抓图（缓存命中零网络）→ 组节点。不发送。
+
+        节点形态：一个 opus（一次相册）一个节点，节点内按原顺序多 image 段，
+        末尾一段文字（标题 + 来源），与 GameKee 源的多图节点一致。
+        """
+        try:
+            manifest = await asyncio.to_thread(self._bili_manifest)
+        except BiliGuideError as exc:
+            self.ctx.logger.error("猫猫球清单加载失败: %s", exc)
+            return GuideResult(failure=f"猫猫球清单加载失败: {str(exc)[:100]}")
+
+        hits, miss_reason = bili_match_guides(
+            manifest, query, aliases=self._resolve_guide_aliases()
+        )
+        if not hits:
+            self.ctx.logger.info("how 未命中(猫猫球): query=%s reason=%s", query, miss_reason)
+            return GuideResult(miss=True)
+
+        cache_root = self._bili_cache_root()
+        nodes: list[dict] = []
+        image_total = 0
+        failures: list[str] = []
+        for guide in hits:
+            opus_id = str(guide["opus_id"])
+            role = str(guide.get("role") or opus_id)
+            try:
+                files = await asyncio.to_thread(bili_fetch_guide_images, opus_id, cache_root)
+                segments: list[dict] = []
+                for path in files:
+                    data = await asyncio.to_thread(path.read_bytes)
+                    segments.append({
+                        "type": "image",
+                        "content": base64.b64encode(data).decode("ascii"),
+                        "filename": f"{role}_bili_p{path.stem}.webp",
+                    })
+            except (BiliGuideError, OSError) as exc:
+                # 单条失败不影响其余条目（与 GameKee 单图失败同纪律）；全部失败时
+                # 由调用方转用户可见提示，不隐式回退其它源。
+                self.ctx.logger.error("猫猫球攻略抓取失败: opus=%s: %s", opus_id, exc)
+                failures.append(f"{role}(opus={opus_id}): {str(exc)[:100]}")
+                continue
+            element_cn = _ELEMENT_CN_LABELS.get(guide.get("element") or "", "")
+            label = f"【{element_cn}】{role}" if element_cn else role
+            segments.append({
+                "type": "text",
+                "content": f"{label} · {guide.get('title') or ''}\n来源：B站@铃儿的猫猫球",
+            })
+            nodes.append({"nickname": _FORWARD_NICKNAME, "segments": segments})
+            image_total += len(files)
+        if not nodes:
+            return GuideResult(
+                failure="猫猫球攻略图片全部抓取失败: " + "; ".join(failures[:3])
+            )
+        if failures:
+            self.ctx.logger.warning("猫猫球部分条目抓取失败（跳过）: %s", "; ".join(failures))
+        return GuideResult(nodes=nodes, image_count=image_total)
+
+    async def _send_guides(
+        self,
+        stream_id: str,
+        results: list[tuple[str, GuideResult]],
+        *,
+        miss_text: str,
+    ) -> dict:
+        """公共发送体：合并各源节点 → forward → 统一处理异常/失败/摘要。
+
+        `results` 为 (源显示名, GuideResult) 列表，顺序即节点顺序。任一源失败
+        不终止其余源（发可用源并标注失败侧）；全无图才发一次提示。
+        真实发送失败返回 success=False + error，让宿主把本轮记为失败。
+        """
+        nodes: list[dict] = []
+        notes: list[str] = []
+        parts: list[str] = []
+        for label, result in results:
+            if result.ok:
+                nodes.extend(result.nodes)
+                detail = f"{result.image_count} 张"
+                if result.code_pages:
+                    detail += f"及 {result.code_pages} 页队伍码"
+                parts.append(f"{label} {detail}")
+            elif result.failure:
+                notes.append(f"{label}源不可用（{str(result.failure)[:60]}）")
+
+        if not nodes:
+            reason = "；".join(notes) if notes else "两个攻略源都没有该角色/属性的收录"
+            body = f"{miss_text}（{reason}）。"
+            try:
+                await self.ctx.send.text(body, stream_id)
+            except Exception as exc:
+                self.ctx.logger.exception("攻略提示发送异常: stream=%s", exc)
+                return {
+                    "name": "stellasora_how",
+                    "success": False,
+                    "error": f"攻略提示发送失败: {exc}",
+                    "content": f"攻略提示发送失败: {exc}",
+                }
+            return {
+                "name": "stellasora_how",
+                "success": True,
+                "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
+                "stop_after_execution": True,
+            }
+
+        if notes:
+            # 只标注失败的那一侧，不冒充"没收录"
+            nodes = nodes + [{
+                "nickname": _FORWARD_NICKNAME,
+                "segments": [{"type": "text", "content": "\n".join(notes)}],
+            }]
         try:
             sent = await self.ctx.send.forward(nodes, stream_id)
-        except Exception:
-            self.ctx.logger.exception("how 合并转发发送异常: stream=%s", stream_id)
-            return {"name": "stellasora_how", "content": "攻略图片发送失败，请调用 stop 结束本轮。"}
+        except Exception as exc:
+            self.ctx.logger.exception("攻略合并转发发送异常: stream=%s", stream_id)
+            return {
+                "name": "stellasora_how",
+                "success": False,
+                "error": f"攻略图片发送失败: {exc}",
+                "content": f"攻略图片发送失败: {exc}",
+            }
         if not sent:
-            self.ctx.logger.error("how 合并转发返回失败: stream=%s", stream_id)
-            return {"name": "stellasora_how", "content": "攻略图片发送失败，请调用 stop 结束本轮。"}
-        code_pages = len({h["element"] for h in hits if self._team_code_node(index, h["element"]) is not None})
-        summary = f"攻略图已直接发送到聊天（{sent_total} 张）"
-        if code_pages:
-            summary += f"及 {code_pages} 页队伍码"
+            self.ctx.logger.error("攻略合并转发返回失败: stream=%s", stream_id)
+            return {
+                "name": "stellasora_how",
+                "success": False,
+                "error": "攻略图片发送失败（宿主返回未发送）",
+                "content": "攻略图片发送失败（宿主返回未发送）",
+            }
+        total = sum(r.image_count for _, r in results)
+        summary = f"攻略图已直接发送到聊天（共 {total} 张：{'，'.join(parts)}）" if len(parts) > 1 \
+            else f"攻略图已直接发送到聊天（{total} 张{'及 ' + str(results[0][1].code_pages) + ' 页队伍码' if results[0][1].code_pages else ''}）"
         return {
             "name": "stellasora_how",
+            "success": True,
             "content": (
                 f"{summary}。用户已经可以看到完整答案，"
                 "你不需要也不应该再调用 reply 工具。请立即调用 stop 工具结束本轮。"
             ),
+            "stop_after_execution": True,
         }
+
+    async def _how_bili(self, query: str, stream_id: str):
+        """bili 单源：未收录与抓取失败分别提示，不隐式回退 GameKee。"""
+        result = await self._collect_bili(query)
+        if not result.ok:
+            if result.miss:
+                await self.ctx.send.text(
+                    "猫猫球暂未收录该角色/属性的攻略，换个说法或换个角色试试～", stream_id
+                )
+                return {
+                    "name": "stellasora_how",
+                    "success": True,
+                    "content": "已向聊天发送'猫猫球暂未收录'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
+                    "stop_after_execution": True,
+                }
+            self.ctx.logger.error("猫猫球攻略不可用: %s", result.failure)
+            await self.ctx.send.text("猫猫球攻略加载失败，请稍后再试（不是未收录）。", stream_id)
+            return {
+                "name": "stellasora_how",
+                "success": False,
+                "error": f"猫猫球攻略加载失败: {result.failure}",
+                "content": "已向聊天发送'猫猫球攻略加载失败'提示。",
+            }
+        return await self._send_guides(
+            stream_id, [("猫猫球", result)], miss_text="猫猫球暂未收录"
+        )
+
+    async def _how_all(self, query: str, stream_id: str):
+        """双源：两源独立收集，任一源失败发另一源并标注（GameKee 在前）。"""
+        gk = await self._collect_gamekee(query)
+        bili = await self._collect_bili(query)
+        return await self._send_guides(
+            stream_id,
+            [("GameKee", gk), ("猫猫球", bili)],
+            miss_text="攻略库里暂时没有该角色/属性的图流攻略",
+        )
 
     def _team_code_node(self, index: Dict[str, Any], element: str) -> Optional[dict]:
         """取某属性页的队伍码合并转发文本节点；页无码（如未开攻略）返回 None。"""
@@ -1117,7 +1421,10 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._reschedule_after_manual_probe()
 
         # 2. 强刷两榜（绕过内容 TTL；两榜独立报告）
-        board_results = await asyncio.to_thread(refresh_board_for_update, lb_dir)
+        # 代理只作用于 ssleaderboard 上游：显式读取一次传下去（空串=强制直连）
+        board_results = await asyncio.to_thread(
+            refresh_board_for_update, lb_dir, proxy_url=self.config.leaderboard.proxy
+        )
         bb, fe = board_results.get("bb", {}), board_results.get("fe", {})
         bb_text = self._format_board_update_result("联合讨伐", bb)
         fe_text = self._format_board_update_result("终焉绝响", fe)
@@ -1138,11 +1445,14 @@ class StellaSoraPlugin(MaiBotPlugin):
         - 手动失败 → last_failure_at+30min 重试点。
         后台任务仍在等自己的到期点（正常等待期间）时**完全不动**——手动失败
         不得把还很远的 24h 截止点改成 30min 重试（计划 P2 恢复规则的限定条件）。
+
+        重建走 `_ensure_probe_task_if_enabled()`：bili 单源下 /st_update 探查完成后
+        不得悄悄把 P2 后台流量恢复回来。探查本身照常执行（用户显式操作）。
         """
         task = self._gamekee_probe_task
         if task is not None and not task.done():
             return  # 正常等待期间：保持原排程，手动失败不影响
-        self._gamekee_probe_task = asyncio.create_task(self._schedule_gamekee_probe())
+        self._ensure_probe_task_if_enabled()
 
     @staticmethod
     def _format_board_update_result(mode_cn: str, result: Dict[str, Any]) -> str:
@@ -1193,12 +1503,16 @@ class StellaSoraPlugin(MaiBotPlugin):
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
         ttl = int(self.config.leaderboard.ttl_minutes)
         render_images = bool(self.config.leaderboard.render_images)
+        # 榜单代理只作用于 ssleaderboard 上游（空串=强制直连，不读环境变量）
+        board_proxy = self.config.leaderboard.proxy
         lb_dir = self._lb_data_dir_ready()
         try:
             # 1. 指针 + 数据（同步网络/磁盘重活进线程池；异常消息即用户可见文案）
-            prefix, sid = await asyncio.to_thread(resolve_current_board, mode, lb_dir)
+            prefix, sid = await asyncio.to_thread(
+                resolve_current_board, mode, lb_dir, proxy_url=board_proxy
+            )
             cn_data, header, age = await asyncio.to_thread(
-                load_board_for_render, prefix, sid, ttl, lb_dir
+                load_board_for_render, prefix, sid, ttl, lb_dir, proxy_url=board_proxy
             )
         except ValueError as exc:
             return False, str(exc), 1
@@ -1258,7 +1572,7 @@ class StellaSoraPlugin(MaiBotPlugin):
         else:
             nodes = await asyncio.to_thread(render_text_board_nodes, cn_data, header, age)
 
-        # 3. 统一合并转发（用户裁决：单页/多页都走 forward）
+        # 3. 统一合并转发（单页/多页都走 forward）
         try:
             sent = await self.ctx.send.forward(nodes, effective_stream_id)
         except Exception as exc:
