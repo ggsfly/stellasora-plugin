@@ -36,17 +36,8 @@ LB_MODE_CN = {"bb": "联合讨伐", "fe": "终焉绝响"}
 
 
 
-def format_age(seconds: float) -> str:
-    """缓存年龄 → 相对时间文本（文字榜表头用，1.4.x 口径）。"""
-    if seconds < 90:
-        return "刚刚"
-    if seconds < 3600:
-        return f"{int(seconds // 60)} 分钟前"
-    return f"{int(seconds // 3600)} 小时前"
-
-
 def format_fetch_time(fetched_at: float) -> str:
-    """抓取时刻 → 时间文本（图片榜 meta 用，`MM-DD HH:MM`，24 小时制）。
+    """抓取时刻 → 时间文本（图片榜 meta 与文字榜表头共用，`MM-DD HH:MM`，24 小时制）。
 
     相对时间每分钟都在变：同一份缓存数据在 TTL 内会渲染出逐分钟不同的图，既
     浪费渲染也让"同数据同图"不成立。只显示到分钟则数据不变文本不变，渲染输入
@@ -428,22 +419,28 @@ def render_text_board_nodes(
     """国服榜单 → 文字合并转发节点（1.4.x 旧格式原样复刻，供 render_images=false）。
 
     表头节点 1 条写实际条数（赛季初上游 top 可能不足 100，写死 Top100 会失真）；
-    其后每 25 名一节点，首行"第 X–Y 名"，每行 `{rank}. {name} — {score:,}`。
+    其后每 25 名一节点，首行"第 X–Y 名"，每行 `{score:,} ｜ #{rank} {name}`。
     排名不补零、分数完整千分位（用户红线：禁"万"缩写）。
+    数据行"分数先行"：QQ 纯文本非等宽字体下三列无法对齐，分数固定行首让
+    长短昵称不影响分数位置，扫读以分数锚点。
+    表头"更新于"与图片版同口径（精确到分，format_fetch_time）——相对时间
+    会让同一份缓存在不同时刻渲染出不同表头，两版口径统一后互相比对一致。
     """
     top = cn_data.get("top") or []
     total = int(cn_data.get("total") or 0)
+    fetched_at = time.time() - age_seconds
     nodes = [
-        _lb_text_node(f"{header} 国服 Top{len(top)} · 共 {total:,} 人 · 更新于 {format_age(age_seconds)}")
+        _lb_text_node(f"{header} 国服 Top{len(top)} · 共 {total:,} 人 · 更新于 {format_fetch_time(fetched_at)}")
     ]
     for start in range(0, len(top), _LB_TEXT_CHUNK):
         chunk = top[start:start + _LB_TEXT_CHUNK]
         lines = [f"第 {chunk[0].get('rank')}–{chunk[-1].get('rank')} 名"]
         for entry in chunk:
             rank = entry.get("rank")
-            name = entry.get("name") or "?"
+            # 昵称里的换行/制表符折成行内空格：一行一人，防止拆成多行破坏"第 X–Y 名"块结构
+            name = re.sub(r"[\r\n\t]+", " ", str(entry.get("name") or "?")).strip() or "?"
             score = int(entry.get("score") or 0)
-            lines.append(f"{rank}. {name} — {score:,}")
+            lines.append(f"{score:,} ｜ #{rank} {name}")
         nodes.append(_lb_text_node("\n".join(lines)))
     return nodes
 

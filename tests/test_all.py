@@ -2149,11 +2149,12 @@ async def run_section_s() -> None:
         txt_all = "\n".join(
             s.get("content", "") for n in txt_nodes for s in n.get("segments", []) if s.get("type") == "text"
         )
-        check("S11 关闭开关走文字榜（零渲染+表头+分块）",
+        check("S11 关闭开关走文字榜（零渲染+表头+分块+分数先行）",
               res_txt[0] is True and len(render_off.calls) == 0
               and len(txt_nodes) == 2
-              and "【联合讨伐 S13】 国服 Top2 · 共 2 人 · 更新于 刚刚" in txt_all
-              and "第 1–2 名" in txt_all and "1. 甲 — 1,000" in txt_all and "2. 乙 — 900" in txt_all
+              and "【联合讨伐 S13】 国服 Top2 · 共 2 人 · 更新于 " in txt_all
+              and "MM-DD HH:MM" not in txt_all and re.search(r"更新于 \d{2}-\d{2} \d{2}:\d{2}", txt_all)
+              and "第 1–2 名" in txt_all and "1,000 ｜ #1 甲" in txt_all and "900 ｜ #2 乙" in txt_all
               and all(s.get("type") != "image" for n in txt_nodes for s in n.get("segments", [])),
               f"nodes={len(txt_nodes)} renders={len(render_off.calls)} text={txt_all[:80]}")
         # 关闭时未开榜 notice 路径不变（BoardUnavailable 共用）
