@@ -1284,10 +1284,7 @@ async def deliver_what(
     *,
     stream_id: str,
     send_forward: Callable[..., Any],
-    plan: Optional[DeliveryPlan] = None,
-    conn: Optional[sqlite3.Connection] = None,
-    result: Any = None,
-    intent: Any = None,
+    plan: DeliveryPlan,
     load_image: Optional[Callable[[str], Any]] = None,
     budget_bytes: Optional[int] = None,
     host_version: Optional[str] = None,
@@ -1305,13 +1302,6 @@ async def deliver_what(
     """
 
     log = logger or _default_logger()
-    if plan is None:
-        if conn is None or result is None:
-            return _failed_result(
-                "缺少 plan，或缺少 conn/result 无法组装计划",
-                budget_note="未解析（缺少计划）",
-            )
-        plan = await asyncio.to_thread(prepare_delivery, conn, result, intent)
 
     frame_limit, conservative, budget_note = (
         (int(budget_bytes), True, f"调用方指定单帧上限 {int(budget_bytes)}")
@@ -1551,32 +1541,6 @@ async def deliver_what(
         budget_note=budget_note,
         frames=frames,
         details=details,
-    )
-
-
-async def deliver_query(
-    conn: sqlite3.Connection,
-    result: Any,
-    intent: Any,
-    *,
-    stream_id: str,
-    send_forward: Callable[..., Any],
-    load_image: Optional[Callable[[str], Any]] = None,
-    budget_bytes: Optional[int] = None,
-    host_version: Optional[str] = None,
-    logger: Optional[logging.Logger] = None,
-) -> DeliveryResult:
-    """一步到位：组装计划并发送（组装在线程里跑，不阻塞事件循环）。"""
-
-    plan = await asyncio.to_thread(prepare_delivery, conn, result, intent)
-    return await deliver_what(
-        stream_id=stream_id,
-        send_forward=send_forward,
-        plan=plan,
-        load_image=load_image,
-        budget_bytes=budget_bytes,
-        host_version=host_version,
-        logger=logger,
     )
 
 

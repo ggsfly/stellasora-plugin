@@ -1182,26 +1182,35 @@ class StateMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report2.conservative)
         self.assertEqual(report2.frame_limit, 16 * 1024 * 1024)
 
-    async def test_deliver_query_convenience_path(self):
-        result = what_query.run_query(
-            get_fixture().conn,
-            {
-                "mode": "field",
-                "subject": {"name": "优叶", "kind": "traveler"},
-                "fields": ["birthday"],
-            },
-        )
+    async def test_whole_article_uses_prepared_plan(self):
+        intent = {
+            "mode": "article",
+            "subject": {"name": "测试文章"},
+            "shape": "whole_article",
+        }
+
+        def prepare():
+            conn = what_db.open_db(str(get_fixture().path), readonly=True)
+            try:
+                result = what_query.run_query(conn, intent)
+                return delivery.prepare_delivery(conn, result, intent)
+            finally:
+                conn.close()
+
+        get_fixture()  # 初始化共享 fixture；工作线程只打开自己的只读连接。
+        plan = await asyncio.to_thread(prepare)
         forward = ForwardRecorder()
-        report = await delivery.deliver_query(
-            get_fixture().conn,
-            result,
-            {"mode": "field", "shape": "single"},
-            stream_id=STREAM,
-            send_forward=forward,
+        loader = ImageLoader()
+        report = await delivery.deliver_what(
+            stream_id=STREAM, send_forward=forward, plan=plan, load_image=loader
         )
         self.assertEqual(report.status, "sent")
+        self.assertEqual(forward.count, 1)
         body = text_lines(forward.calls[0][0])
-        self.assertEqual(body, ["【优叶】", "生日：3月5日", delivery.SOURCE_LINE])
+        self.assertIn("第一段正文", body)
+        self.assertEqual(body[-1], delivery.SOURCE_LINE)
+        self.assertEqual(loader.calls, [CDN_A, CDN_B, CDN_D])
+        self.assertEqual(report.images_sent, 3)
 
 
 class IntentGuardTests(unittest.IsolatedAsyncioTestCase):
