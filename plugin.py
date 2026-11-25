@@ -2,8 +2,9 @@
 
 GameKee 中文源（一图流攻略原图直发）+ ssleaderboard 排行榜图片化：
   - stellasora_how  Tool  一图流攻略查询（六属性 24 角色小节，合并转发）
+  - stellasora_what Tool  GameKee 客观资料查询（默认关闭，本地库检索后合并转发）
   - /st_bb・/st_fe   Command  当期国服 Top100 图片榜单
-  - /st_update      Command  强刷两榜 + 探查攻略源（操作员）
+  - /st_update      Command  强刷两榜 + 探查攻略源（操作员；what 开启时另起一路建库）
 
 安全：白名单/黑名单模式可配置（config.toml），群聊按群号、私聊按用户号鉴权；
 仅 QQ 平台（Hook 可见性 + 执行层双闸，未知平台保守拒绝）。
@@ -19,6 +20,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import threading
 import sys
@@ -112,8 +114,101 @@ class GuideResult:
 
 
 
-# 本插件暴露给 planner 的工具名集合：Hook 前置过滤单一清单（1.5.0 仅剩 how）
+# planner 工具剔除清单（Hook 前置过滤）：1.5.0 起本清单只含 how。
+# what 默认关闭，它是否暴露由 [what] enabled 决定，故不并入本清单——并入会让
+# 「授权聊天里 what 关闭时」和「未授权聊天里剔除全部插件工具」两种语义混成一个集合。
 _TOOL_NAMES = frozenset({"stellasora_how"})
+_WHAT_TOOL = "stellasora_what"
+_PLUGIN_TOOL_NAMES = _TOOL_NAMES | {_WHAT_TOOL}
+
+# QQ 用户可见短提示：固定短语，不写解释、错误码或套话（细节只进日志与工具回执）。
+_WORD_MISS = "没查到"
+_WORD_READ_FAIL = "读取失败"
+_WORD_PARTIAL = "部分发出"
+_WORD_UNKNOWN = "送达不确定"
+_WORD_SEND_FAIL = "发送失败"
+_WORD_NO_LIBRARY = "请先执行 /st_update"
+_WORD_BUILDING = "建库中"
+
+
+def _what_reason_text(reasons: Any, *, limit: int = 3) -> str:
+    """刷新失败原因（库侧逐条 dict：code/detail）→ 一行短文本，最多 limit 条。"""
+    parts: list[str] = []
+    for item in list(reasons or [])[:limit]:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "")
+            detail = str(item.get("detail") or "")
+            parts.append(f"{code}: {detail}" if detail else code)
+        elif item:
+            parts.append(str(item))
+    return "；".join(p for p in parts if p)
+
+# 资料查询意图契约：只声明业务参数（query + intent）。会话字段（stream_id/platform/
+# group_id/user_id）由宿主注入，不出站在 schema 里让模型自己填。
+_WHAT_MODES = ("field", "article", "media", "catalog")
+_WHAT_SUBJECT_KINDS = ("traveler", "sigil", "npc", "monster", "term")
+_WHAT_SHAPES = ("single", "list", "whole_article")
+_WHAT_INTENT_PROPERTIES: dict[str, Any] = {
+    "mode": {
+        "type": "string",
+        "enum": list(_WHAT_MODES),
+        "description": "必填。field=客观字段值；article=按原文/标题检索文章；"
+        "media=立绘/卡池等媒体；catalog=列目录（只列事实，不冒充正文）",
+    },
+    "subject": {
+        "type": "object",
+        "description": "查询对象；名称只作查询线索，最终对象由库内别名与证据确定，"
+        "查不到就报未收录，不硬凑",
+        "properties": {
+            "name": {"type": "string", "description": "对象名或用户写法（可带俗称/括号版本名）"},
+            "kind": {
+                "type": "string",
+                "enum": list(_WHAT_SUBJECT_KINDS),
+                "description": "对象种类：traveler=旅人 / sigil=秘纹 / npc / monster / term=术语",
+            },
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+    "shape": {
+        "type": "string",
+        "enum": list(_WHAT_SHAPES),
+        "description": "答复形态：single=单值；list=多项；whole_article=整篇（要正文与正文图时用）",
+    },
+    "fields": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "mode=field 时的字段名：birthday/affiliation/weapon/salary/address/"
+        "experience/skill.talent/sigil.main_effect/sigil.sub_effect/stat.<指标>/"
+        "monster.weakness/age（age 无数据源，会明确答没有）",
+    },
+    "levels": {
+        "type": "array",
+        "items": {"type": "integer"},
+        "description": "面板字段的等级，只能用该页实际存在的等级（常见 1/10/…/90）；"
+        "传入不存在的等级会被告知可用等级，不杜撰数值",
+    },
+    "groups": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "mode=media 时的媒体分组（只能用库里真实存在的分组名）",
+    },
+    "conditions": {
+        "type": "object",
+        "description": "描述题的同一效果内条件（如 attribute=水系 / trigger=获得护盾时 / "
+        "slot=主位）；不给 subject.name 时用它做同条检索",
+        "additionalProperties": {"type": "string"},
+    },
+    "query": {
+        "type": "string",
+        "description": "mode=article 的检索文本（原文子串）；不填则用 query 参数的问题原文",
+    },
+    "literal": {
+        "type": "string",
+        "description": "mode=article 需要逐字命中的原文片段（跨标点假命中会被原文复核剔除）",
+    },
+}
+
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -125,8 +220,9 @@ class PluginSectionConfig(PluginConfigBase):
 
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(
-        default="1.4.2",
-        description="配置版本（1.4.2=新增 [how] 攻略来源开关与 [leaderboard] proxy；"
+        default="1.5.0",
+        description="配置版本（1.5.0=新增 [what] 资料查询开关与 stale_warn_hours；"
+        "1.4.2=新增 [how] 攻略来源开关与 [leaderboard] proxy；"
         "1.4.1=新增 [leaderboard] render_images 开关）",
     )
 
@@ -208,6 +304,25 @@ class HowConfig(PluginConfigBase):
     )
 
 
+class WhatConfig(PluginConfigBase):
+    """资料查询（stellasora_what）配置：默认关闭，开关只开通查询能力。"""
+
+    __ui_label__ = "资料查询"
+    __ui_icon__ = "database"
+    __ui_order__ = 6
+
+    enabled: bool = Field(
+        default=False,
+        description="资料查询工具（stellasora_what）是否向 planner 暴露：关闭=零 schema、"
+        "零网络、零后台任务；开启只开通查询，不会自动抓取，建库/更新仍需操作员执行 /st_update",
+    )
+    stale_warn_hours: int = Field(
+        default=168,
+        description="资料库时效提示阈值（小时）：已发布代距 last_verified 超过此值只在答复里"
+        "提示「资料可能过时」，不触发任何自动更新",
+    )
+
+
 class AliasEntry(PluginConfigBase):
     """单条中文别名映射（WebUI 列表编辑器每行 = 一个 AliasEntry）。"""
     alias: str = Field(
@@ -247,6 +362,7 @@ class StellaSoraConfig(PluginConfigBase):
     gamekee: GameKeeConfig = Field(default_factory=GameKeeConfig)
     overrides: OverridesConfig = Field(default_factory=OverridesConfig)
     how: HowConfig = Field(default_factory=HowConfig)
+    what: WhatConfig = Field(default_factory=WhatConfig)
 
 
 class StellaSoraPlugin(MaiBotPlugin):
@@ -287,6 +403,14 @@ class StellaSoraPlugin(MaiBotPlugin):
         # 上一次生效的攻略来源：宿主先更新配置再调 on_config_update，
         # 旧值只能靠实例自己记，用于判断"是否需要启停 P2 任务"。
         self._last_how_source: str = ""
+        # 资料查询（1.5.3）：/st_update 资料同步独立一路，句柄与取消信号各自持有。
+        # 首次 await 前登记（重复触发只看句柄，不启第二份）；取消信号是 threading.Event，
+        # 因为刷新 worker 在 to_thread 里轮询它（asyncio.Event 不能跨线程 await）。
+        self._what_update_task: asyncio.Task[None] | None = None
+        self._what_update_stop = threading.Event()
+        self._what_update_progress: Dict[str, Any] = {}  # worker 线程写入的最新进度（重复触发时回报）
+        self._what_probe_gate: asyncio.Event | None = None  # 短探查优先闸门：探查段结束才放行长批
+        self._what_component_state: bool | None = None  # 已同步的组件启用态（None=未知，需重试）
 
     # ===== 生命周期 =====
 
@@ -321,7 +445,68 @@ class StellaSoraPlugin(MaiBotPlugin):
         self._load_gamekee_index_snapshot()
         self._last_how_source = self.config.how.source
         self._ensure_probe_task_if_enabled()
+        await self._sync_what_component()
+        self._log_what_library_state()
         self.ctx.logger.info("星塔旅人插件已加载，数据目录: %s", self._data_dir)
+
+    def _log_what_library_state(self) -> None:
+        """开启资料查询时只读地报一次本地已发布代是否存在（不建库、不访问网络）。"""
+        if not self._what_enabled():
+            return
+        if (self._what_root() / "current.json").exists():
+            self.ctx.logger.info("资料查询已开启，本地资料库指针存在: %s", self._what_root())
+        else:
+            self.ctx.logger.info(
+                "资料查询已开启，但本地还没有已发布资料库（需操作员执行 /st_update）: %s",
+                self._what_root(),
+            )
+
+    # ===== 资料查询（1.5.3）：开关 / 组件状态 / 取消 =====
+
+    def _what_enabled(self) -> bool:
+        """资料查询是否开启（默认关闭：零 schema 暴露、零网络、零后台任务）。"""
+        return bool(self.config.what.enabled)
+
+    def _what_root(self) -> Path:
+        """资料库根目录（data_dir/what，与 what_library 约定的唯一落盘位置）。"""
+        return Path(self.ctx.paths.data_dir) / "what"
+
+    async def _sync_what_component(self) -> None:
+        """按 [what] enabled 同步 TOOL 组件启用态（桌面保存后的热切换）。
+
+        静态 `@Tool(enabled=False)` 只决定初始状态；宿主改配置后必须显式
+        enable/disable 才会真正进入/退出 planner 的工具清单。失败只告警不抛出：
+        组件状态是暴露层增强，执行层 `handle_what` 与 Hook 前置过滤各自还有闸，
+        加载/保存配置不得因一次能力 RPC 失败而中断。
+        """
+        desired = self._what_enabled()
+        if self._what_component_state is desired:
+            return
+        full_name = f"{self.ctx.plugin_id}.{_WHAT_TOOL}"
+        toggle = (
+            self.ctx.component.enable_component
+            if desired
+            else self.ctx.component.disable_component
+        )
+        try:
+            result = await toggle(full_name, "TOOL")
+        except Exception as exc:
+            self._what_component_state = None
+            self.ctx.logger.warning("资料查询组件状态同步失败（下次配置变更重试）: %s", exc)
+            return
+        ok = result is True or (isinstance(result, dict) and bool(result.get("success")))
+        if ok:
+            self._what_component_state = desired
+            self.ctx.logger.info("资料查询组件已同步为 %s（%s）", "启用" if desired else "关闭", full_name)
+            return
+        self._what_component_state = None
+        detail = result.get("error") if isinstance(result, dict) else result
+        self.ctx.logger.warning("资料查询组件状态同步未成功: %s（full_name=%s）", detail, full_name)
+
+    def _stop_what_update(self) -> None:
+        """置取消信号：正在跑的刷新 worker 每篇检查一次后收敛，不晚写指针。"""
+        self._what_update_stop.set()
+
 
     def _gamekee_enabled(self) -> bool:
         """当前攻略来源是否需要 GameKee（bili 单源时后台流量应当为零）。"""
@@ -364,6 +549,14 @@ class StellaSoraPlugin(MaiBotPlugin):
             self._update_task.cancel()
             await asyncio.gather(self._update_task, return_exceptions=True)
         self._update_task = None
+        # 资料同步先置取消信号再取消任务：worker 在 to_thread 里轮询该信号，
+        # 取消协程不等同于中止线程，只有信号能阻止它继续抓取并提交新代。
+        self._stop_what_update()
+        if self._what_update_task and not self._what_update_task.done():
+            self._what_update_task.cancel()
+            await asyncio.gather(self._what_update_task, return_exceptions=True)
+        self._what_update_task = None
+        self._what_probe_gate = None
         self._lb_render_cache = None
         self.ctx.logger.info("星塔旅人插件已卸载")
 
@@ -386,6 +579,20 @@ class StellaSoraPlugin(MaiBotPlugin):
             "配置已更新: scope=%s version=%s（黑白名单与自定义覆盖即时生效）", scope, version
         )
         self._apply_overrides_config()
+        # [what] 开关的组件同步必须走在下面 `how.source` 相同的提前 return 之前：
+        # 只改资料查询开关时 how 来源没变，提前 return 会把热切换整体吞掉。
+        await self._sync_what_component()
+        if not self._what_enabled():
+            # 关闭即停：正在跑的资料同步立即收敛（信号由 worker 线程轮询），
+            # 否则关闭后仍可能抓完并切换指针，等于「关了还在后台做事」。
+            self._stop_what_update()
+            task = self._what_update_task
+            if task is not None and not task.done():
+                task.cancel()
+            self._what_update_task = None
+        elif self._what_update_task is None:
+            # 重新打开后取消信号必须复位，否则下一轮同步开工即自我取消。
+            self._what_update_stop = threading.Event()
 
         source = self.config.how.source
         previous_source = self._last_how_source
@@ -996,13 +1203,26 @@ class StellaSoraPlugin(MaiBotPlugin):
             return self._strip_tool_definitions(defs, kwargs, session_id)
         if self._denied(group_id=group_id, user_id=user_id):
             return self._strip_tool_definitions(defs, kwargs, session_id)
+        if not self._what_enabled():
+            # 授权聊天但资料查询关闭：只剔除 what，how 照常保留。宿主侧组件已
+            # disable，这里再剔一次使「默认关闭」在 Hook 层也是零 schema（不靠
+            # 单点状态，两条路径任一失效都不出站）。
+            return self._strip_tool_definitions(defs, kwargs, session_id, names=frozenset({_WHAT_TOOL}))
         return {"action": "continue"}
 
-    def _strip_tool_definitions(self, defs: list, kwargs: dict, session_id: str) -> dict:
-        """从工具定义清单剔除本插件工具并回填 modified_kwargs（整体替换语义）。"""
+    def _strip_tool_definitions(
+        self,
+        defs: list,
+        kwargs: dict,
+        session_id: str,
+        *,
+        names: frozenset[str] | None = None,
+    ) -> dict:
+        """从工具定义清单剔除指定插件工具并回填 modified_kwargs（整体替换语义）。"""
+        targets = names if names is not None else _PLUGIN_TOOL_NAMES
         kept = [
             d for d in defs
-            if not isinstance(d, dict) or d.get("function", {}).get("name") not in _TOOL_NAMES
+            if not isinstance(d, dict) or d.get("function", {}).get("name") not in targets
         ]
         if len(kept) == len(defs):
             return {"action": "continue"}
@@ -1268,7 +1488,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             return {
                 "name": "stellasora_how",
                 "success": True,
-                "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
+                "content": "已向聊天发送'未找到相关攻略'提示。你不需要也不应该再调用 reply 工具，本轮无需再回复。",
                 "stop_after_execution": True,
             }
 
@@ -1304,7 +1524,7 @@ class StellaSoraPlugin(MaiBotPlugin):
             "success": True,
             "content": (
                 f"{summary}。用户已经可以看到完整答案，"
-                "你不需要也不应该再调用 reply 工具。请立即调用 stop 工具结束本轮。"
+                "你不需要也不应该再调用 reply 工具，本轮无需再回复。"
             ),
             "stop_after_execution": True,
         }
@@ -1320,7 +1540,7 @@ class StellaSoraPlugin(MaiBotPlugin):
                 return {
                     "name": "stellasora_how",
                     "success": True,
-                    "content": "已向聊天发送'猫猫球暂未收录'提示。你不需要也不应该再调用 reply 工具，请立即调用 stop 工具结束本轮。",
+                    "content": "已向聊天发送'猫猫球暂未收录'提示。你不需要也不应该再调用 reply 工具，本轮无需再回复。",
                     "stop_after_execution": True,
                 }
             self.ctx.logger.error("猫猫球攻略不可用: %s", result.failure)
@@ -1345,6 +1565,400 @@ class StellaSoraPlugin(MaiBotPlugin):
             miss_text="攻略库里暂时没有该角色/属性的图流攻略",
         )
 
+    # ===== Tool 组件：资料查询（1.5.3）=====
+
+    @Tool(
+        _WHAT_TOOL,
+        description=(
+            "查询星塔旅人 GameKee 客观资料：旅人生日/所属/武器/薪资/天赋/指定等级面板、"
+            "秘纹主位与辅位效果、NPC 基本资料、怪物已核实的弱点、日中术语、立绘与语音目录、"
+            "以及按标题或原文查找公告与攻略文章。只查客观资料，不给配队建议；"
+            "“怎么玩/配队/队伍码/一图流”用 stellasora_how。\n"
+            "本工具自行把结果合并转发到聊天：命中图文时同时发出全部最终合格候选与图，"
+            "全部合格内容发完才结束本轮；拿到成功结果后不要再调用 reply 复述，也不要再发同样的图。\n"
+            "intent 必须按用户真实要求填写：mode 为 field/article/media/catalog；"
+            "field 时给出 fields，面板类给出 levels（只用实际存在的等级）；"
+            "media 时给出 groups；要整篇正文与正文图时 shape=whole_article；"
+            "名称不确定就不要硬写，交由本工具判定未收录或列候选。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="query",
+                param_type=ToolParamType.STRING,
+                description="必填，非空。用户问题原文（保留其字段与等级说法）；"
+                "article 检索在 intent.query 未给出时用它做原文检索",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="intent",
+                param_type=ToolParamType.OBJECT,
+                description="必填。结构化意图：mode/subject{name,kind}/shape/fields/levels/"
+                "groups/conditions（见计划 5.1）；日期条件尚未实现，不要传 date_window",
+                required=True,
+                properties=_WHAT_INTENT_PROPERTIES,
+                required_properties=["mode"],
+                additional_properties=False,
+            ),
+        ],
+        platforms="qq",
+        # 与 how 同源：宿主 1.4.x 只把 visibility=visible 的插件工具放进原生 tools 数组。
+        visibility="visible",
+        # 默认关闭：Host 读 metadata.enabled 作为组件初始状态；配置保存后由
+        # _sync_what_component 用 component.enable/disable 热切换。
+        enabled=False,
+        timeout_ms=_TOOL_RPC_TIMEOUT_MS,
+    )
+    async def handle_what(self, query: str = "", intent: Any = None, **kwargs):
+        """资料查询入口：执行层三层闸 → 只读已发布代 → 查询 → 交付层直发 → 五状态分流。
+
+        执行层闸门与 how 同口径（平台 + 黑白名单），另加一层 [what] enabled：
+        Hook 剔除是暴露层治理，直调工具不经 Hook，这里必须再判一次。
+        查询与交付准备在同一个 to_thread 内完成（sqlite 连接不跨线程、整次调用固定
+        同一已发布代），交付只拿到计划与图片取数回调，自己不读库。
+        """
+        if not self._what_enabled():
+            return self._what_result(
+                success=False,
+                error="资料查询未启用（[what] enabled=false）",
+            )
+        if not await self._platform_allowed(**kwargs):
+            return {"name": _WHAT_TOOL, "content": "该平台暂不支持星塔旅人资料查询。"}
+        if self._denied(**kwargs):
+            return {"name": _WHAT_TOOL, "content": "当前聊天不在星塔旅人插件的允许范围内。"}
+
+        query = (query or "").strip()
+        if not query:
+            return self._what_result(
+                success=False,
+                error='缺少必填参数 query：请传入非空问题原文，例如 {"query":"优叶生日",'
+                '"intent":{"mode":"field","subject":{"name":"优叶","kind":"traveler"},'
+                '"fields":["birthday"]}}。仅在参数已补齐时重试，请勿再次发送空参数。',
+            )
+        stream_id = self._resolve_stream_id(kwargs)
+        if not stream_id:
+            return self._what_result(success=False, error="缺少发送目标（stream_id）。")
+
+        normalized, intent_error = self._what_intent(intent, query)
+        if intent_error or normalized is None:
+            return self._what_result(success=False, error=intent_error or "intent 不成立")
+
+        self.ctx.logger.info(
+            "what 查询: mode=%s query=%s group=%s user=%s",
+            normalized.get("mode"), query[:40], kwargs.get("group_id", ""), kwargs.get("user_id", ""),
+        )
+
+        try:
+            result, plan, generation = await asyncio.to_thread(self._what_prepare_sync, normalized)
+        except Exception as exc:
+            word, detail = self._what_classify_error(exc)
+            self.ctx.logger.exception("what 查询/准备失败: %s", detail)
+            if word:
+                await self._what_notice(word, stream_id)
+            return self._what_result(success=False, error=detail, content=word)
+
+        if result.status == "invalid_intent":
+            # 意图不成立是 planner 侧参数问题（不能换字段猜答案），只回 planner 不打扰群
+            return self._what_result(success=False, error=f"intent 不成立：{result.message}")
+
+        stale_note = ""
+        if generation.is_stale(int(self.config.what.stale_warn_hours)):
+            stale_note = f"（资料可能过时：截至 {generation.last_verified}）"
+
+        try:
+            import what_delivery  # 运行时加载：tools/ 模块 import 期不得读库或触网
+
+            report = await what_delivery.deliver_what(
+                stream_id=stream_id,
+                send_forward=self.ctx.send.forward,
+                plan=plan,
+                load_image=self._what_load_image,
+                host_version=os.environ.get("MAIBOT_HOST_VERSION", ""),
+                logger=self.ctx.logger,
+            )
+        except Exception as exc:
+            self.ctx.logger.exception("what 交付层异常: %s", exc)
+            await self._what_notice(_WORD_UNKNOWN, stream_id)
+            return self._what_result(
+                success=False,
+                error=f"资料交付异常（未重发）: {type(exc).__name__}: {exc}",
+                content=_WORD_UNKNOWN,
+            )
+
+        return await self._what_report(report, result, generation, stream_id, stale_note)
+
+    def _what_result(
+        self, *, success: bool, content: str = "", error: str = "", stop: bool = False
+    ) -> dict:
+        """工具回执（宿主只认 success/content/error/stop_after_execution 四个公开字段）。"""
+        payload: dict[str, Any] = {"name": _WHAT_TOOL, "success": success, "content": content}
+        if error:
+            payload["error"] = error
+        if stop:
+            payload["stop_after_execution"] = True
+        return payload
+
+    @staticmethod
+    def _send_confirmed(sent: Any) -> bool:
+        """发送回执是否「明确成功」：只认真 bool True 或 SDK 字典里的显式 True。
+
+        旧实现把非 bool 一律当成功；宿主/SDK 在发送失败或超时时可能回 None、
+        空字典或 {"success": False}，那样会让「没查到」提示在未确认的情况下
+        被当成已发出并停轮（假成功）。字典只认 sent/success 的明确 True，
+        其余（None、空字典、失败字典、异常对象）一律视为未确认。
+        """
+        if isinstance(sent, bool):
+            return sent
+        if isinstance(sent, dict):
+            for key in ("sent", "success"):
+                if key in sent:
+                    return sent.get(key) is True
+        return False
+
+    async def _what_notice(self, text: str, stream_id: str) -> bool:
+        """向原会话发一条短提示；返回是否确实发出（发送失败只告警，不改判定）。"""
+        if not stream_id:
+            return False
+        try:
+            sent = await self.ctx.send.text(text, stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("资料提示发送异常: stream=%s err=%s", stream_id, exc)
+            return False
+        confirmed = self._send_confirmed(sent)
+        if not confirmed:
+            self.ctx.logger.warning(
+                "资料提示发送未确认: stream=%s text=%s outcome=%r", stream_id, text, sent
+            )
+        return confirmed
+
+    def _what_intent(self, raw: Any, query: str) -> tuple[Optional[Dict[str, Any]], str]:
+        """校验并归一 planner 传入的结构化意图；返回 (intent, 错误文案)。
+
+        纪律：不猜意图、不替换字段、不凭用户字符串解析 URL；未实现的日期条件
+        明确拒绝而不是无声忽略（否则 planner 以为按日期筛过）。
+        """
+        if raw is None or raw == "":
+            return None, (
+                "缺少必填参数 intent：请按 mode/subject{name,kind}/shape/fields/levels/"
+                "groups/conditions 传入结构化意图（计划 5.1）。"
+            )
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return None, "intent 必须是 JSON 对象，收到无法解析的字符串。"
+        if not isinstance(raw, dict):
+            return None, "intent 必须是对象。"
+
+        intent: Dict[str, Any] = dict(raw)
+        mode = str(intent.get("mode") or "").strip()
+        if mode not in _WHAT_MODES:
+            return None, f"intent.mode 必须是 {'/'.join(_WHAT_MODES)}，收到 {mode!r}。"
+
+        date_window = intent.get("date_window")
+        if date_window not in (None, "", {}, []):
+            return None, (
+                "intent.date_window 暂不支持：资料库尚无事件有效期列，"
+                "按日期筛选会得到错误结论，请去掉该字段或改用 article 检索。"
+            )
+
+        subject = intent.get("subject")
+        if subject is not None and not isinstance(subject, dict):
+            return None, "intent.subject 必须是对象 {name,kind}。"
+        shape = intent.get("shape")
+        if shape not in (None, "") and shape not in _WHAT_SHAPES:
+            return None, f"intent.shape 只能是 {'/'.join(_WHAT_SHAPES)}，收到 {shape!r}。"
+        for key in ("fields", "levels", "groups"):
+            value = intent.get(key)
+            if value is not None and not isinstance(value, (list, tuple)):
+                return None, f"intent.{key} 必须是数组。"
+        conditions = intent.get("conditions")
+        if conditions is not None and not isinstance(conditions, dict):
+            return None, "intent.conditions 必须是对象（条件名→条件值）。"
+
+        if mode == "article" and not any(
+            intent.get(key) for key in ("query", "query_text", "text", "literal")
+        ):
+            # article 只有「按主体列出条目」和「按原文检索」两条路：没给检索文本时
+            # 用 query 参数的问题原文做检索；有主体时保持 planner 原意（列条目）。
+            subject_name = ""
+            if isinstance(subject, dict):
+                subject_name = str(subject.get("name") or "").strip()
+            if not subject_name:
+                intent["query"] = query
+        return intent, ""
+
+    def _what_image_cache_dir(self) -> Path:
+        """资料图字节缓存（runtime_dir/cache/what_images，非持久可随时重建）。"""
+        return Path(self.ctx.paths.runtime_dir) / "cache" / "what_images"
+
+    def _what_load_image(self, url: str) -> bytes:
+        """交付层取图回调（同步体，由交付层在线程里调用）：沿用 GameKee 图片下载的
+        主机白名单、魔数校验与 webp 参数，不新增下载通道。"""
+        return gamekee_download_image(
+            url, self._what_image_cache_dir(), bool(self.config.gamekee.prefer_webp)
+        )
+
+    def _what_prepare_sync(
+        self, intent: Dict[str, Any]
+    ) -> tuple[Any, Any, Any]:
+        """同步准备体（只在 to_thread 内跑）：开库 → 查询 → 交付准备 → 关库。
+
+        三者必须同线程同代：sqlite 连接默认 check_same_thread，且「整次调用固定一个
+        已发布代」的取证纪律要求 alias/fact/FTS 与交付准备读到同一份库。
+        """
+        import what_delivery
+        import what_library
+        import what_query
+
+        library = what_library.WhatLibrary(self._what_root())
+        with library.open_current() as (conn, generation):
+            result = what_query.run_query(conn, intent)
+            plan = what_delivery.prepare_delivery(conn, result, intent)
+        return result, plan, generation
+
+    def _what_update_active(self) -> bool:
+        """资料同步是否真的在飞（「建库中」判定的唯一依据）。
+
+        只认两个运行时事实：任务句柄存在且未结束，且没有已置位的取消信号
+        （关闭开关/卸载会置位并清空句柄）。不看磁盘是否残留 staging：失败或
+        取消留下的 staging 文件会长期存在，把它当建库中会让提示永远卡在建库中。
+        首次同步在飞、尚未创建 staging 的窗口，正是这条判定要覆盖的情形。
+        """
+        task = self._what_update_task
+        if task is None or task.done():
+            return False
+        stop = self._what_update_stop
+        if stop is not None and stop.is_set():
+            return False
+        return True
+
+    def _what_classify_error(self, exc: BaseException) -> tuple[str, str]:
+        """库异常 → (QQ 短提示, planner-facing error)。
+
+        未建库（pending）与库损坏（corrupt）必须分流：前者不是故障，后者才是读取失败；
+        「未收录」绝不能从这两类故障里冒充出来。
+        """
+        try:
+            import what_library
+        except ImportError as import_exc:
+            # 打包缺模块时也不能让分类本身再抛异常：原始错误照样完整暴露给 planner
+            return _WORD_READ_FAIL, f"资料库模块不可用: {type(exc).__name__}: {exc}（{import_exc}）"
+
+        if isinstance(exc, what_library.WhatLibraryUnavailable):
+            if exc.kind == "pending":
+                # 「建库中」只由**真实在飞**的同步任务决定：pending 本身不是证据。
+                # 失败/取消留下的 staging 文件会长期存在，拿 reason=="staging_only"
+                # 当建库中会让提示永远停在建库中；反过来首次同步在飞时可能还没创建
+                # staging（reason=no_generation），这时才是真的建库中。
+                word = _WORD_BUILDING if self._what_update_active() else _WORD_NO_LIBRARY
+            else:
+                word = _WORD_READ_FAIL
+            # reason/detail 只进工具回执做诊断，不进 QQ 短语、也不据它改写判定
+            return word, f"资料库不可用（{exc.reason}）: {exc.detail}"
+        if isinstance(exc, what_library.WhatLibraryError):
+            return _WORD_READ_FAIL, str(exc)
+        return _WORD_READ_FAIL, f"{type(exc).__name__}: {exc}"
+
+    async def _what_send_fail_result(self, report: Any, stream_id: str, *, default_error: str) -> dict:
+        """明确发送失败的统一收尾：直发「发送失败」，回执 success=False 且不停轮。
+
+        提示本身是否送达不改变「这次没发成」的判定——不假成功、也不把缺省错误
+        改写成用户短语；提示没发出去时只在 error 里补一句，留给 planner 决定补话。
+        """
+        error = str(getattr(report, "error", "") or default_error)
+        delivered = await self._what_notice(_WORD_SEND_FAIL, stream_id)
+        if not delivered:
+            error = f"{error}（发送失败提示未送达）"
+        return self._what_result(success=False, error=error, content=_WORD_SEND_FAIL)
+
+    async def _what_report(
+        self, report: Any, result: Any, generation: Any, stream_id: str, stale_note: str
+    ) -> dict:
+        """交付结果 → 五状态回执（success / stop_after_execution / QQ 短提示）。
+
+        成功交付与「没查到且提示确实发出」才停轮；部分不设停轮；送达未知绝不重发。
+        交付层的发送结论只认 `report.success` 与图片计数：媒体一张都没发出去时
+        交付层给的是 `nothing + success=False + images_failed>0`（不是 failed），
+        这条必须按「发送失败」收尾——既不能转成「没查到」长句，也不能停轮。
+        """
+        status = str(getattr(report, "status", "") or "")
+        packs = int(getattr(report, "packs_sent", 0) or 0)
+        images = int(getattr(report, "images_sent", 0) or 0)
+        failed_images = int(getattr(report, "images_failed", 0) or 0)
+        # 兼容旧替身：没有 success 字段的回执视为「未声明发送问题」，只有显式 False
+        # 或图片明确失败才按发送失败处理。
+        send_problem = getattr(report, "success", True) is False or failed_images > 0
+        as_of = f"资料截至 {generation.last_verified}" if generation.last_verified else ""
+
+        if status == "sent":
+            summary = f"资料已直接转发到聊天（{packs} 包 / {images} 张图）。"
+            if as_of:
+                summary += f"{as_of}。"
+            if stale_note:
+                summary += stale_note
+            return self._what_result(
+                success=True,
+                content=f"{summary}用户已经可以看到完整答案，你不需要也不应该再调用 reply 工具，"
+                "也不必重新查询或重试，本轮无需再回复。",
+                stop=True,
+            )
+
+        if status == "nothing":
+            if send_problem:
+                # 媒体全挂：交付层按「合法结论」形态回 nothing，但 success=False 且
+                # images_failed>0 —— 这不是「没查到」，不能发长句、更不能停轮。
+                return await self._what_send_fail_result(
+                    report, stream_id, default_error="资料未能发送"
+                )
+            phrase = _WORD_MISS if result.status == "not_found" else str(
+                getattr(report, "user_text", "") or result.message or _WORD_MISS
+            )
+            delivered = await self._what_notice(phrase, stream_id)
+            if not delivered:
+                return self._what_result(
+                    success=False,
+                    error="提示发送失败（未送达，未重发）",
+                    content=phrase,
+                )
+            return self._what_result(
+                success=True,
+                content=f"已向聊天发送提示（{phrase}）。用户已经看到结论，本轮无需再回复。",
+                stop=True,
+            )
+
+        if status == "partial":
+            await self._what_notice(_WORD_PARTIAL, stream_id)
+            reasons = getattr(report, "skipped_reasons", None) or []
+            detail = f"；未发原因: {'; '.join(str(r) for r in reasons[:3])}" if reasons else ""
+            return self._what_result(
+                success=True,
+                content=f"部分已发（{packs} 包 / {images} 张图，{failed_images} 张明确未发{detail}）。"
+                "尚未发完的内容由你决定是否补话，本轮不自动停。",
+            )
+
+        if status == "unknown":
+            await self._what_notice(_WORD_UNKNOWN, stream_id)
+            return self._what_result(
+                success=False,
+                error=str(getattr(report, "error", "") or "交付层返回送达未知"),
+                content=f"{_WORD_UNKNOWN}：已发出部分未确认，不要重发或重试查询。",
+            )
+
+        # failed：发送前就明确失败（未命中已在 nothing 分支）。交付层的 user_text 在这里
+        # 可能把「计划无效」写成「读取失败」，与真实原因不符，故不当作用户短语。
+        # 图片明确一张都没发出去（images_failed>0）时与 nothing 分支同口径：WHAT 直发
+        # 「发送失败」，回执 success=False、不停轮。images_failed=0 的失败（计划无效等
+        # 非交付尝试失败）保持只回 planner，不打扰群。
+        if failed_images > 0:
+            return await self._what_send_fail_result(
+                report, stream_id, default_error="资料交付失败"
+            )
+        return self._what_result(
+            success=False,
+            error=str(getattr(report, "error", "") or "资料交付失败"),
+            content="",
+        )
+
     def _team_code_node(self, index: Dict[str, Any], element: str) -> Optional[dict]:
         """取某属性页的队伍码合并转发文本节点；页无码（如未开攻略）返回 None。"""
         codes = (index.get("pages") or {}).get(element, {}).get("team_codes") or []
@@ -1366,27 +1980,165 @@ class StellaSoraPlugin(MaiBotPlugin):
         permission="operator",
     )
     async def handle_update(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, int]:
-        """/st_update 入口（1.5.0）：鉴权 → 提前登记在飞闸门 → 后台执行。
+        """/st_update 入口：鉴权 → 按路登记在飞闸门 → 后台执行。
 
-        闸门登记**先于** await 发送进度消息（审查修复：旧实现登记在 await 之后，
-        连发两调用可能同时通过）。全程可超宿主组件 RPC 60s 超时，必须 create_task
-        后台化；返回拦截等级 2 使触发消息不进 planner。_update_task 兼作任务强引用。
+        闸门登记**先于** await 发送进度消息（旧实现登记在 await 之后，连发两调用
+        可能同时通过）。全程可超宿主组件 RPC 60s 超时，必须 create_task 后台化；
+        返回拦截等级 2 使触发消息不进 planner。两个任务句柄兼作强引用。
+
+        两路独立受理：原三路（攻略探查 + 两榜）与资料同步各有句柄。原三路在飞而
+        资料同步空闲时，重复触发只启动资料同步（不重开抓两榜）；两路都在飞才整单
+        拒绝——与 1.5.2 前的单任务语义保持一致（`[what]` 关闭时行为完全不变）。
         """
         if not await self._platform_allowed(**kwargs):
             return False, "该平台暂不支持星塔旅人更新指令。", 1
         if self._denied(**kwargs):
             return False, "当前聊天无权限执行星塔旅人更新指令。", 1
 
-        if self._update_task is not None and not self._update_task.done():
+        routes_busy = self._update_task is not None and not self._update_task.done()
+        what_busy = self._what_update_task is not None and not self._what_update_task.done()
+        what_wanted = self._what_enabled()
+        if routes_busy and (what_busy or not what_wanted):
             return False, "已有更新任务进行中，请稍候。", 1
 
         effective_stream_id = stream_id or self._resolve_stream_id(kwargs)
-        # 闸门先行：登记任务句柄后再 await 发送（防连发竞态双写数据）
-        self._update_task = asyncio.create_task(self._run_full_update(effective_stream_id))
-        await self._send_update_msg(
-            "正在后台更新星塔旅人数据（强刷两榜 + 探查攻略源）...", effective_stream_id
+        started_routes = False
+        started_what = False
+        if not routes_busy:
+            # 本次三路的短探查闸门：WHAT 长批先等它放行，避免长批独占同一 GameKee 主机预算
+            self._what_probe_gate = asyncio.Event()
+            self._update_task = asyncio.create_task(self._run_full_update(effective_stream_id))
+            started_routes = True
+        if what_wanted and not what_busy:
+            gate = self._what_probe_gate
+            if gate is None:
+                # 三路不在飞（上一次已跑完）：没有探查可等，长批直接放行
+                gate = asyncio.Event()
+                gate.set()
+                self._what_probe_gate = gate
+            if self._what_update_stop.is_set():
+                # 上一轮被关闭/卸载取消过：新任务必须有全新的取消信号
+                self._what_update_stop = threading.Event()
+            self._what_update_task = asyncio.create_task(
+                self._run_what_update(effective_stream_id, gate)
+            )
+            started_what = True
+
+        if routes_busy:
+            note = (
+                f"已有更新任务进行中；已开始资料库同步（{self._what_progress_text()}）。"
+                if started_what
+                else "已有更新任务进行中，请稍候。"
+            )
+        elif started_what:
+            note = "正在后台更新星塔旅人数据（强刷两榜 + 探查攻略源）；资料库在后台同步。"
+        elif what_busy:
+            note = (
+                "正在后台更新星塔旅人数据（强刷两榜 + 探查攻略源）；"
+                f"资料库同步进行中（{self._what_progress_text()}）。"
+            )
+        else:
+            note = "正在后台更新星塔旅人数据（强刷两榜 + 探查攻略源）..."
+        await self._send_update_msg(note, effective_stream_id)
+        summary = "已启动星塔旅人数据更新" if started_routes else "已启动资料库同步"
+        return True, summary, 2
+
+    def _what_progress_text(self) -> str:
+        """在飞资料同步的进度短句（重复触发时回报当前阶段，不启动第二份）。"""
+        progress = self._what_update_progress or {}
+        stage = str(progress.get("stage") or "")
+        done, total = progress.get("done"), progress.get("total")
+        stage_cn = {
+            "tree": "目录", "list": "清单", "detail": "详情",
+            "build": "建库", "verify": "校验", "publish": "发布",
+        }.get(stage, stage or "准备中")
+        if isinstance(total, int) and total > 0 and isinstance(done, int):
+            return f"{stage_cn} {done}/{total}"
+        return stage_cn
+
+    async def _run_what_update(self, stream_id: str, gate: asyncio.Event) -> None:
+        """资料同步后台体：等短探查闸门 → 线程内刷新 → 单独终报（不等原三路）。"""
+        stop_event = self._what_update_stop
+        self._what_update_progress.clear()
+        try:
+            await gate.wait()
+            if stop_event.is_set():
+                self.ctx.logger.info("资料同步未开工即被取消（开关关闭/卸载）")
+                return
+            report = await asyncio.to_thread(self._what_update_sync, stop_event)
+        except asyncio.CancelledError:
+            # 取消只是让协程退出；worker 线程靠取消信号收敛，不在这里重写状态
+            self.ctx.logger.info("资料同步任务被取消（worker 依取消信号收敛）")
+            raise
+        except Exception as exc:
+            self.ctx.logger.exception("资料同步异常: %s", exc)
+            # QQ 只报「更新失败 + 旧库状态」这一层；异常类型与栈留在日志与回执里
+            await self._send_update_msg(
+                "资料库同步失败（更新失败）；错误详情见日志。", stream_id
+            )
+            return
+        self.ctx.logger.info("资料同步结果: %s", getattr(report, "status", "?"))
+        if str(getattr(report, "status", "")) != "published":
+            self.ctx.logger.warning(
+                "资料同步未发布: stage=%s done=%s/%s code=%s error=%s reasons=%s",
+                getattr(report, "stage", ""), getattr(report, "done", 0), getattr(report, "total", 0),
+                getattr(report, "error_code", ""), getattr(report, "error", ""),
+                _what_reason_text(getattr(report, "reasons", None) or []),
+            )
+        await self._send_update_msg(self._what_update_report_text(report), stream_id)
+
+    def _what_update_sync(self, stop_event: threading.Event) -> Any:
+        """刷新同步体（只在 to_thread 内跑）：库模块自己单写备库并原子切指针。"""
+        import what_library
+
+        library = what_library.WhatLibrary(self._what_root())
+        return library.refresh(
+            should_stop=stop_event.is_set,
+            progress=self._what_progress_sink,
         )
-        return True, "已启动星塔旅人数据更新", 2
+
+    def _what_progress_sink(self, payload: Dict[str, Any]) -> None:
+        """worker 线程的进度回调：只留最新一份（不得在此 await 或做 IO）。"""
+        if isinstance(payload, dict):
+            self._what_update_progress.update(payload)
+
+    @staticmethod
+    def _what_update_report_text(report: Any) -> str:
+        """资料同步终报：成功给增量与发布时间；失败只给阶段、已完成数与旧库状态。
+
+        错误码与逐条原因不进 QQ（技术细节留日志）：群里的读者只需要知道
+        「更新失败、旧库还在、截至何时」这三件事。
+        """
+        status = str(getattr(report, "status", "") or "failed")
+        stage = str(getattr(report, "stage", "") or "")
+        done, total = getattr(report, "done", None), getattr(report, "total", None)
+        stage_cn = {
+            "tree": "目录", "list": "清单", "detail": "详情", "build": "建库",
+            "verify": "校验", "publish": "发布", "cancel": "收尾",
+        }.get(stage, stage or "未知阶段")
+        position = f"已完成 {done}/{total}" if isinstance(done, int) and isinstance(total, int) else f"停在{stage_cn}阶段"
+        old_ready = bool(getattr(report, "old_generation_ready", False))
+        previous_verified = getattr(report, "previous_last_verified", None)
+        fallback = (
+            "旧库仍为上次发布版本" if old_ready else "首次建库尚未完成"
+        ) + (f"（资料截至 {previous_verified}）" if previous_verified else "")
+
+        if status == "published":
+            lines = [
+                "资料库同步完成：",
+                f"· 新增 {getattr(report, 'added', 0)} / 重抓 {getattr(report, 'refetched', 0)}"
+                f" / 复用 {getattr(report, 'reused', 0)} / 移除 {getattr(report, 'removed', 0)}",
+            ]
+            if getattr(report, "generation", None):
+                lines.append(f"· 发布代：{report.generation}")
+            if getattr(report, "last_verified", None):
+                lines.append(f"· 资料截至 {report.last_verified}")
+            return "\n".join(lines)
+        if status == "cancelled":
+            return f"资料库同步已取消（{position}）；{fallback}"
+        return f"资料库同步失败（{stage_cn}阶段，{position}）；{fallback}"
+
+
 
     async def _send_update_msg(self, text: str, stream_id: str) -> None:
         """向触发流发送更新进度消息；失败仅告警（进度丢失不影响更新本身）。"""
@@ -1398,7 +2150,18 @@ class StellaSoraPlugin(MaiBotPlugin):
             self.ctx.logger.warning("发送更新进度消息异常: %s", exc)
 
     async def _run_full_update(self, stream_id: str) -> None:
-        """/st_update 后台全流程（1.5.0）：强刷两榜 + GameKee 探查 + 重置每日计时。
+        """/st_update 后台三路：闸门兜底放行后进入实体，异常不把资料长批挂死。"""
+        gate = self._what_probe_gate or asyncio.Event()
+        self._what_probe_gate = gate
+        try:
+            await self._run_routes_update(stream_id, gate)
+        finally:
+            # 探查段之后还有榜单/报告，任何异常或取消都必须放行：否则 WHAT 长批
+            # 会一直等到卸载，等于把资料同步永久挂住（闸门 set 幂等，重复无副作用）
+            gate.set()
+
+    async def _run_routes_update(self, stream_id: str, gate: asyncio.Event) -> None:
+        """原有三路实体（1.5.0 语义不变）：探查 → 两榜 → 三路独立报告。
 
         不再 reload 插件：字典（唯一进程单例）已删，榜单/索引数据落盘即时生效
         （裁决 e）。三路结果独立报告（K 节断言：一榜失败不吞另一榜与探查）。
@@ -1417,6 +2180,9 @@ class StellaSoraPlugin(MaiBotPlugin):
             probe_summary = f"索引已更新（{chars} 小节），每日探查计时已重置"
         except GameKeeProbeFailure as exc:
             probe_summary = f"探查失败（{str(exc)[:80]}），每日探查计时未重置"
+        finally:
+            # 探查段一结束就放行（不等到两榜/报告）：短探查优先，长批不独占请求预算
+            gate.set()
         # 探查失败后若接管取消了后台排程，恢复一个唤醒任务（P2 排程恢复规则）
         self._reschedule_after_manual_probe()
 

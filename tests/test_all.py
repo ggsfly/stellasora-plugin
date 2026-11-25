@@ -817,10 +817,11 @@ async def run_direct_send() -> None:
     llm, send = ctx.llm, ctx.send
     qq_kwargs = {"platform": "qq"}
 
-    # G1 命中单角色：统一合并转发单节点（图段+备注段）+ stop 指引
+    # G1 命中单角色：统一合并转发单节点（图段+备注段）+ 确实终止本轮（无无效工具指引）
     r = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g1", **qq_kwargs)
-    check("G1 命中单角色统一合并转发（图段+备注段+stop指引）",
-          "已直接发送" in str(r.get("content", "")) and "stop 工具" in str(r.get("content", ""))
+    check("G1 命中单角色统一合并转发（图段+备注段+确实终止）",
+          "已直接发送" in str(r.get("content", "")) and r.get("stop_after_execution") is True
+          and "stop" not in str(r.get("content", "")).lower()
           and len(send.forwarded) == 1 and send.forwarded[0][0] == "stream_g1",
           str(r.get("content", ""))[:60])
     node = send.forwarded[0][1][0]
@@ -887,11 +888,12 @@ async def run_direct_send() -> None:
     # G5 未收录：明确提示不发送图片
     n_sent, n_fwd = len(send.sent), len(send.forwarded)
     r5 = await p.handle_how(query="不存在的角色XYZ", group_id="g1", stream_id="stream_g5", **qq_kwargs)
-    check("G5 未收录明确提示（不发送图片+stop指引）",
+    check("G5 未收录明确提示（不发送图片+确实终止，无无效工具指引）",
           len(send.sent) == n_sent + 1 and "没有" in send.sent[-1][1]
           and len(send.forwarded) == n_fwd
           and "已向聊天发送" in str(r5.get("content", ""))
-          and "stop 工具" in str(r5.get("content", "")))
+          and r5.get("stop_after_execution") is True
+          and "stop" not in str(r5.get("content", "")).lower())
 
     # G6 索引不可用（无快照+探查失败）：明确提示
     def boom_build(proxy_url=None):
@@ -1232,7 +1234,12 @@ async def run_direct_send() -> None:
 
     p.config.how.source = "bili"
     saved_send = ctx.send
+    saved_fetch = plug.bili_fetch_guide_images
     ctx.send = BoomForwardSend()
+    # 本用例只测 forward 异常这一层：抓图仍用本节的 fake_bili_fetch（写假 webp），
+    # 否则会真的去 B 站取 opus 图片，被网络审计拦下后错误变成「图片全部抓取失败」，
+    # 断言永远等不到 adapter exploded。
+    plug.bili_fetch_guide_images = fake_bili_fetch
     try:
         r20 = await p.handle_how(query="艾蕾攻略", group_id="g1", stream_id="stream_g20", **qq_kwargs)
         check("G20 forward 异常明确失败（success=False + error，不冒充成功）",
@@ -1240,6 +1247,7 @@ async def run_direct_send() -> None:
               f"success={r20.get('success')} err={str(r20.get('error'))[:50]}")
     finally:
         ctx.send = saved_send
+        plug.bili_fetch_guide_images = saved_fetch
 
     # G21 权限拒绝 → 零猫猫球 I/O（连清单都不读、不发任何抓取）
     bili_calls.clear()
